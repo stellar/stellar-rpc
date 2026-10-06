@@ -189,10 +189,10 @@ The pack and the index are **separate storage roots**. They are read
 completely differently — the pack is streamed sequentially and holds
 almost all of the bytes, while `index.pack` is probed at random — so a
 deployment can put the index on storage with the IOPS to serve those
-probes without moving the pack's terabytes with it. The index root also
-takes the build's scratch: the runs an index build spills
-(`{chunk}-index.runs/`) are written there and read back three times at
-finalize. The two roots default to siblings:
+probes without moving the pack's terabytes with it. The runs an index
+build spills (`{chunk}-index.runs/`) are written under the hot root's
+`scratch/` directory and read back three times at finalize. The two roots
+default to siblings:
 
 ```
 events/
@@ -210,7 +210,6 @@ events/
     │   ├── 00000000-index.pack
     │   ├── 00000001-index.hash
     │   ├── 00000001-index.pack
-    │   ├── 00000002-index.runs/   (while chunk 2's index is being built)
     │   ...
     ├── 00001/
     │   ...
@@ -393,7 +392,7 @@ When populating cold segments from historical ledger data, the system writes col
 For each segment (10,000 ledgers):
 1. For each ledger:
    a. Append events to events.pack (record compression is handled internally by the packfile library).
-   b. Add the event's terms to the in-memory slab; when the next slab starts, write the slab's terms as one sorted run under `{chunk}-index.runs/` beside the index files.
+   b. Add the event's terms to the in-memory slab; when the next slab starts, write the slab's terms as one sorted run under `{chunk}-index.runs/` in the hot root's `scratch/` directory.
    c. Update in-memory ledger offset array.
 
 2. At segment completion (10,000 ledgers):

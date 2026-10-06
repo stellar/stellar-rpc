@@ -500,8 +500,8 @@ func TestRoots_AllDistinct(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig))
 	require.NoError(t, err)
 	roots := cfg.ResolvePaths().Roots()
-	// Meta store + five immutable trees + hot storage = seven roots. The
-	// events pack and its index are separate trees so a deployment can put
+	// Meta store + five immutable trees + hot storage = seven roots.
+	// The events pack and its index are separate trees so a deployment can put
 	// the randomly-probed index on faster storage than the bulk pack.
 	require.Len(t, roots, 7)
 	assert.NotContains(t, roots, "/data", "the data dir parent is not itself a root")

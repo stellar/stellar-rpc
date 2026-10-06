@@ -15,15 +15,17 @@ import (
 //
 //	{root}/
 //	├── catalog/rocksdb/
-//	├── hot/{chunk:08d}/
+//	├── hot/
+//	│   ├── {chunk:08d}/                                      (per-chunk hot RocksDB)
+//	│   ├── txhash-index-{window:08d}/{lo:08d}-{hi:08d}.idx  (the window still being rebuilt)
+//	│   └── scratch/{chunk:08d}-index.runs/                   (while a chunk's events index is built)
 //	├── ledgers/{bucket:05d}/{chunk:08d}.pack
 //	├── events/
 //	│   ├── data/{bucket:05d}/{chunk:08d}-events.pack
 //	│   └── index/{bucket:05d}/{chunk:08d}-index.pack (+ -index.hash)
-//	│       (+ {chunk:08d}-index.runs/ while the chunk's events index is being built)
 //	└── txhash/
 //	    ├── raw/{bucket:05d}/{chunk:08d}.bin
-//	    └── index/{idx:08d}/{lo:08d}-{hi:08d}.idx
+//	    └── index/{idx:08d}/{lo:08d}-{hi:08d}.idx  (terminal windows)
 //
 // Each root is independently settable (NewLayoutFromRoots) for the [storage]
 // path overrides. Bucket ids never appear in meta-store keys.
@@ -35,6 +37,7 @@ type Layout struct {
 	eventsIndexRoot string
 	txhashRawRoot   string
 	txhashIndexRoot string
+	txhash          TxHashIndexLayout
 }
 
 // NewLayout is the no-override deployment: NewLayoutFromRoots of the per-tree
@@ -48,6 +51,7 @@ func NewLayout(root string) Layout {
 		eventsIndexRoot: filepath.Join(root, "events", "index"),
 		txhashRawRoot:   filepath.Join(root, "txhash", "raw"),
 		txhashIndexRoot: filepath.Join(root, "txhash", "index"),
+		txhash:          TxHashIndexLayout{cpi: ChunksPerTxhashIndex},
 	}
 }
 
@@ -67,13 +71,25 @@ func NewLayoutFromRoots(
 		eventsIndexRoot: eventsIndexRoot,
 		txhashRawRoot:   txhashRawRoot,
 		txhashIndexRoot: txhashIndexRoot,
+		txhash:          TxHashIndexLayout{cpi: ChunksPerTxhashIndex},
 	}
 }
+
+// WithTxHashIndex returns the layout with another tx-hash index width, which
+// decides where a window's index lives (TxHashIndexDir).
+func (l Layout) WithTxHashIndex(t TxHashIndexLayout) Layout {
+	l.txhash = t
+	return l
+}
+
+// TxHashIndex is the tx-hash index arithmetic the layout was built with.
+func (l Layout) TxHashIndex() TxHashIndexLayout { return l.txhash }
 
 // CatalogPath is the meta-store RocksDB directory.
 func (l Layout) CatalogPath() string { return l.catalogRoot }
 
-// HotRoot holds the per-chunk hot RocksDB dirs.
+// HotRoot is the local tier: the per-chunk hot RocksDB dirs, the index of
+// the window still being rebuilt, and the builds' scratch.
 func (l Layout) HotRoot() string { return l.hotRoot }
 
 // HotChunkPath is a chunk's hot RocksDB dir.
@@ -111,11 +127,12 @@ func (l Layout) EventsIndexBucketDir(c chunk.ID) string {
 	return filepath.Join(l.eventsIndexRoot, c.BucketID())
 }
 
-// EventsColdDirs is the pair of directories a chunk's events artifacts live
-// in. Readers take the pair, so no caller composes it by hand and none can
-// pick up one root while missing the other.
+// EventsColdDirs are the directories a chunk's events artifacts live in and
+// the one its index build spills under. Readers take the struct, so no
+// caller composes it by hand and none can pick up one root while missing
+// another.
 func (l Layout) EventsColdDirs(c chunk.ID) event.ColdDirs {
-	return event.ColdDirs{Data: l.EventsBucketDir(c), Index: l.EventsIndexBucketDir(c)}
+	return event.ColdDirs{Data: l.EventsBucketDir(c), Index: l.EventsIndexBucketDir(c), Scratch: l.scratchDir()}
 }
 
 // EventsPaths are a chunk's three events cold-segment files, which span the
@@ -138,7 +155,7 @@ func (l Layout) ScratchPaths(c chunk.ID, kind Kind) []string {
 	if kind != KindEvents {
 		return nil
 	}
-	return []string{filepath.Join(l.EventsIndexBucketDir(c), event.IndexRunsDirName(c))}
+	return []string{filepath.Join(l.scratchDir(), event.IndexRunsDirName(c))}
 }
 
 // TxHashBinPath is a chunk's raw txhash run. Leaf owned by txhash.ColdBinName.
@@ -161,19 +178,26 @@ func (l Layout) EventsRoot() string { return l.eventsRoot }
 // coldDir/<dataType> layout.
 func (l Layout) TxHashRawRoot() string { return l.txhashRawRoot }
 
-// TxHashIndexRoot is the root TxHashIndexDir composes under.
+// TxHashIndexRoot is the root terminal indexes live under.
 func (l Layout) TxHashIndexRoot() string { return l.txhashIndexRoot }
 
-// TxHashIndexDir is one index's directory.
-func (l Layout) TxHashIndexDir(w TxHashIndexID) string {
-	return filepath.Join(l.txhashIndexRoot, w.String())
+// TxHashIndexDir is a coverage's directory. A terminal index is a cold
+// artifact under the txhash index root. The index of a window still being
+// rebuilt at every boundary lives with the hot tier, one directory under the
+// hot root beside the chunk DBs, so each rewrite lands there and not under a
+// cold root.
+func (l Layout) TxHashIndexDir(cov TxHashIndexCoverage) string {
+	if l.txhash.IsTerminalCoverage(cov) {
+		return filepath.Join(l.txhashIndexRoot, cov.Index.String())
+	}
+	return filepath.Join(l.hotRoot, "txhash-index-"+cov.Index.String())
 }
 
 // TxHashIndexFilePath derives the .idx name from a coverage: lo-hi names the range it
 // covers.
 func (l Layout) TxHashIndexFilePath(cov TxHashIndexCoverage) string {
 	name := cov.Lo.String() + "-" + cov.Hi.String() + ".idx"
-	return filepath.Join(l.TxHashIndexDir(cov.Index), name)
+	return filepath.Join(l.TxHashIndexDir(cov), name)
 }
 
 // ArtifactPaths is the single (chunk, kind)->files map, so the sweep and the
@@ -190,3 +214,6 @@ func (l Layout) ArtifactPaths(c chunk.ID, kind Kind) []string {
 		return nil
 	}
 }
+
+// scratchDir is where builds keep what they remove before their key flips.
+func (l Layout) scratchDir() string { return filepath.Join(l.hotRoot, "scratch") }
