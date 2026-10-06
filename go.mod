@@ -25,7 +25,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go-stellar-sdk v0.7.4-0.20261006173851-ef998b0d14a3
+	github.com/stellar/go-stellar-sdk v0.7.4-0.20261006195330-7906df02a83f
 	github.com/stellar/streamhash v0.1.1-0.20260826155856-77556799545b
 	github.com/stretchr/testify v1.12.1
 )
@@ -34,7 +34,7 @@ require (
 	github.com/dchest/siphash v1.2.3
 	github.com/mattn/go-sqlite3 v1.14.17
 	github.com/rubenv/sql-migrate v1.5.2
-	github.com/stellar-experimental/jrpc2 v0.0.0-20261006155236-314cc34fb17a
+	github.com/stellar-experimental/jrpc2 v0.0.0-20261006194504-10b31695dcff
 	go.uber.org/goleak v1.3.0
 )
 
