@@ -50,7 +50,7 @@ import (
 // Layout: {events_root}/{bucketID:05d}/{chunkID:08d}-events.pack and
 // {events_index_root}/{bucketID:05d}/{chunkID:08d}-index.pack (and
 // -index.hash). The two roots are distinct, so a chunk's three files
-// are not in one directory. ColdDirs carries the pair.
+// are not in one directory. ColdDirs carries the directories.
 //
 // Bucket path composition is the orchestrator's job — this package
 // takes bucket directories and composes the per-chunk filename via

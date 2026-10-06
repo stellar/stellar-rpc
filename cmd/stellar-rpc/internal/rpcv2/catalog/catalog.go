@@ -27,25 +27,22 @@ import (
 // concurrency guard: the design's Concurrency model guarantees one writer per
 // key (see the header note in catalog_protocol.go).
 type Catalog struct {
-	store       *rocksdb.Store
-	logger      *supportlog.Entry
-	layout      geometry.Layout
-	txhashIndex geometry.TxHashIndexLayout
-	secret      [32]byte // cold-index secret, minted once at Open then read-only
+	store  *rocksdb.Store
+	logger *supportlog.Entry
+	layout geometry.Layout
+	secret [32]byte // cold-index secret, minted once at Open then read-only
 }
 
 // Open opens the catalog's backing KV store at path (created if absent) and
-// binds the catalog to it, the on-disk layout, and the tx-hash-index
-// arithmetic. path and logger are required (rocksdb.New validates both). The
-// catalog owns the store: Close releases it.
-func Open(
-	path string, layout geometry.Layout, txhashIndex geometry.TxHashIndexLayout, logger *supportlog.Entry,
-) (*Catalog, error) {
+// binds the catalog to it and the on-disk layout, whose tx-hash index
+// arithmetic it uses. path and logger are required (rocksdb.New validates
+// both). The catalog owns the store: Close releases it.
+func Open(path string, layout geometry.Layout, logger *supportlog.Entry) (*Catalog, error) {
 	store, err := rocksdb.New(rocksdb.Config{Path: path, Logger: logger})
 	if err != nil {
 		return nil, err
 	}
-	c := &Catalog{store: store, logger: logger, layout: layout, txhashIndex: txhashIndex}
+	c := &Catalog{store: store, logger: logger, layout: layout}
 	// Census before the secret mint below: a catalog holding entries outside
 	// this binary's vocabulary (a newer binary's formats, or corruption) is
 	// refused here, so Open writes no catalog entry of its own into a tree it
@@ -116,7 +113,7 @@ func (c *Catalog) Logger() *supportlog.Entry { return c.logger }
 
 func (c *Catalog) Layout() geometry.Layout { return c.layout }
 
-func (c *Catalog) TxHashIndexLayout() geometry.TxHashIndexLayout { return c.txhashIndex }
+func (c *Catalog) TxHashIndexLayout() geometry.TxHashIndexLayout { return c.layout.TxHashIndex() }
 
 // ---------------------------------------------------------------------------
 // Typed artifact-state accessors.
@@ -244,7 +241,7 @@ func (c *Catalog) FrozenIndexCoversRange(w geometry.TxHashIndexID, lo, hi chunk.
 // window is the only one that can cover it — the degenerate single-chunk case of
 // FrozenIndexCoversRange.
 func (c *Catalog) FrozenIndexCovers(ch chunk.ID) (bool, error) {
-	return c.FrozenIndexCoversRange(c.txhashIndex.TxHashIndexID(ch), ch, ch)
+	return c.FrozenIndexCoversRange(c.TxHashIndexLayout().TxHashIndexID(ch), ch, ch)
 }
 
 // ---------------------------------------------------------------------------
