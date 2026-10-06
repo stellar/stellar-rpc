@@ -115,7 +115,7 @@ func (c *Catalog) CommitTxHashIndex(cov geometry.TxHashIndexCoverage) error {
 	}
 
 	var txhashKeys []string
-	if c.txhashIndex.IsTerminalCoverage(cov) {
+	if c.TxHashIndexLayout().IsTerminalCoverage(cov) {
 		txhashKeys, err = c.txhashIndexChunkKeysPresent(cov.Lo, cov.Hi)
 		if err != nil {
 			return err

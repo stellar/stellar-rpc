@@ -37,9 +37,9 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 
 // ColdIndexBuilder builds a chunk's index.hash and index.pack from its
 // postings with bounded memory. One slab of postings is in memory; it is
-// written as a run in a directory beside the index files when the next
-// slab starts or the buffer fills, and Write merges the runs. Both cold
-// backfill and the live-chunk freeze feed it single-threaded, re-deriving
+// written as a run under the scratch directory when the next slab starts
+// or the buffer fills, and Write merges the runs. Both cold backfill and
+// the live-chunk freeze feed it single-threaded, re-deriving
 // terms from raw LCMs with TermsForBytes. The directory is the chunk's, so
 // one builder works on a chunk at a time, which the backfill plan
 // guarantees: it builds a chunk once per pass.
@@ -55,14 +55,14 @@ type ColdIndexBuilder struct {
 }
 
 // NewColdIndexBuilder returns a builder that writes chunkID's index into
-// bucketDir, the chunk's INDEX bucket directory (ColdDirs.Index), which must
-// exist. secret is the chunk's deterministic routing secret (ColdIndexSecret).
-func NewColdIndexBuilder(chunkID chunk.ID, bucketDir string, secret [stores.SecretLen]byte) *ColdIndexBuilder {
+// dirs.Index, which must exist, with its runs under dirs.Scratch. secret is
+// the chunk's deterministic routing secret (ColdIndexSecret).
+func NewColdIndexBuilder(chunkID chunk.ID, dirs ColdDirs, secret [stores.SecretLen]byte) *ColdIndexBuilder {
 	return &ColdIndexBuilder{
 		chunkID: chunkID,
-		dir:     bucketDir,
+		dir:     dirs.Index,
 		secret:  secret,
-		runs:    coldRuns{dir: filepath.Join(bucketDir, IndexRunsDirName(chunkID))},
+		runs:    coldRuns{dir: filepath.Join(dirs.Scratch, IndexRunsDirName(chunkID))},
 		live:    newHotSlab(0),
 	}
 }
