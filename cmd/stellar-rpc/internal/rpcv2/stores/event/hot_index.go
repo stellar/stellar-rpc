@@ -69,6 +69,12 @@ func newHotSlab(slab uint32) *hotSlab {
 	}
 }
 
+// reset empties the slab for another slab number. No reader may hold it.
+func (s *hotSlab) reset(slab uint32) {
+	s.slab, s.n = slab, 0
+	clear(s.heads)
+}
+
 // bucketOf is k's hash bucket, its leading 16 bits.
 func bucketOf(k TermKey) int { return int(binary.BigEndian.Uint16(k[:])) }
 

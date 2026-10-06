@@ -27,7 +27,7 @@ import (
 // Contract: finalize must NOT be called after a failed ingest — once any ingest
 // errors, the chunk is abandoned via close and retried from scratch. A writer
 // may have committed partial per-ledger state before the error (the events
-// writer's mirror/pack run ahead of its offsets commit point), so a
+// writer's index/pack run ahead of its offsets commit point), so a
 // post-failure finalize could publish an inconsistent artifact; eventsCold
 // latches the failure and refuses.
 type coldChunk struct {
