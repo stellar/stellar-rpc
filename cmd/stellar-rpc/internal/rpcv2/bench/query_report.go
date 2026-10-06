@@ -205,6 +205,9 @@ func (s scenarioSummary) latencyMetrics(outcome string) []benchMetric {
 // queryReport collects scenarios in run order and writes the query report. It
 // keeps only aggregated rows and counts. It is not safe for concurrent use.
 type queryReport struct {
+	// tier is the subcommand, queryTierCold or queryTierHot, that bench.txt
+	// names.
+	tier      string
 	scenarios []scenarioSummary
 }
 
@@ -217,8 +220,8 @@ func (q *queryReport) add(s scenarioReport) scenarioSummary {
 	return sum
 }
 
-// write writes latency.csv, scenarios.csv and bench.txt under outDir and
-// returns the files it wrote. It writes nothing when no scenario was added.
+// write writes latency.csv and scenarios.csv under outDir and returns the
+// files it wrote. It writes nothing when no scenario was added.
 func (q *queryReport) write(outDir string) ([]string, error) {
 	if len(q.scenarios) == 0 {
 		return nil, nil
@@ -271,11 +274,17 @@ func (q *queryReport) write(outDir string) ([]string, error) {
 		}
 		written = append(written, path)
 	}
+	return written, nil
+}
+
+// writeBench writes bench.txt under outDir and returns its path. Call it only
+// for a run that succeeded.
+func (q *queryReport) writeBench(outDir string) (string, error) {
 	path := filepath.Join(outDir, queryBenchFile)
 	if err := writeTextFile(path, q.benchText(runtime.GOOS, runtime.GOARCH)); err != nil {
-		return written, err
+		return "", err
 	}
-	return append(written, path), nil
+	return path, nil
 }
 
 // benchText renders bench.txt: the scenarios in Go benchmark format, for
@@ -288,17 +297,13 @@ func (q *queryReport) benchText(goos, goarch string) string {
 		if res.planned == 0 {
 			continue
 		}
-		name := "BenchmarkQuery/type=" + sc.queryType + "/rps=" + formatRPS(sc.targetRPS)
-		counts := []benchMetric{
-			{formatRPS(sc.achievedRPS()), "achieved-rps"},
-			{strconv.Itoa(res.measured.dropped), "dropped"},
-			{strconv.Itoa(res.measured.failed), "failed"},
-		}
+		name := "BenchmarkQuery/tier=" + q.tier + "/type=" + sc.queryType + "/rps=" + formatRPS(sc.targetRPS)
+		dropped := benchMetric{strconv.Itoa(res.measured.dropped), "dropped"}
 		if _, ok := sc.aggregated(metricLatency); !ok {
-			writeBenchLine(&b, name, res.planned, counts)
+			writeBenchLine(&b, name, res.planned, []benchMetric{dropped})
 			continue
 		}
-		writeBenchLine(&b, name, sc.succeeded, append(sc.latencyMetrics(outcomeLabelAll), counts...))
+		writeBenchLine(&b, name, sc.succeeded, append(sc.latencyMetrics(outcomeLabelAll), dropped))
 		for _, r := range sc.latency {
 			if r.metric == metricLatency && r.outcome != outcomeLabelAll {
 				writeBenchLine(&b, name+"/outcome="+r.outcome, r.agg.n, sc.latencyMetrics(r.outcome))

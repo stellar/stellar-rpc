@@ -145,11 +145,12 @@ func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan)
 }
 
 // runQueryBench is the body both subcommands share: open the dataset, run the
-// scenarios, write the report. The open time goes into setupNs.storeOpen. A
-// failure after the dataset opens still writes the scenarios added so far,
-// logged as PARTIAL.
+// scenarios, write the report. tier is the subcommand that bench.txt names.
+// The open time goes into setupNs.storeOpen. A failure after the dataset opens
+// still writes the CSVs of the scenarios added so far, logged as PARTIAL, and
+// no bench.txt.
 func runQueryBench(
-	ctx context.Context, logger *supportlog.Entry, env runEnv, p queryPlan,
+	ctx context.Context, logger *supportlog.Entry, env runEnv, tier string, p queryPlan,
 	open func() (*queryDataset, func(), error),
 ) error {
 	start := time.Now()
@@ -162,7 +163,7 @@ func runQueryBench(
 	logger.Infof("serving ledgers [%d, %d] over %d chunk(s)", ds.FirstLedger, ds.LastLedger, len(ds.Chunks))
 	warnFixedReadRange(logger, ds, p)
 
-	report := &queryReport{}
+	report := &queryReport{tier: tier}
 	run := &queryRun{logger: logger, ds: ds, plan: p, report: report, clock: timerClock{}}
 	runErr := run.scenarios(ctx)
 	written, err := report.write(env.OutDir)
@@ -178,6 +179,13 @@ func runQueryBench(
 	}
 	if err != nil {
 		return err
+	}
+	if len(written) > 0 {
+		path, err := report.writeBench(env.OutDir)
+		if err != nil {
+			return err
+		}
+		written = append(written, path)
 	}
 	report.logSummary(logger)
 	logger.Infof("wrote %d report files to %s", len(written), env.OutDir)

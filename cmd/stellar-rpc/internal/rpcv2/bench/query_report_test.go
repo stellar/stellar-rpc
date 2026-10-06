@@ -94,7 +94,6 @@ func TestQueryReportLatencyRows(t *testing.T) {
 	assert.Equal(t, []string{
 		filepath.Join(outDir, queryLatencyFile),
 		filepath.Join(outDir, queryScenariosFile),
-		filepath.Join(outDir, queryBenchFile),
 	}, written)
 
 	header, rows := readCSVTable(t, filepath.Join(outDir, queryLatencyFile))
@@ -272,9 +271,11 @@ func TestQueryReportAllDropped(t *testing.T) {
 }
 
 // TestQueryReportBenchText: bench.txt has one Go benchmark line per scenario
-// with a planned iteration, and one line per txhash lookup outcome.
+// with a planned iteration, and one line per txhash lookup outcome; the tier
+// is part of each name.
 func TestQueryReportBenchText(t *testing.T) {
 	q := twoScenarioReport()
+	q.tier = queryTierCold
 	q.add(scenarioReport{
 		queryType: queryTypeLedgers,
 		targetRPS: 100,
@@ -290,25 +291,32 @@ func TestQueryReportBenchText(t *testing.T) {
 	})
 	q.add(scenarioReport{queryType: queryTypeEvents, targetRPS: 5})
 
+	cold := q.benchText("linux", "amd64")
 	assert.Equal(t, []string{
 		"goos: linux",
 		"goarch: amd64",
-		"BenchmarkQuery/type=ledgers/rps=10\t2\t2000000 ns/op\t1000000 p50-ns\t3000000 p99-ns" +
-			"\t4000000 p99-from-due-ns\t5 items/op\t10 achieved-rps\t0 dropped\t0 failed",
-		"BenchmarkQuery/type=txhash/rps=0.5\t2\t15000 ns/op\t10000 p50-ns\t20000 p99-ns" +
-			"\t21000 p99-from-due-ns\t0.5 items/op\t0.375 achieved-rps\t1 dropped\t1 failed",
-		"BenchmarkQuery/type=txhash/rps=0.5/outcome=found\t1\t10000 ns/op\t10000 p50-ns\t10000 p99-ns" +
-			"\t12000 p99-from-due-ns\t1 items/op",
-		"BenchmarkQuery/type=txhash/rps=0.5/outcome=not_found\t1\t20000 ns/op\t20000 p50-ns\t20000 p99-ns" +
-			"\t21000 p99-from-due-ns\t0 items/op",
-		"BenchmarkQuery/type=ledgers/rps=100\t1\t0 achieved-rps\t1 dropped\t0 failed",
+		"BenchmarkQuery/tier=cold/type=ledgers/rps=10\t2\t2000000 ns/op\t1000000 p50-ns\t3000000 p99-ns" +
+			"\t4000000 p99-from-due-ns\t5 items/op\t0 dropped",
+		"BenchmarkQuery/tier=cold/type=txhash/rps=0.5\t2\t15000 ns/op\t10000 p50-ns\t20000 p99-ns" +
+			"\t21000 p99-from-due-ns\t0.5 items/op\t1 dropped",
+		"BenchmarkQuery/tier=cold/type=txhash/rps=0.5/outcome=found\t1\t10000 ns/op\t10000 p50-ns" +
+			"\t10000 p99-ns\t12000 p99-from-due-ns\t1 items/op",
+		"BenchmarkQuery/tier=cold/type=txhash/rps=0.5/outcome=not_found\t1\t20000 ns/op\t20000 p50-ns" +
+			"\t20000 p99-ns\t21000 p99-from-due-ns\t0 items/op",
+		"BenchmarkQuery/tier=cold/type=ledgers/rps=100\t1\t1 dropped",
 		"",
-	}, strings.Split(q.benchText("linux", "amd64"), "\n"))
+	}, strings.Split(cold, "\n"))
+
+	q.tier = queryTierHot
+	hot := q.benchText("linux", "amd64")
+	assert.NotEqual(t, cold, hot)
+	assert.Equal(t, strings.ReplaceAll(cold, "/tier=cold/", "/tier=hot/"), hot)
 
 	outDir := t.TempDir()
-	_, err := q.write(outDir)
+	path, err := q.writeBench(outDir)
 	require.NoError(t, err)
-	data, err := os.ReadFile(filepath.Join(outDir, queryBenchFile))
+	assert.Equal(t, filepath.Join(outDir, queryBenchFile), path)
+	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, q.benchText(runtime.GOOS, runtime.GOARCH), string(data))
 }
