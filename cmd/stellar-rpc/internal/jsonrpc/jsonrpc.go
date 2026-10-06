@@ -58,7 +58,6 @@ type Handler struct {
 }
 
 // Close closes all the resources held by the Handler instances.
-// After Close is called the Handler instance will stop accepting JSON RPC requests.
 func (h Handler) Close() {
 	if err := h.bridge.Close(); err != nil {
 		h.logger.WithError(err).Warn("could not close bridge")
