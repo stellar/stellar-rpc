@@ -633,7 +633,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
     The current window's index is <b>re-derived from scratch on every chunk boundary</b> to absorb the chunk
     that just froze, growing until its window is complete. Only the window the network tip is in is ever
     rebuilt; a completed window's index is finalized (its <code>.bin</code> inputs swept) and never touched
-    again. The rebuild is cheap relative to the cadence: a full-window streamhash build is ≈1 minute against
+    again. The rebuild is cheap relative to the cadence: a full-window streamhash build is about a minute and a half against
     a chunk boundary every ~14 hours at mainnet rates.
   </p>
   <div class="widget">
@@ -665,14 +665,14 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   </div>
   <div class="note">
     <b>Why per-chunk <code>.bin</code> files make this affordable:</b> <code>processChunk</code> sorts each
-    chunk's ~3M entries in memory before writing, so the rebuild feeds streamhash sorted keys — its fast,
+    chunk's ~4.5M entries in memory before writing, so the rebuild feeds streamhash sorted keys — its fast,
     low-memory sorted-builder mode. Transient <code>.bin</code> disk is bounded by the windows actually in
-    flight (floor: one dense window ≈ 60 GB), because a finalized window's inputs are deleted as soon as its
+    flight (floor: one dense window ≈ 89 GB), because a finalized window's inputs are deleted as soon as its
     final index is built.
   </div>
   <div class="note warn">
     <b>Provisioning note:</b> old and new coverage files coexist from the start of a rebuild's write until
-    the eager sweep's unlink, so the window dir transiently holds ~2× the index size (~25 GB at the end of a
+    the eager sweep's unlink, and the new one takes 1.55× its final size until the build trims it, so the window dir transiently holds ~2.55× the index size (~48 GB at the end of a
     dense full window), and the window-end rebuild writes ~12.5 GB in ~1 minute (~200 MB/s burst) — trivial
     on instance NVMe, worth provisioning for on throughput-capped volumes like EBS gp3.
   </div>
@@ -1167,7 +1167,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
           files:[["hot/00005350/",F_DIR,"complete hot DB — the source"]],
           crash:"Keys read \"freezing\", no cold files exist. The resolver classifies on frozen state only → it schedules re-materialization, and the writer overwrites at the canonical path. If the chunk has meanwhile fallen past retention, the prune scan sweeps the keys instead." },
         { t:"Write — one streaming pass over 10,000 LCMs",
-          d:"Only the requested extractors run. Writes the .pack and events segment as it streams; collects ~3M txhash entries and sorts them in memory (≈60 MB) before writing the .bin — sorted per-chunk runs are what make every-boundary index rebuilds a single streaming merge.",
+          d:"Only the requested extractors run. Writes the .pack and events segment as it streams; collects ~4.5M txhash entries and sorts them in memory (≈89 MB) before writing the .bin — sorted per-chunk runs are what make every-boundary index rebuilds a single streaming merge.",
           meta:[["chunk:00005350:ledgers","freezing"],["chunk:00005350:events","freezing"],["chunk:00005350:txhash","freezing"]],
           files:[["hot/00005350/",F_DIR,"source"],["ledgers/00005/00005350.pack",F_PART,"being written"],["events/data/00005/00005350-events.pack",F_PART,"being written"],["txhash/raw/00005/00005350.bin",F_PART,"being written"]],
           crash:"Partial files under \"freezing\" keys. Harmless: readers resolve only \"frozen\" keys, and every partial is reachable from its key. Recovery re-materializes — files are (re)created at canonical paths, overwriting wholesale." },
@@ -1198,7 +1198,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
           d:"K-way merge of the sorted .bin files for chunks [5100, 5350] through streamhash's SortedBuilder → 00005100-00005350.idx, created or truncated wholesale. Fsync the file and the window dir. The file readers hold is never a writer's target: a file is writable only under a key that has never been \"frozen\" in this run.",
           meta:[["index:00000005:00005100:00005349","frozen"],["index:00000005:00005100:00005350","freezing"]],
           files:[["txhash/index/00000005/00005100-00005349.idx",F_OK,"the live index — readers unaffected"],["txhash/index/00000005/00005100-00005350.idx",F_OK,"written + fsynced, not yet committed"]],
-          crash:"Same story as the mark step: predecessor frozen, new coverage is debris (partial or even complete — irrelevant; deleted unread or rewritten wholesale). The two files coexisting is why the window dir transiently holds ~2× the index size." },
+          crash:"Same story as the mark step: predecessor frozen, new coverage is debris (partial or even complete — irrelevant; deleted unread or rewritten wholesale). The two files coexisting, the new one at 1.55× its final size until the build trims it, is why the window dir transiently holds ~2.55× the index size." },
         { t:"Commit — one atomic synced batch",
           d:"{[5100,5350] → \"frozen\", [5100,5349] → \"pruning\"} in a single write. A terminal build (hi = the window's last chunk — derived, marked nowhere) adds every chunk:c:txhash in [lo, hi] → \"pruning\": the batch <em>is</em> the entire finalization protocol. Note the batch only ever demotes keys — no file is unlinked here, ever.",
           meta:[["index:00000005:00005100:00005349","pruning"],["index:00000005:00005100:00005350","frozen"]],
@@ -1484,7 +1484,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
       f:s => { s.meta.push({ k:"chunk:00005350:ledgers", v:"freezing" }, { k:"chunk:00005350:events", v:"freezing" }, { k:"chunk:00005350:txhash", v:"freezing" });
                mark(s, "m", s.meta.length-3); mark(s, "m", s.meta.length-2); mark(s, "m", s.meta.length-1); } },
     { a:"lifecycle", t:"ChunkBuild 5350 — write + fsync",
-      d:"backfillSource picks the hot DB (\"ready\" and complete — preference 1; no refetch, and the same rule would serve a backfill caller). One streaming pass over the 10,000 LCMs writes 00005350.pack and the events segment, sorts ~3M txhash entries in memory, writes 00005350.bin; FsyncAll makes files + dirents durable.",
+      d:"backfillSource picks the hot DB (\"ready\" and complete — preference 1; no refetch, and the same rule would serve a backfill caller). One streaming pass over the 10,000 LCMs writes 00005350.pack and the events segment, sorts ~4.5M txhash entries in memory, writes 00005350.bin; FsyncAll makes files + dirents durable.",
       f:s => { s.files.push({ p:"ledgers/00005/00005350.pack", kind:"ok", note:"durable" },
                             { p:"events/data/00005/00005350-events.pack", kind:"ok", note:"durable (+ index.pack, index.hash under events/index/)" },
                             { p:"txhash/raw/00005/00005350.bin", kind:"ok", note:"sorted run, durable" });

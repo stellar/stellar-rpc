@@ -108,8 +108,8 @@ Every TOML leaf is also settable from the command line:
 | `events` | `{default_data_dir}/events/data` | events `.pack` segments |
 | `events_index` | `{default_data_dir}/events/index` | events `index.pack` + `index.hash` |
 | `txhash_raw` | `{default_data_dir}/txhash/raw` | transient `.bin` files |
-| `txhash_index` | `{default_data_dir}/txhash/index` | per-window `.idx` |
-| `hot` | `{default_data_dir}/hot` | per-chunk hot RocksDB databases |
+| `txhash_index` | `{default_data_dir}/txhash/index` | the `.idx` of each terminal window |
+| `hot` | `{default_data_dir}/hot` | per-chunk hot RocksDB databases, the `.idx` of the window still being rebuilt, and build scratch |
 
 **[backfill]**
 
@@ -186,15 +186,17 @@ Chunk-level files group into buckets of 1,000 chunks (`bucket_id = chunk_id / 10
 ```
 {default_data_dir}/
 ├── catalog/rocksdb/                                  ← catalog (WAL always on)
-├── hot/{chunk:08d}/                               ← per-chunk hot RocksDB (transient)
+├── hot/
+│   ├── {chunk:08d}/                               ← per-chunk hot RocksDB (transient)
+│   ├── txhash-index-{window:08d}/{lo:08d}-{hi:08d}.idx  ← the window still being rebuilt
+│   └── scratch/{chunk:08d}-index.runs/            ← while the events key is "freezing": the index build's spilled slabs and their merge, removed before the key flips
 ├── ledgers/{bucket:05d}/{chunk:08d}.pack
 ├── events/
 │   ├── data/{bucket:05d}/{chunk:08d}-events.pack
 │   └── index/{bucket:05d}/{chunk:08d}-index.pack   (+ -index.hash)
-│       (+ {chunk:08d}-index.runs/ while the events key is "freezing": the index build's spilled slabs and their merge, removed before the key flips)
 └── txhash/
     ├── raw/{bucket:05d}/{chunk:08d}.bin           ← transient until window finalization (or retention pruning)
-    └── index/{window:08d}/{lo:08d}-{hi:08d}.idx   ← one frozen file per window, coverage-named
+    └── index/{window:08d}/{lo:08d}-{hi:08d}.idx   ← one frozen file per terminal window, coverage-named
 ```
 
 ### The chunk hot DB
@@ -242,7 +244,7 @@ For the per-chunk keys, `"freezing"` means the immutable file is being written; 
 
 ### Index keys
 
-An index key `index:{txhash_index:08d}:{lo:08d}:{hi:08d}` names the chunk range `[lo, hi]` that its `.idx` covers, mapping 1:1 to the file `txhash/index/{txhash_index:08d}/{lo:08d}-{hi:08d}.idx`.
+An index key `index:{txhash_index:08d}:{lo:08d}:{hi:08d}` names the chunk range `[lo, hi]` that its `.idx` covers, mapping 1:1 to the file `{lo:08d}-{hi:08d}.idx`: under `txhash/index/{txhash_index:08d}/` once the coverage is terminal, and under `hot/txhash-index-{txhash_index:08d}/` while the window is still being rebuilt, so the per-boundary rewrite stays with the hot tier.
 
 `hi` grows as the window fills: each rebuild folds in the chunks frozen since the last one, advancing `hi` — by one in steady state, by many when catching up. When `hi` reaches the window's last chunk, the window is **complete** and its index is **terminal** — rebuilt again only if retention widening later drops the floor into the window, when backfill re-derives the spent `.bin` inputs from the local packs and rebuilds the index wider.
 
@@ -515,7 +517,7 @@ Startup runs in two steps, both in `startStreaming` below:
 1. **Backfill** brings on-disk coverage in line with the retention window, up through the last *complete* chunk at the tip. The partial chunk still forming at the tip is left to hot-DB ingestion: on a restart its ledgers so far are already in the live hot DB, on a first start ingestion fetches them from the resume ledger forward, and either way ingestion completes the chunk as new ledgers arrive. Backfill re-runs if the tip advances mid-pass, and when it returns, the whole in-retention history up to that point is on disk as frozen files — ready to serve.
 2. **Serve + ingest** opens the resume chunk's hot DB, starts captive core, serving, the lifecycle goroutine, and the hot-DB ingestion loop. The lifecycle is seeded with the last complete chunk — when one exists; a young network's first run waits for the first boundary — so its first run fires at once and finishes any crash/downtime leftovers concurrently with serving. Reads never wait for it, because a reader only ever resolves a `"ready"` hot DB or a `"frozen"` cold file — never a transient key.
 
-Operational note — **peak disk after long downtime**: pruning runs only in the first run's prune stage, *after* backfill has materialized every newly-in-retention chunk, so a downtime approaching or exceeding the retention window transiently holds up to ~2× the retention footprint (the stale window plus its replacement). A deep backfill also holds the transient `.bin` inputs for every window it is building at once, not just one (the transactions design, §7.4), and, on the events index root, the spilled index runs of every events build in flight and the terms file they merge into (about three times the chunk's index.pack, 9.3 GB for a sac-9000 chunk, `workers` chunks at once). Size volumes accordingly; a disk-full during backfill fails the run before the relieving prune can fire, on every pass.
+Operational note — **peak disk after long downtime**: pruning runs only in the first run's prune stage, *after* backfill has materialized every newly-in-retention chunk, so a downtime approaching or exceeding the retention window transiently holds up to ~2× the retention footprint (the stale window plus its replacement). A deep backfill also holds the transient `.bin` inputs for every window it is building at once, not just one (the transactions design, §7.4), and, under the hot root's `scratch/`, the spilled index runs of every events build in flight and the terms file they merge into (about three times the chunk's index.pack, 9.3 GB for a sac-9000 chunk, `workers` chunks at once). Size volumes accordingly; a disk-full during backfill fails the run before the relieving prune can fire, on every pass.
 
 The retention floor and resume point are computed by:
 
@@ -769,7 +771,7 @@ A `GetLedger` failure returns from the loop and fails the run; the next startup 
 
 The lifecycle is a background goroutine. Each notification — one per ingestion boundary, plus a startup seed — wakes it for one **run** over the latest completed chunk; if several boundaries arrive while a run is in progress, the next run's single pass covers them all. A run does three stages in order:
 
-1. **Plan-and-execute** — `resolve` + `executePlan` over `[floor, last complete chunk]`, the same machinery backfill uses. In steady state this freezes the just-closed chunk from its hot DB and folds it into the current window's index; rebuilding the whole window each boundary costs ≈1 minute against a boundary that arrives only every ~14 h at mainnet rates.
+1. **Plan-and-execute** — `resolve` + `executePlan` over `[floor, last complete chunk]`, the same machinery backfill uses. In steady state this freezes the just-closed chunk from its hot DB and folds it into the current window's index; rebuilding the whole window each boundary costs about a minute and a half against a boundary that arrives only every ~14 h at mainnet rates.
 2. **Discard** — retire hot DBs the cold artifacts now fully serve.
 3. **Prune** — sweep demoted and past-retention files.
 
@@ -988,7 +990,7 @@ Each invariant has a distinct audit. INV-1 you check by issuing reads or by re-d
 
 **Startup converges from any on-disk state this binary's own protocol can produce.** Whatever a partial-completion crash, an operator action, or surgical recovery leaves behind, startup drives the system to a settled state satisfying INV-1 ∧ INV-2 ∧ INV-3 ∧ INV-4. Catalog content outside the binary's compiled-in vocabulary is deliberately not converged: the open-time census refuses startup instead ([Format versioning and upgrades](#format-versioning-and-upgrades)), because "converging" a newer binary's state would mean overwriting artifacts this binary cannot read. Startup here is the backfill pass followed by the first lifecycle run — fired by the startup seed when a complete chunk exists; a young store with none is settled by construction — and it reaches a settled state within that first run, typically seconds after serving opens, bounded by the run's freeze, rebuild, and prune workload. From any state reachable *during* a run, the lifecycle run alone converges, within a bounded number of runs. And since a runtime op failure fails the run and hands recovery back to startup, every state a run can leave behind is one startup is built to converge.
 
-Two accepted limits. Convergence needs disk headroom: the prune that frees space runs after the backfill that needs it (the peak-disk note under [Startup](#startup)), so a disk sized below the transient peak fails the run on every pass until space is added. And a same-window 16-byte hash collision — the ~10⁻²⁰-per-window event the transactions design accepts (§8.2) — fails that window's index build permanently: the accepted risk presents as a run that never completes, never as wrong data.
+Two accepted limits. Convergence needs disk headroom: the prune that frees space runs after the backfill that needs it (the peak-disk note under [Startup](#startup)), so a disk sized below the transient peak fails the run on every pass until space is added. And a same-window 16-byte hash collision — the ~3×10⁻²⁰-per-window event the transactions design accepts (§8.2) — fails that window's index build permanently: the accepted risk presents as a run that never completes, never as wrong data.
 
 The split matters because some repairs are inherently backfill's, not the run's: a per-chunk `"freezing"` key with no hot DB behind it (a crashed backfill write) is repaired by re-materialization, and a surgically removed range is re-derived from the LedgerBackend — no run phase produces data. The run's province is everything else: index transients, demotions, freezes from live hot DBs, prunes.
 

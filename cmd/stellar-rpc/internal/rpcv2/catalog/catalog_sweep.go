@@ -73,13 +73,14 @@ func (c *Catalog) DestroyChunkArtifacts(refs []ArtifactRef) error {
 		if st != geometry.StatePruning && st != geometry.StateFreezing {
 			continue // absent: already destroyed
 		}
-		for _, p := range c.layout.ArtifactPaths(ref.Chunk, ref.Kind) {
+		files, scratch := c.layout.ChunkPaths(ref.Chunk, ref.Kind)
+		for _, p := range files {
 			if err := durable.DeleteFileIfExists(p); err != nil {
 				return err
 			}
 			paths = append(paths, p)
 		}
-		for _, p := range c.layout.ScratchPaths(ref.Chunk, ref.Kind) {
+		for _, p := range scratch {
 			if err := os.RemoveAll(p); err != nil {
 				return err
 			}
@@ -133,7 +134,7 @@ func (c *Catalog) DestroyTxHashIndexKey(cov geometry.TxHashIndexCoverage) error 
 	if err := durable.DeleteFileIfExists(path); err != nil {
 		return err
 	}
-	dir := c.layout.TxHashIndexDir(cov.Index)
+	dir := c.layout.TxHashIndexDir(cov)
 	if err := durable.FsyncDir(dir); err != nil { // unlink durable BEFORE key delete
 		return err
 	}

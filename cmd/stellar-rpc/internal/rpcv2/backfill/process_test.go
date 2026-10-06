@@ -141,6 +141,7 @@ func TestProcessChunk_ProducesAllArtifactsAndFreezes(t *testing.T) {
 	last, err := cr.LastSeq()
 	require.NoError(t, err)
 	require.Equal(t, chunkID.LastLedger(), last)
+	rpcv2test.RequireDiskMatchesCatalog(t, cat)
 }
 
 func TestProcessChunk_SubsetOfKinds(t *testing.T) {
@@ -199,11 +200,19 @@ func TestProcessChunk_RematerializesAfterFreezingCrash(t *testing.T) {
 	chunkID := chunk.ID(0)
 	layout := cat.Layout()
 
-	// Simulate a crash mid-freeze: the keys are "freezing" and a stale/partial
-	// pack file exists at the canonical path.
+	// Simulate a crash mid-freeze: the keys are "freezing", a stale/partial
+	// pack file exists at the canonical path, and the builds' scratch is left.
 	require.NoError(t, cat.MarkChunkFreezing(chunkID, geometry.AllKinds()...))
 	require.NoError(t, os.MkdirAll(filepath.Dir(layout.LedgerPackPath(chunkID)), 0o755))
 	require.NoError(t, os.WriteFile(layout.LedgerPackPath(chunkID), []byte("PARTIAL-GARBAGE"), 0o644))
+	for _, kind := range geometry.AllKinds() {
+		_, scratch := layout.ChunkPaths(chunkID, kind)
+		for _, dir := range scratch {
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "runs"), []byte("PARTIAL-RUNS"), 0o644))
+		}
+	}
+	rpcv2test.RequireDiskMatchesCatalog(t, cat)
 
 	// Re-run: a "freezing" key triggers re-materialization (rule 1), overwriting
 	// the partial at the canonical path.
@@ -221,6 +230,7 @@ func TestProcessChunk_RematerializesAfterFreezingCrash(t *testing.T) {
 	last, err := cr.LastSeq()
 	require.NoError(t, err)
 	require.Equal(t, chunkID.LastLedger(), last)
+	rpcv2test.RequireDiskMatchesCatalog(t, cat)
 }
 
 // ---------------------------------------------------------------------------

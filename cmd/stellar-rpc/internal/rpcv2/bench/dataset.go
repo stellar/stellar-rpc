@@ -26,11 +26,7 @@ const (
 // openDatasetCatalog opens the catalog of the dataset under layout, creating it
 // when absent. The caller must close it.
 func openDatasetCatalog(layout geometry.Layout, logger *supportlog.Entry) (*catalog.Catalog, error) {
-	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	if err != nil {
-		return nil, err
-	}
-	cat, err := catalog.Open(layout.CatalogPath(), layout, txLayout, logger)
+	cat, err := catalog.Open(layout.CatalogPath(), layout, logger)
 	if err != nil {
 		return nil, fmt.Errorf("open dataset catalog %s: %w", layout.CatalogPath(), err)
 	}
