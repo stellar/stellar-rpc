@@ -68,6 +68,12 @@ func newHotSlab(slab uint32) *hotSlab {
 	}
 }
 
+// reset empties the slab for another slab number. No reader may hold it.
+func (s *hotSlab) reset(slab uint32) {
+	s.slab, s.n = slab, 0
+	clear(s.heads)
+}
+
 func (s *hotSlab) head(k TermKey) *atomic.Uint32 {
 	return &s.heads[binary.BigEndian.Uint16(k[:])]
 }
