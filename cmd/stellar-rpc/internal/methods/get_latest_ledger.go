@@ -16,7 +16,7 @@ import (
 )
 
 // NewGetLatestLedgerHandler returns a JSON RPC handler to retrieve the latest ledger entry from Stellar core.
-// Requests landing on the same latest ledger are served the same pre-rendered bytes.
+// Requests on the same latest ledger share one render; jrpc2 writes the json.RawMessage result to the wire verbatim.
 func NewGetLatestLedgerHandler(ledgerReader store.LedgerReader) jrpc2.Handler {
 	var rendered latestMemo[json.RawMessage]
 	coreHandler := func(ctx context.Context, _ protocol.GetLatestLedgerRequest,
