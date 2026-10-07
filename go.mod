@@ -34,7 +34,7 @@ require (
 	github.com/dchest/siphash v1.2.3
 	github.com/mattn/go-sqlite3 v1.14.17
 	github.com/rubenv/sql-migrate v1.5.2
-	github.com/stellar-experimental/jrpc2 v0.0.0-20261006225839-5b4c6315ee00
+	github.com/stellar-experimental/jrpc2 v0.0.0-20261007183142-4ada2aea5d56
 	go.uber.org/goleak v1.3.0
 )
 
