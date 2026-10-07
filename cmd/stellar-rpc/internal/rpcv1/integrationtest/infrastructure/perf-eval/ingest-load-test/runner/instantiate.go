@@ -20,7 +20,7 @@ import (
 // one bundle per scenario (load-test-ledgers-<version>-<scenario>.xdr.zstd).
 var (
 	ledgerScenarios = []string{"oz", "sac", "soroswap"}
-	curVersion      = "v29-nodiag" // version of the above bundles
+	curVersion      = "v29-diag" // version of the above bundles
 )
 
 // instantiate is the instance half after the bootstrap, which streams the corpus
