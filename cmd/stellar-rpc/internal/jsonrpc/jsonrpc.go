@@ -219,6 +219,14 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry) j
 		requestDurationWarnCounter,
 		requestDurationLimitCounter,
 		logger)
+	if spec.MethodName == protocol.SendTransactionMethodName {
+		// The bridge cancels a handler's context when its client disconnects.
+		// Submission has side effects, so let it finish; the duration limit
+		// still applies.
+		return func(ctx context.Context, req *jrpc2.Request) (any, error) {
+			return durationLimiter.Handle(context.WithoutCancel(ctx), req)
+		}
+	}
 	return durationLimiter.Handle
 }
 
