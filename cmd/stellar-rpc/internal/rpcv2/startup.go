@@ -60,9 +60,14 @@ func run(ctx context.Context, cfg StartConfig) error {
 		return fmt.Errorf("startup derive last-committed: %w", err)
 	}
 
+	hotKeys, err := cat.HotChunkKeys()
+	if err != nil {
+		return fmt.Errorf("startup read hot chunk keys: %w", err)
+	}
 	metrics := observability.MetricsOrNop(cfg.Exec.Metrics)
 	metrics.LastCommitted(lastCommitted)
 	metrics.RetentionFloor(retentionFloorLedger(cfg.Retention, lastCommitted))
+	metrics.LiveHotChunks(len(hotKeys))
 	logger.WithField("last_committed", lastCommitted).
 		WithField("earliest", earliest).
 		WithField("pinned", true).

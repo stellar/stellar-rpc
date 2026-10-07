@@ -54,6 +54,13 @@ type tickMetricsRecorder struct {
 	mu             sync.Mutex
 	lastCommitted  int
 	retentionFloor int
+	liveHotChunks  []int // every value set, in order
+}
+
+func (r *tickMetricsRecorder) LiveHotChunks(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.liveHotChunks = append(r.liveHotChunks, n)
 }
 
 func (r *tickMetricsRecorder) LastCommitted(uint32) {
@@ -90,6 +97,79 @@ func TestRunLifecycleTick_DoesNotReEmitLastCommitted(t *testing.T) {
 
 	assert.Positive(t, rec.retentionFloor, "the tick owns and emits the retention-floor gauge")
 	assert.Zero(t, rec.lastCommitted, "the tick must NOT re-emit last-committed (ingestion owns it)")
+}
+
+// TestRunLifecycleTick_LiveHotChunksCountsAfterDestroy: the gauge is set once per
+// tick, after the deferred destroys, so a chunk discarded this tick is not counted.
+func TestRunLifecycleTick_LiveHotChunksCountsAfterDestroy(t *testing.T) {
+	cat, _ := smallTxHashIndexCatalog(t, 1)
+	cfg := lifecycleTestConfig(t, cat, 0)
+	rec := &tickMetricsRecorder{}
+	cfg.Metrics = rec
+
+	// Chunk 0: discard-eligible with a leftover "ready" hot DB. Chunk 1: live.
+	freezeKinds(t, cat, 0, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+	freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(0), 0, 0)
+	makeReadyHotDirNoData(t, cat, 0)
+	live := openLiveHotDB(t, cat, 1)
+	t.Cleanup(func() { _ = live.Close() })
+
+	require.NoError(t, runLifecycle(context.Background(), cfg, cat, chunk.ID(0)))
+
+	has, err := hotKeyExists(cat, 0)
+	require.NoError(t, err)
+	require.False(t, has, "chunk 0's hot key is gone after the tick")
+	assert.Equal(t, []int{1}, rec.liveHotChunks, "only the live chunk remains, set once")
+}
+
+// TestRunLifecycleTick_LiveHotChunksKeepsBusyHandle: a demoted chunk whose destroy
+// was skipped (reader in flight) is still on disk and still counts.
+func TestRunLifecycleTick_LiveHotChunksKeepsBusyHandle(t *testing.T) {
+	cat, _ := smallTxHashIndexCatalog(t, 1)
+	cfg := lifecycleTestConfig(t, cat, 0)
+	rec := &tickMetricsRecorder{}
+	cfg.Metrics = rec
+	reg := query.NewRegistry(cat, geometry.NewRetention(0, 0))
+	cfg.Registry = reg
+
+	const c chunk.ID = 0
+	freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+	freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(c), c, c)
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	require.NoError(t, err)
+	rpcv2test.IngestLedger(t, db, c.FirstLedger(), rpcv2test.ZeroTxLCMBytes(t, c.FirstLedger()))
+	require.NoError(t, cat.FlipHotReady(c))
+	reg.PublishHandle(c, db)
+	live := openLiveHotDB(t, cat, 1)
+	t.Cleanup(func() { _ = live.Close() })
+
+	// Park a reader inside chunk 0 so the tick's destroy reports busy.
+	parked, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		first := true
+		for _, ierr := range db.Source().RawLedgers(
+			context.Background(), ledgerbackend.BoundedRange(c.FirstLedger(), c.FirstLedger()),
+		) {
+			if ierr != nil {
+				return
+			}
+			if first {
+				close(parked)
+				<-release
+				first = false
+			}
+		}
+	}()
+	<-parked
+	t.Cleanup(func() { close(release); <-done; reg.TryCloseHandle(c) })
+
+	require.NoError(t, runLifecycle(context.Background(), cfg, cat, c))
+
+	hs, err := cat.HotState(c)
+	require.NoError(t, err)
+	require.Equal(t, geometry.HotTransient, hs, "the demoted key survives the busy destroy")
+	assert.Equal(t, []int{2}, rec.liveHotChunks, "the transient chunk is still on disk and counts")
 }
 
 // ---------------------------------------------------------------------------
