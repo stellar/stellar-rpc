@@ -100,7 +100,7 @@ require (
 	github.com/aws/aws-sdk-go v1.55.8 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/creachadair/mds v0.31.0 // indirect
+	github.com/creachadair/mds v0.26.1 // indirect
 	github.com/djherbis/fscache v0.10.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
