@@ -31,8 +31,9 @@ func BenchmarkGetProtocolVersion(b *testing.B) {
 	require.NoError(b, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
 	require.NoError(b, tx.Commit(ledgerCloseMeta, nil))
 
+	versions := newProtocolVersionCache(ledgerReader)
 	for b.Loop() {
-		_, err := getProtocolVersion(b.Context(), ledgerReader)
+		_, err := versions.get(b.Context())
 		if err != nil {
 			b.Fatalf("getProtocolVersion failed: %v", err)
 		}
@@ -55,9 +56,26 @@ func TestGetProtocolVersion(t *testing.T) {
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
 	require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 
-	protocolVersion, err := getProtocolVersion(t.Context(), ledgerReader)
+	protocolVersion, err := newProtocolVersionCache(ledgerReader).get(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, uint32(20), protocolVersion)
+}
+
+func TestGetProtocolVersionServesMemoUntilLedgerAdvances(t *testing.T) {
+	reader := &memoLedgerReader{latest: expectedLatestLedgerSequence}
+	versions := newProtocolVersionCache(reader)
+
+	for range 2 {
+		v, err := versions.get(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, expectedLatestLedgerProtocolVersion, v)
+	}
+	assert.Equal(t, int32(1), reader.rawReads.Load(), "second call must be served from the memo")
+
+	reader.latest = expectedLatestLedgerSequence + 1
+	_, err := versions.get(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), reader.rawReads.Load(), "a new latest ledger must re-read the header")
 }
 
 func createMockLedgerCloseMeta(ledgerSequence uint32) xdr.LedgerCloseMeta {
