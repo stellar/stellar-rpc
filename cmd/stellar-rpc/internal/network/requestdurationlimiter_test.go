@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/creachadair/jrpc2"
-	"github.com/creachadair/jrpc2/handler"
-	"github.com/creachadair/jrpc2/jhttp"
+	"github.com/stellar-experimental/jrpc2"
+	"github.com/stellar-experimental/jrpc2/handler"
+	"github.com/stellar-experimental/jrpc2/jhttp"
 	"github.com/stretchr/testify/require"
 )
 

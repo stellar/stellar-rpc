@@ -9,18 +9,19 @@ package jsonrpc
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
-	"github.com/creachadair/jrpc2"
-	"github.com/creachadair/jrpc2/handler"
-	"github.com/creachadair/jrpc2/jhttp"
 	"github.com/go-chi/chi/middleware"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/cors"
+	"github.com/stellar-experimental/jrpc2"
+	"github.com/stellar-experimental/jrpc2/handler"
+	"github.com/stellar-experimental/jrpc2/jhttp"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
@@ -57,7 +58,6 @@ type Handler struct {
 }
 
 // Close closes all the resources held by the Handler instances.
-// After Close is called the Handler instance will stop accepting JSON RPC requests.
 func (h Handler) Close() {
 	if err := h.bridge.Close(); err != nil {
 		h.logger.WithError(err).Warn("could not close bridge")
@@ -219,6 +219,14 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry) j
 		requestDurationWarnCounter,
 		requestDurationLimitCounter,
 		logger)
+	if spec.MethodName == protocol.SendTransactionMethodName {
+		// The bridge cancels a handler's context when its client disconnects.
+		// Submission has side effects, so let it finish; the duration limit
+		// still applies.
+		return func(ctx context.Context, req *jrpc2.Request) (any, error) {
+			return durationLimiter.Handle(context.WithoutCancel(ctx), req)
+		}
+	}
 	return durationLimiter.Handle
 }
 
@@ -230,6 +238,7 @@ func NewHandler(params Params) Handler {
 			// Disable built-in rpc.* methods (e.g. rpc.serverInfo) that
 			// bypass the handler allowlist and request limiters.
 			DisableBuiltin: true,
+			Concurrency:    math.MaxInt, // disable built-in jrpc2 concurrency control, use limiters below
 		},
 	}
 
