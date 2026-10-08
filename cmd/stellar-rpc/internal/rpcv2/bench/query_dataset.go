@@ -9,7 +9,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
-// queryPlan is the validated run.
+// queryPlan is the parsed and validated flag set of one bench-query run.
 type queryPlan struct {
 	Types     []string
 	TargetRPS []float64
