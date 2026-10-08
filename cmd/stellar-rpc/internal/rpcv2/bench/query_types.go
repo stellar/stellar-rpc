@@ -17,8 +17,9 @@ import (
 )
 
 // newQueryRequest builds one query type's request. For txhash and events it
-// first builds the type's pool under ctx, outside every timer. Each request
-// takes its own read view inside the timer and returns how many items came back.
+// first builds the type's pool under ctx, outside every timer, and records the
+// pool in p.Settings. Each request takes its own read view inside the timer and
+// returns how many items came back.
 func newQueryRequest(
 	ctx context.Context, logger *supportlog.Entry, ds *queryDataset, p queryPlan, qtype string,
 ) (queryRequest, error) {
@@ -106,8 +107,9 @@ func txPageRequest(ds *queryDataset, p queryPlan) queryRequest {
 
 // txHashRequest measures getTransaction's read through
 // adapters.TransactionReader: hot tx-hash indexes, then the cold window
-// indexes, each candidate verified against its ledger. The reader is stateless;
-// one serves every request.
+// indexes, each candidate verified against its ledger. A lookup whose result
+// differs from the pool's expectation fails the request. The reader is
+// stateless; one serves every request.
 func txHashRequest(ds *queryDataset, pool *txHashPool) queryRequest {
 	reader := adapters.NewTransactionReader(ds.Passphrase, nil)
 	return func(ctx context.Context, rng *rand.Rand) (requestTiming, error) {

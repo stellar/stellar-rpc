@@ -18,9 +18,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
-// The tx-hash sampler reads randomly chosen ledgers, takes at most
-// poolMaxHashesPerLedger hashes from each, and stops once the pool holds
-// the requested size or its ledger-draw budget is spent.
+// defaultTxHashPoolSize is the --txhash-pool-size default. The other constants
+// bound the tx-hash sampler's ledger draws and the hashes it takes per ledger.
 const (
 	defaultTxHashPoolSize  = 512
 	poolMinLedgerDraws     = 512
@@ -40,10 +39,11 @@ const minEventScanPerChunk = 500
 // included.
 const eventFilterSets = 4
 
-// txHashPool is the by-hash benchmark's work: hashes from the dataset's ledger
-// range, and the fraction of lookups for a hash that is not in the dataset. A
-// found lookup stops at the first index that knows the hash; a
+// txHashPool holds the hashes the txhash requests look up, sampled from the
+// dataset's ledger range, and the fraction of lookups for a hash that is not in
+// the dataset. A found lookup stops at the first index that knows the hash; a
 // not-found lookup probes every hot index and then every cold window index.
+// ledgerCount is how many ledgers supplied the hashes.
 type txHashPool struct {
 	hashes           [][32]byte
 	notFoundFraction float64
@@ -63,9 +63,11 @@ func (p *txHashPool) pick(rng *rand.Rand) ([32]byte, bool) {
 	return p.hashes[rng.IntN(len(p.hashes))], true
 }
 
-// buildTxHashPool samples transaction hashes from the dataset's ledger range
-// and checks that one of them resolves under the passphrase. size must be in
-// [1, maxTxHashPoolSize]. It stops with ctx.Err() once ctx is done.
+// buildTxHashPool samples up to size transaction hashes from the dataset's
+// ledger range and checks that one of them resolves under the passphrase. size
+// must be in [1, maxTxHashPoolSize]. A pool smaller than size only logs a
+// warning; a range with no transactions is an error. It stops with ctx.Err()
+// once ctx is done.
 func buildTxHashPool(
 	ctx context.Context, logger *supportlog.Entry, ds *queryDataset, notFoundFraction float64, seed int64,
 	size int,
@@ -149,10 +151,10 @@ func (s *txHashSampler) first() ([32]byte, uint32) {
 	return s.hashes[0], s.ledgers[0]
 }
 
-// sampleChunk reads randomly chosen ledgers of chunk c within [first, last] and
-// adds a random subset of each one's hashes to the pool. ExtractLedgerTxParts
-// derives the hashes without a passphrase. It stops with ctx.Err() once ctx is
-// done.
+// sampleChunk adds hashes from randomly chosen ledgers of chunk c within
+// [first, last] until the pool reaches s.stopAt or the chunk's draw budget is
+// spent. Hashing needs no passphrase, so a wrong one does not fail here. It
+// stops with ctx.Err() once ctx is done.
 func (s *txHashSampler) sampleChunk(
 	ctx context.Context, view *query.ReadView, c chunk.ID, first, last uint32,
 ) error {
@@ -182,8 +184,8 @@ func (s *txHashSampler) sampleChunk(
 			continue
 		}
 		s.drawn[seq] = struct{}{}
-		// The ledger bytes are on loan inside the callback; the hashes are value
-		// arrays.
+		// The ledger bytes are valid only inside the callback; the hashes are
+		// copied out as [32]byte values.
 		var picked [][32]byte
 		err := reader.WithLedger(seq, func(raw []byte) error {
 			parts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
@@ -244,9 +246,8 @@ func verifySampledHashResolves(
 	return nil
 }
 
-// verifyEnvelopePairing re-reads ledger seq and pairs hash with its envelope
-// under passphrase. The hash match is passphrase-independent; only the envelope
-// pairing needs the passphrase, and it reports a mismatch as an error.
+// verifyEnvelopePairing re-reads ledger seq and checks that hash pairs with
+// its envelope under passphrase, so a wrong passphrase fails the pool build.
 func verifyEnvelopePairing(view *query.ReadView, passphrase string, hash [32]byte, seq uint32) error {
 	reader, err := view.Ledgers(chunk.IDFromLedger(seq))
 	if err != nil {
@@ -274,8 +275,8 @@ func verifyEnvelopePairing(view *query.ReadView, passphrase string, hash [32]byt
 	return nil
 }
 
-// eventFilterPool is the events benchmark's work: filter sets, one of them
-// unfiltered.
+// eventFilterPool holds the filter sets the events requests pick from; one of
+// them is the unfiltered read.
 type eventFilterPool struct {
 	sets [][]event.Filter
 }
@@ -285,9 +286,10 @@ func (p *eventFilterPool) pick(rng *rand.Rand) []event.Filter {
 	return p.sets[rng.IntN(len(p.sets))]
 }
 
-// buildEventFilterPool derives filter sets from the stored events: the
-// unfiltered set, the busiest contracts, and the most common (contract, first
-// topic) pair.
+// buildEventFilterPool derives at most eventFilterSets filter sets from the
+// stored events: the unfiltered set, the busiest contracts, and the most common
+// (contract, first topic) pair. Events with no filter terms leave only the
+// unfiltered set.
 func buildEventFilterPool(
 	ctx context.Context, logger *supportlog.Entry, ds *queryDataset,
 ) (*eventFilterPool, error) {
@@ -346,7 +348,7 @@ type eventTermPair struct {
 }
 
 // eventTermCounts tallies the terms scanEventTerms reads out of the events
-// stores.
+// stores. A pair's key is its contract ID and topic joined by a zero byte.
 type eventTermCounts struct {
 	contracts map[string]int
 	pairs     map[string]int

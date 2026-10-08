@@ -242,9 +242,9 @@ func kindList(kinds []geometry.Kind) string {
 // under its freeze bracket. It must run after the chunks are frozen: a terminal
 // coverage demotes the per-chunk .bin keys it supersedes.
 //
-// With no usable index on disk, the open fails when --types includes txhash and
-// warns otherwise. A range that spans more than one window index is one such
-// case.
+// With no usable index on disk it returns an error when txHashRequested and
+// logs a warning otherwise. A range that spans more than one window index has
+// no usable index.
 func commitDiskTxHashIndex(
 	logger *supportlog.Entry, cat *catalog.Catalog, layout geometry.Layout, lo, hi chunk.ID,
 	txHashRequested bool,
@@ -282,10 +282,10 @@ func commitDiskTxHashIndex(
 	return nil
 }
 
-// diskTxHashCoverage reads the window-index coverage on disk spanning [lo, hi]
-// with the highest Hi, off the {lo:08d}-{hi:08d}.idx filenames. Only the index
-// containing lo is searched; a range that spans more than one window index is
-// an error.
+// diskTxHashCoverage returns the window-index coverage on disk that spans
+// [lo, hi] with the highest Hi, parsed from the {lo:08d}-{hi:08d}.idx
+// filenames, and false when none does. A range that spans more than one window
+// index is an error.
 func diskTxHashCoverage(
 	layout geometry.Layout, txLayout geometry.TxHashIndexLayout, lo, hi chunk.ID,
 ) (geometry.TxHashIndexCoverage, bool, error) {

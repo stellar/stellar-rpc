@@ -33,7 +33,7 @@ type queryPlan struct {
 }
 
 // queryDataset is what one bench query run reads: the registry over the files
-// a bench ingest run left on disk, and the ledger range the pools may sample.
+// a bench ingest run left on disk, and the ledger range the requests and pools read.
 // Every request takes a read view and resolves its tier through ReadView. The
 // cold dataset publishes no hot handle; the hot one freezes no artifact.
 type queryDataset struct {
@@ -46,7 +46,7 @@ type queryDataset struct {
 	// Chunks is the benchmarked chunk range, ascending.
 	Chunks []chunk.ID
 
-	// FirstLedger and LastLedger bound the ledgers the pools may sample.
+	// FirstLedger and LastLedger bound the ledgers the requests and pools read.
 	FirstLedger, LastLedger uint32
 }
 
