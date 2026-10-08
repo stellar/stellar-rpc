@@ -23,80 +23,56 @@ func newQueryRequest(ds *queryDataset, p queryPlan, qtype string) (queryRequest,
 	}
 }
 
-// ledgersRequest measures getLedgers' read: one ReadView.ScanLedgers over
-// --ledgers-span ledgers from a random start in the dataset's range. The scan
-// stops with ctx.Err() once ctx is done.
+// ledgersRequest measures getLedgers' read of --ledgers-span ledgers from a
+// random start in the dataset's range. A read that returns fewer ledgers than
+// the range holds fails the request.
 func ledgersRequest(ds *queryDataset, p queryPlan) queryRequest {
 	return func(ctx context.Context, rng *rand.Rand) (requestTiming, error) {
 		lo, hi := ds.pickRange(rng, p.LedgersSpan)
 		return timed(func() (int, error) {
-			view, err := ds.view()
-			if err != nil {
-				return 0, fmt.Errorf("acquire read view: %w", err)
-			}
-			defer view.Release()
-
-			scan, err := view.ScanLedgers(lo, hi)
-			if err != nil {
-				return 0, fmt.Errorf("scan ledgers [%d, %d]: %w", lo, hi, err)
-			}
 			read := 0
-			for entry, serr := range scan {
-				if serr != nil {
-					return 0, fmt.Errorf("scan ledgers [%d, %d]: %w", lo, hi, serr)
-				}
-				if err := ctx.Err(); err != nil {
-					return 0, err
-				}
-				// The scan must have materialized the ledger. Only its length is
-				// read; the measured work is the scan, not a read of the bytes.
-				if len(entry.Bytes) == 0 {
-					return 0, fmt.Errorf("ledger %d decoded to zero bytes", entry.Seq)
+			err := ds.readLedgers(ctx, lo, hi, func(seq uint32, raw []byte) (bool, error) {
+				// The read must have materialized the ledger. Only its length is
+				// read; the measured work is the read, not a decode of the bytes.
+				if len(raw) == 0 {
+					return false, fmt.Errorf("ledger %d decoded to zero bytes", seq)
 				}
 				read++
+				return true, nil
+			})
+			if err != nil {
+				return 0, err
+			}
+			// A gap in the dataset must not report a fast success.
+			if want := int(hi-lo) + 1; read != want {
+				return 0, fmt.Errorf("read %d of the %d ledgers in [%d, %d]", read, want, lo, hi)
 			}
 			return read, nil
 		})
 	}
 }
 
-// txPageRequest measures getTransactions' read: scan --txpage-span ledgers and
+// txPageRequest measures getTransactions' read: read --txpage-span ledgers and
 // materialize each one's transactions, envelopes included, up to
-// --txpage-limit. The scan ends at the ledger that fills the page. ScanLedgers
-// lends its ledger bytes until the iterator steps; every byte field of a view
-// aliases them, so no view outlives its loop step. The scan stops with
-// ctx.Err() once ctx is done.
+// --txpage-limit. The read ends at the ledger that fills the page.
 func txPageRequest(ds *queryDataset, p queryPlan) queryRequest {
 	return func(ctx context.Context, rng *rand.Rand) (requestTiming, error) {
 		lo, hi := ds.pickRange(rng, p.TxPageSpan)
 		return timed(func() (int, error) {
-			view, err := ds.view()
-			if err != nil {
-				return 0, fmt.Errorf("acquire read view: %w", err)
-			}
-			defer view.Release()
-
-			scan, err := view.ScanLedgers(lo, hi)
-			if err != nil {
-				return 0, fmt.Errorf("scan ledgers [%d, %d]: %w", lo, hi, err)
-			}
 			txs := 0
-			for entry, serr := range scan {
-				if serr != nil {
-					return 0, fmt.Errorf("scan ledgers [%d, %d]: %w", lo, hi, serr)
-				}
-				if err := ctx.Err(); err != nil {
-					return 0, err
-				}
-				views, verr := sdkingest.LedgerTransactionViewRange(
-					xdr.LedgerCloseMetaView(entry.Bytes), 0, p.TxPageLimit-txs, ds.Passphrase)
-				if verr != nil {
-					return 0, fmt.Errorf("materialize transactions of ledger %d: %w", entry.Seq, verr)
+			err := ds.readLedgers(ctx, lo, hi, func(seq uint32, raw []byte) (bool, error) {
+				// Every byte field of a view aliases the borrowed ledger bytes, so
+				// no view outlives this call.
+				views, err := sdkingest.LedgerTransactionViewRange(
+					xdr.LedgerCloseMetaView(raw), 0, p.TxPageLimit-txs, ds.Passphrase)
+				if err != nil {
+					return false, fmt.Errorf("materialize transactions of ledger %d: %w", seq, err)
 				}
 				txs += len(views)
-				if txs >= p.TxPageLimit {
-					break
-				}
+				return txs < p.TxPageLimit, nil
+			})
+			if err != nil {
+				return 0, err
 			}
 			return txs, nil
 		})
@@ -119,4 +95,59 @@ func (ds *queryDataset) pickStart(rng *rand.Rand, span uint32) uint32 {
 func (ds *queryDataset) pickRange(rng *rand.Rand, span uint32) (uint32, uint32) {
 	lo := ds.pickStart(rng, span)
 	return lo, min(lo+span-1, ds.LastLedger)
+}
+
+// readLedgers acquires a read view and calls fn with each ledger of [lo, hi],
+// ascending, until fn returns false. One ledger goes through
+// ReadView.WithLedger, the daemon's point read; a wider range goes through
+// ReadView.ScanLedgers. The bytes are borrowed: fn must not keep them after it
+// returns. A point read that returns no ledger is an error, and the read stops
+// with ctx.Err() once ctx is done.
+func (ds *queryDataset) readLedgers(
+	ctx context.Context, lo, hi uint32, fn func(seq uint32, raw []byte) (bool, error),
+) error {
+	view, err := ds.view()
+	if err != nil {
+		return fmt.Errorf("acquire read view: %w", err)
+	}
+	defer view.Release()
+
+	visit := func(seq uint32, raw []byte) (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return fn(seq, raw)
+	}
+	if lo == hi {
+		visited := false
+		var visitErr error
+		err := view.WithLedger(lo, func(raw []byte) error {
+			visited = true
+			_, visitErr = visit(lo, raw)
+			return visitErr
+		})
+		switch {
+		case visitErr != nil:
+			return visitErr
+		case err != nil:
+			return fmt.Errorf("read ledger %d: %w", lo, err)
+		case !visited:
+			return fmt.Errorf("read ledger %d: no ledger returned", lo)
+		}
+		return nil
+	}
+	scan, err := view.ScanLedgers(lo, hi)
+	if err != nil {
+		return fmt.Errorf("scan ledgers [%d, %d]: %w", lo, hi, err)
+	}
+	for entry, serr := range scan {
+		if serr != nil {
+			return fmt.Errorf("scan ledgers [%d, %d]: %w", lo, hi, serr)
+		}
+		more, err := visit(entry.Seq, entry.Bytes)
+		if err != nil || !more {
+			return err
+		}
+	}
+	return nil
 }
