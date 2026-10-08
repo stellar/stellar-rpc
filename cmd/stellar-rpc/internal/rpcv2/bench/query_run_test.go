@@ -340,7 +340,11 @@ func TestQueryColdCommandRecordsRun(t *testing.T) {
 	coldRoot := ingestColdChunk(t)
 	record, rows := runQueryCommand(t, queryTierCold, "--start-chunk", "0", "--cold-dir", coldRoot,
 		"--types", strings.Join(allQueryTypes, ","), "--target-rps", "1000,2000", "--duration", "10ms")
-	assert.Equal(t, "cold-start", record.Settings["cacheScenario"])
+	if evictSupported {
+		assert.Equal(t, "cold-start", record.Settings["cacheScenario"])
+	} else {
+		assert.Equal(t, "existing-cache", record.Settings["cacheScenario"])
+	}
 	assert.Equal(t, evictionState(true), record.Settings["pageCacheEviction"])
 	assert.NotEmpty(t, record.Settings["txhashPoolHashes"])
 	assert.NotEmpty(t, record.Settings["eventsPool"])

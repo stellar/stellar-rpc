@@ -113,12 +113,17 @@ func TestQueryCacheControls(t *testing.T) {
 		want   string
 	}{
 		{0, false, "existing-cache"},
-		{0, true, "cold-start"},
 		{20, false, "warm-run"},
 		{20, true, "warm-run"},
 	} {
 		p := queryPlan{Warmup: tc.warmup, Evict: tc.evict}
 		assert.Equal(t, tc.want, p.cacheScenario())
+	}
+	evicting := queryPlan{Evict: true}
+	if evictSupported {
+		assert.Equal(t, "cold-start", evicting.cacheScenario())
+	} else {
+		assert.Equal(t, "existing-cache", evicting.cacheScenario(), "eviction cannot be requested off Linux")
 	}
 	assert.Equal(t, "off", evictionState(false))
 	want := "unsupported-on-this-platform"

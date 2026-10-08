@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -43,7 +44,7 @@ func (p queryPlan) cacheScenario() string {
 	switch {
 	case p.Warmup > 0:
 		return "warm-run"
-	case p.Evict:
+	case p.Evict && evictSupported:
 		return "cold-start"
 	default:
 		return "existing-cache"
@@ -104,12 +105,16 @@ func (ds *queryDataset) verifyServes(types []string) error {
 
 // evictColdArtifacts requests page-cache eviction of EvictPaths and returns how
 // many files it advised. It skips a missing file and, off Linux, advises none.
-func (ds *queryDataset) evictColdArtifacts() (int, error) {
+// A cancel stops it before the next file and returns the context error.
+func (ds *queryDataset) evictColdArtifacts(ctx context.Context) (int, error) {
 	if !evictSupported {
 		return 0, nil
 	}
 	evicted := 0
 	for _, path := range ds.EvictPaths {
+		if err := ctx.Err(); err != nil {
+			return evicted, err
+		}
 		if err := evictFile(path); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue

@@ -58,8 +58,12 @@ func (r *queryRun) scenario(ctx context.Context, qtype string, rps float64, req 
 	sc := scenarioReport{queryType: qtype, targetRPS: rps}
 	if p.Evict {
 		start := r.clock.now()
-		evicted, err := r.ds.evictColdArtifacts()
+		evicted, err := r.ds.evictColdArtifacts(ctx)
 		if err != nil {
+			if isContextErr(err) {
+				r.logger.Warnf("query %s at %s rps canceled during page-cache eviction; no rows added",
+					qtype, formatRPS(rps))
+			}
 			return err
 		}
 		sc.pageCacheEvict = r.clock.now().Sub(start)
