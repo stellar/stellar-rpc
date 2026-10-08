@@ -94,8 +94,8 @@ func warnThinSamples(logger *supportlog.Entry, sc scenarioSummary) {
 	}
 }
 
-// scenarioSeed is a scenario's seed: the run seed plus the type's index in
-// allQueryTypes. Distinct types get distinct seeds.
+// scenarioSeed returns the seed for qtype's scenarios. Each type gets its own
+// seed, and the seed does not depend on the order of --types.
 func scenarioSeed(base int64, qtype string) int64 {
 	return base + int64(slices.Index(allQueryTypes, qtype))
 }

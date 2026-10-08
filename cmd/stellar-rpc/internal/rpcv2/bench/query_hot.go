@@ -121,13 +121,11 @@ func runQueryHot(ctx context.Context, logger *supportlog.Entry, env runEnv, opts
 // openHotDataset opens one chunk's hot database and returns the queryDataset
 // over it, plus its release. opts must pass validate.
 //
-// The database has no catalog: bench-ingest hot discards its scratch catalog.
-// The chunk's hot key runs the ready bracket and the database is opened with
-// OpenReadyWrite, the must-exist open; query.OpenRegistry is the daemon's own
-// startup sequence. Nothing is frozen, so only the hot tier can serve. The
-// latest ledger is MaxCommittedSeq, not the chunk's nominal last: a capped
-// ingest stops mid-chunk. --sample-ledgers narrows the sampled range, clamped
-// to what was ingested.
+// bench-ingest hot discards its catalog, so the chunk is marked ready in a
+// scratch catalog and the existing database is opened through
+// query.OpenRegistry, as the daemon does at startup. Nothing is frozen, so only
+// the hot tier serves. The dataset ends at the last committed ledger, because a
+// capped ingest stops mid-chunk, or earlier when --sample-ledgers is set.
 func openHotDataset(logger *supportlog.Entry, opts hotQueryOptions) (*queryDataset, func(), error) {
 	layout := geometry.NewLayout(opts.HotRoot)
 	path := layout.HotChunkPath(opts.Chunk)
@@ -151,7 +149,7 @@ func openHotDataset(logger *supportlog.Entry, opts hotQueryOptions) (*queryDatas
 		return nil, nil, fmt.Errorf("open hot chunk %s at %s: %w", opts.Chunk, path, err)
 	}
 
-	// Until the registry owns db.
+	// closeDB releases db until OpenRegistry takes ownership of it.
 	closeDB := func() {
 		_ = db.Close()
 		releaseCat()

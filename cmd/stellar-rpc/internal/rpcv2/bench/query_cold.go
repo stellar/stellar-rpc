@@ -99,7 +99,7 @@ func (o coldQueryOptions) validate() error {
 		return fmt.Errorf("--num-chunks must be >= 1, got %d", o.NumChunks)
 	}
 	// The frontier hot key (openColdDataset) sits one chunk above the range, so
-	// the range must end below maxChunkID. uint64: the sum must not wrap.
+	// the range must end below maxChunkID. The sum is in uint64 so it cannot wrap.
 	if end := uint64(o.StartChunk) + uint64(o.NumChunks) - 1; end >= uint64(maxChunkID) {
 		return fmt.Errorf("--start-chunk=%d with --num-chunks=%d ends at chunk %d, at or past the last valid chunk ID %d",
 			uint32(o.StartChunk), o.NumChunks, end, uint32(maxChunkID))
