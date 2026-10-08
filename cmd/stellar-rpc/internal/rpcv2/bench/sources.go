@@ -34,7 +34,7 @@ type sourceConfig struct {
 
 	// PackDir is the pack source's ledgers tree root — the directory holding
 	// {bucket:05d}/{chunk:08d}.pack, i.e. geometry.Layout's ledgers root of an
-	// existing full-history deployment. Required when Kind is sourcePack.
+	// existing deployment. Required when Kind is sourcePack.
 	PackDir string
 
 	// BucketPath is the BSB source's datastore bucket

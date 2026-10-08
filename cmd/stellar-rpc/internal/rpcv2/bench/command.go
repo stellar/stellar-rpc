@@ -19,12 +19,11 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
-// NewCommand returns the `bench` root command that groups the full-history
-// benchmarks.
+// NewCommand returns the `bench` root command for benchmarking ingestion and reads.
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bench",
-		Short: "Benchmark full-history ingestion and reads",
+		Short: "Benchmark ingestion and reads",
 	}
 	cmd.AddCommand(newIngestCommand())
 	return cmd
@@ -36,7 +35,7 @@ func NewCommand() *cobra.Command {
 func newIngestCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ingest",
-		Short: "Benchmark full-history ingestion",
+		Short: "Benchmark ingestion",
 	}
 	cmd.AddCommand(newColdCommand(), newHotCommand())
 	return cmd
