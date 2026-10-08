@@ -19,7 +19,7 @@ const (
 
 // Query types. Each is a --types value and a latency.csv query_type value.
 const (
-	// queryTypeLedgers: ReadView.ScanLedgers, getLedgers' path.
+	// queryTypeLedgers: getLedgers' ledger read.
 	queryTypeLedgers = "ledgers"
 	// queryTypeTxPage: getTransactions' paged ledger scan.
 	queryTypeTxPage = "txpage"
