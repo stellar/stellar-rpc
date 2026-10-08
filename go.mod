@@ -96,7 +96,6 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.11 // indirect
 	github.com/googleapis/gax-go/v2 v2.17.0 // indirect
-	github.com/hashicorp/golang-lru v1.0.2 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
@@ -151,7 +150,10 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-// SPIKE: pin go-stellar-sdk to the sisuresh/go p30-cap-0084-validate fork
-// branch until the upstream SDK change merges, then re-pin to the merged
-// upstream commit and drop this replace + the .golangci.yml allow-list.
-replace github.com/stellar/go-stellar-sdk => github.com/sisuresh/go v0.0.0-20260929001544-73e446de8da9
+// SPIKE: go-stellar-sdk is replaced with the head of stellar/go-stellar-sdk#6015
+// (sisuresh/go p30-cap-0084-validate, 663a89a1, which includes go-stellar-sdk
+// main at 6c5e720f): Protocol 30 XDR generated from stellar-xdr 4f524bba, the
+// same XDR the pinned rs-stellar-xdr uses. Once #6015 merges, require the
+// merged upstream commit and drop this replace together with the
+// .golangci.yml replace-allow-list.
+replace github.com/stellar/go-stellar-sdk => github.com/sisuresh/go v0.0.0-20261008104555-663a89a12043
