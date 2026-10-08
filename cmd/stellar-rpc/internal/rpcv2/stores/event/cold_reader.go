@@ -321,7 +321,7 @@ func (c *ColdReader) Offsets() (*LedgerOffsets, error) {
 }
 
 // verifyAndDeserializeBitmap checks the index.pack record's leading
-// fingerprint against the one mphf.Lookup returned and, on match, unmarshals a fresh
+// fingerprint against the one mphf.LookupBatch returned and, on match, unmarshals a fresh
 // bitmap. On fingerprint mismatch (residual MPHF collision on an
 // unseen key) it returns (nil, nil) — the caller treats nil as
 // not-found. record is valid only inside ReadItem's callback;
@@ -349,7 +349,8 @@ func verifyAndDeserializeBitmap(
 //
 // Cold-side implementation:
 //
-//  1. MPHF-resolve every key. Keys rejected at the routing stage
+//  1. MPHF-resolve every key in one batch, so their index.hash pages
+//     are read together. Keys rejected at the routing stage
 //     (streamhash ErrKeyNotFound) get result[i] = nil and never
 //     touch index.pack.
 //  2. Sort the surviving (key, slot) pairs by slot and dedupe —
@@ -392,15 +393,14 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 		fp     [IndexRecordFingerprintLen]byte
 	}
 	pending := make([]pendingKey, 0, len(keys))
-	for i, key := range keys {
-		slot, fp, err := mphf.Lookup(key)
-		if err != nil {
-			if errors.Is(err, ErrKeyNotFound) {
+	for i, hit := range mphf.LookupBatch(keys) {
+		if hit.err != nil {
+			if errors.Is(hit.err, ErrKeyNotFound) {
 				continue // result[i] stays nil
 			}
-			return nil, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, err)
+			return nil, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, hit.err)
 		}
-		pending = append(pending, pendingKey{outIdx: i, slot: slot, fp: fp})
+		pending = append(pending, pendingKey{outIdx: i, slot: hit.slot, fp: hit.fp})
 	}
 	if len(pending) == 0 {
 		return results, nil
