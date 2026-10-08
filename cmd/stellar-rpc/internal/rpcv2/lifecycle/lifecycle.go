@@ -191,13 +191,6 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 		errs = append(errs, fmt.Errorf("discard demote: %w", err))
 	}
 
-	// Live hot-chunk gauge after the discard stage.
-	if hot, herr := cat.HotChunkKeys(); herr != nil {
-		errs = append(errs, fmt.Errorf("read hot chunk keys: %w", herr))
-	} else {
-		metrics.LiveHotChunks(len(hot))
-	}
-
 	// Stage 3 — prune scan. Demote each eligible cold artifact (mark it pruning) and
 	// defer its file/key destroy to end of run, alongside the discarded hot chunks.
 	pruneStart := time.Now()
@@ -232,6 +225,14 @@ func runLifecycle(ctx context.Context, cfg Config, cat *catalog.Catalog, lastChu
 	// pruned cold files — after one grace wait (design: wait once, then delete).
 	// Reached even when stages errored, so a failing freeze cannot wedge reclaim.
 	pending.destroyAll(ctx, cfg)
+
+	// Count hot keys after the destroys. A chunk whose destroy was skipped
+	// (a reader still holds it) is still on disk, so it counts.
+	if hot, herr := cat.HotChunkKeys(); herr != nil {
+		errs = append(errs, fmt.Errorf("read hot chunk keys: %w", herr))
+	} else {
+		metrics.LiveHotChunks(len(hot))
+	}
 	logger.WithFields(supportlog.F{
 		"last_chunk":    lastChunk.String(),
 		"floor_chunk":   floor.String(),
