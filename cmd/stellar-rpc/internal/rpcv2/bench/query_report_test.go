@@ -291,10 +291,10 @@ func TestQueryReportBenchText(t *testing.T) {
 	})
 	q.add(scenarioReport{queryType: queryTypeEvents, targetRPS: 5})
 
-	cold := q.benchText("linux", "amd64")
+	cold := q.benchText("darwin", "arm64")
 	assert.Equal(t, []string{
-		"goos: linux",
-		"goarch: amd64",
+		"goos: darwin",
+		"goarch: arm64",
 		"BenchmarkQuery/tier=cold/type=ledgers/rps=10\t2\t2000000 ns/op\t1000000 p50-ns\t3000000 p99-ns" +
 			"\t4000000 p99-from-due-ns\t5 items/op\t0 dropped",
 		"BenchmarkQuery/tier=cold/type=txhash/rps=0.5\t2\t15000 ns/op\t10000 p50-ns\t20000 p99-ns" +
@@ -308,7 +308,7 @@ func TestQueryReportBenchText(t *testing.T) {
 	}, strings.Split(cold, "\n"))
 
 	q.tier = queryTierHot
-	hot := q.benchText("linux", "amd64")
+	hot := q.benchText("darwin", "arm64")
 	assert.NotEqual(t, cold, hot)
 	assert.Equal(t, strings.ReplaceAll(cold, "/tier=cold/", "/tier=hot/"), hot)
 
