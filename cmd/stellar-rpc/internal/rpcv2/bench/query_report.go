@@ -21,7 +21,7 @@ const (
 const (
 	// queryTypeLedgers: getLedgers' ledger read.
 	queryTypeLedgers = "ledgers"
-	// queryTypeTxPage: getTransactions' paged ledger scan.
+	// queryTypeTxPage: getTransactions' paged ledger read.
 	queryTypeTxPage = "txpage"
 )
 
