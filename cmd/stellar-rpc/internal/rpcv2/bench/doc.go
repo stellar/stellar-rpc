@@ -12,9 +12,10 @@
 // The bench query command measures read latency on the data that bench ingest
 // wrote: cold reads frozen artifacts, hot reads one hot chunk database. A run
 // opens the dataset under a scratch catalog and runs each query type at each
-// target rate as one scenario, through query.ReadView. It measures storage read
-// paths, not RPC handlers, response serialization or network work. Its
-// open-loop load generator, runConstantArrivalRate, starts requests on a fixed
-// schedule, and queryReport writes the results. README.md defines the terms
-// and formulas.
+// target rate as one scenario, through query.ReadView. The txhash requests also
+// go through adapters.TransactionReader, so their latency includes the parse of
+// the transaction view. The run measures storage read paths, not RPC
+// handlers, response serialization or network work. Its open-loop load
+// generator, runConstantArrivalRate, starts requests on a fixed schedule, and
+// queryReport writes the results. README.md defines the terms and formulas.
 package bench

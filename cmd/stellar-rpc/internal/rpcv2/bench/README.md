@@ -1,25 +1,25 @@
 # Storage Benchmarks
 
-This package has two benchmark commands:
+This package has one benchmark command, `bench`, with two subcommands:
 
-- `bench-ingest` writes a storage dataset and measures ingestion.
-- `bench-query` reads that dataset and measures read latency.
+- `bench ingest` writes a storage dataset and measures ingestion.
+- `bench query` reads that dataset and measures read latency.
 
-`bench-query` has one subcommand for each storage tier:
+`bench query` has one subcommand for each storage tier:
 
-- `bench-query cold` reads frozen artifacts.
-- `bench-query hot` reads a hot chunk database.
+- `bench query cold` reads frozen artifacts.
+- `bench query hot` reads a hot chunk database.
 
 The tier names do not describe the state of the OS page cache.
 
-This document defines the terms and the formulas of `bench-query`. It also
-defines `run.json`, which both commands write.
+This document defines the terms and the formulas of `bench query`. It also
+defines `run.json`, which both subcommands write.
 
 ## 1. Method
 
 ### 1.1 Open-loop load generator
 
-`bench-query` is an **open-loop load generator**. An open-loop generator
+`bench query` is an **open-loop load generator**. An open-loop generator
 starts each request at a time that a schedule sets. It does not wait for a
 response before it starts the next request.
 
@@ -38,7 +38,7 @@ is always the same. The k6 load tool uses the same model in its
 [`constant-arrival-rate`](https://grafana.com/docs/k6/latest/using-k6/scenarios/executors/constant-arrival-rate/)
 executor.
 
-| k6 term | `bench-query` term |
+| k6 term | `bench query` term |
 |---|---|
 | scenario | scenario |
 | iteration | iteration |
@@ -114,7 +114,7 @@ Limits:
 - `--duration` must be more than 0.
 - `--warmup` must be 0 or more.
 
-`bench-query` checks all flags before it changes `--out` or opens the
+`bench query` checks all flags before it changes `--out` or opens the
 dataset. It checks these limits for each `--target-rps` rate with `--duration`
 and `--warmup`. An error names the flags.
 
@@ -213,7 +213,7 @@ command stops before it changes `--out`. This prevents a mix of results from
 two runs, and it keeps the `run.json` of a run that stopped (see section 7.3).
 The command also checks the flags and the dataset directories (see section 8)
 before it changes `--out`. If a check fails, the command creates nothing in
-`--out`. When the checks pass, `bench-query` writes `run.json` to `--out`. It
+`--out`. When the checks pass, `bench query` writes `run.json` to `--out`. It
 writes `latency.csv` and `scenarios.csv` when at least one scenario has a
 result.
 
@@ -272,7 +272,7 @@ If you cancel the run, `status` is `failed`, and `error` contains
 | Key | Definition |
 |---|---|
 | `schemaVersion` | The version of this format. The current version is 2. |
-| `command` | The command path, for example `stellar-rpc-v2 bench-query cold`. |
+| `command` | The command path, for example `stellar-rpc-v2 bench query cold`. |
 | `flags` | The value of each flag, default values included. |
 | `binary` | The build of the binary: `version`, `commitHash`, `buildTimestamp` and `branch`. |
 | `hostname` | The host name. |
@@ -285,7 +285,7 @@ If you cancel the run, `status` is `failed`, and `error` contains
 | `status` | `running`, `ok` or `failed`. |
 | `error` | The error message of a failed run. Absent when the run succeeded. |
 
-`bench-query` writes these keys in `settings` and `setupNs`:
+`bench query` writes these keys in `settings` and `setupNs`:
 
 | Key | Definition |
 |---|---|
@@ -320,10 +320,10 @@ conditions:
 
 ### 8.1 Scratch catalog
 
-Each `bench-query` run creates a scratch catalog in a `bench-query-catalog-*`
+Each `bench query` run creates a scratch catalog in a `bench-query-catalog-*`
 directory under the dataset root (`--cold-dir` or `--hot-dir`). Use
 `--catalog-dir` to put the catalog in a different directory. A read-only
-`--cold-dir` needs this flag. `bench-query hot` writes to `--hot-dir` (see
+`--cold-dir` needs this flag. `bench query hot` writes to `--hot-dir` (see
 section 8.2).
 
 The run removes the directory when it ends, also when it fails or you cancel
@@ -332,7 +332,7 @@ crash, the directory stays. Remove it before you measure again.
 
 ### 8.2 Hot tier database
 
-`bench-query hot` opens the chunk database read-write, as the daemon opens a
+`bench query hot` opens the chunk database read-write, as the daemon opens a
 resumed chunk. `--hot-dir` must be writable. The open replays and flushes the
 write-ahead log, and it can start compaction. Thus, after a run, the state on
 the disk is different from the state that ingest left. A second run on the same
@@ -341,14 +341,15 @@ exclusive lock, so the run cannot use a directory that a daemon uses.
 
 ### 8.3 Cold tx-hash index
 
-`bench-query cold` uses the tx-hash window index on disk that covers all
+`bench query cold` uses the tx-hash window index on disk that covers all
 chunks of the range. If no index covers the range, or the range spans more
 than one window index, the run fails when `--types` includes `txhash`. For
 other types, the log shows a warning and the run continues.
 
 ## 9. Query types
 
-All requests use the storage read paths through `query.ReadView`. The
+All requests use the storage read paths through `query.ReadView`. A `txhash`
+request also goes through `adapters.TransactionReader` (see the table). The
 measurement does not include RPC handlers, response serialization or network
 work.
 
@@ -359,13 +360,19 @@ that number of ledgers from the start of the chunk.
 
 | Type | Request | `items` |
 |---|---|---|
-| `ledgers` | One `ReadView.ScanLedgers` over `--ledgers-span` ledgers, from a random start ledger. This is the read of `getLedgers`. | Ledgers. |
-| `txpage` | A scan of `--txpage-span` ledgers that makes the transaction views, envelopes included, up to `--txpage-limit` transactions. This is the read of `getTransactions`. It does not make or serialize the full RPC response. | Transactions. |
-| `txhash` | One by-hash lookup through the tx-hash indexes. The hash is a hash from the txhash pool or a not-found hash (see section 9.1). This is the read of `getTransaction`. | 1 if found, 0 if not found. |
+| `ledgers` | One read of `--ledgers-span` ledgers, from a random start ledger. This is the read of `getLedgers`. | Ledgers. |
+| `txpage` | A read of `--txpage-span` ledgers that makes the transaction views, envelopes included, up to `--txpage-limit` transactions. This is the read of `getTransactions`. It does not make or serialize the full RPC response. | Transactions. |
+| `txhash` | One `adapters.TransactionReader.GetTransaction` call. The reader looks up the hash in the tx-hash indexes, checks the match against its ledger and parses the transaction view. `latency` includes all of this work. The hash is a hash from the txhash pool or a not-found hash (see section 9.1). This is the read of `getTransaction`. | 1 if found, 0 if not found. |
 | `events` | One page of `--events-limit` events or fewer, with a filter set from the events pool. The read range starts at a random ledger and ends at the last ledger of the dataset. This is the read of `getEvents`. | Events. |
 
 `--ledgers-span` and `--txpage-span` must be 1 to 10,000. A `txpage` request
 stops at the ledger that fills the page.
+
+A read of one ledger (span 1) goes through `ReadView.WithLedger`, the point
+read of the daemon. A read of more ledgers goes through
+`ReadView.ScanLedgers`. Thus, span 1 measures a different read path from the
+wider spans. A `ledgers` request that reads fewer ledgers than its range
+fails.
 
 A `--ledgers-span` or `--txpage-span` can be equal to or more than the number
 of ledgers in the dataset. Then each request of that type reads the same
@@ -390,8 +397,12 @@ builds it before the first `txhash` scenario.
 
 - `--txhash-pool-size` sets the maximum number of hashes. The default is 512.
   The value must be 1 to 1,000,000.
-- The pool build reads random ledgers, and takes 16 hashes or fewer from each
-  ledger. Each chunk supplies its share of the pool.
+- The pool build reads random ledgers, and takes one random hash from each
+  ledger that has transactions. It reads each ledger one time at most. Each
+  chunk supplies its share of the pool. Each chunk has a budget of 16 random
+  draws for each hash that the pool still needs, and 512 draws or more. A
+  draw can pick a ledger that the build already read, or a ledger with no
+  transactions.
 - `--seed` sets the draws, so the same seed and dataset give the same pool.
 - The pool can be smaller than the maximum. The log then shows a warning. A
   pool with no hashes is an error.
@@ -429,9 +440,9 @@ term, and `unfiltered` when the pool holds only the unfiltered read.
 
 Both tiers accept `--warmup`. The default is 0 for `cold` and 20 for `hot`.
 
-`bench-query cold` also accepts `--evict-page-cache`. The default is true. On
+`bench query cold` also accepts `--evict-page-cache`. The default is true. On
 Linux, it requests OS page-cache eviction of the dataset files before each
-scenario. `bench-query hot` does not request eviction.
+scenario. `bench query hot` does not request eviction.
 
 The eviction request is best effort. The request uses `POSIX_FADV_DONTNEED`.
 The kernel keeps dirty pages, pages under writeback and pages that a process
@@ -449,11 +460,12 @@ scenarios put in the caches.
 
 `settings.cacheScenario` records the requested controls:
 
-- `cold-start`: the run requests eviction and does no warmup. This value
-  records the request, not a verified cold cache. It also applies on a
-  platform that cannot evict.
+- `cold-start`: the run requests eviction on Linux and does no warmup. This
+  value records the request, not a verified cold cache.
 - `warm-run`: the warmup is more than 0, with or without eviction.
-- `existing-cache`: there is no eviction and no warmup.
+- `existing-cache`: there is no warmup, and the run does not request
+  eviction. This includes a run with `--evict-page-cache=true` on a platform
+  other than Linux.
 
 `settings.pageCacheEviction` is `off`, `requested` (Linux) or
 `unsupported-on-this-platform`.
@@ -480,7 +492,7 @@ Flags of both subcommands:
 | `--cpuprofile` | Empty | Write a Go CPU profile to this path. |
 | `--memprofile` | Empty | Write a Go allocation profile to this path. |
 
-Flags of `bench-query cold`:
+Flags of `bench query cold`:
 
 | Flag | Default | Definition |
 |---|---|---|
@@ -490,7 +502,7 @@ Flags of `bench-query cold`:
 | `--catalog-dir` | `--cold-dir` | The directory of the scratch catalog. See section 8.1. |
 | `--evict-page-cache` | `true` | Request best-effort OS page-cache eviction of the dataset files before each scenario (Linux only). See section 10. |
 
-Flags of `bench-query hot`:
+Flags of `bench query hot`:
 
 | Flag | Default | Definition |
 |---|---|---|
