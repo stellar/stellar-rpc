@@ -86,9 +86,9 @@ func (f *queryFlags) bind(cmd *cobra.Command) {
 		"unmeasured iterations per scenario, started at the scenario's rate before measurement starts")
 	spanRange := "in [1, " + strconv.FormatUint(uint64(maxReadSpan), 10) + "]"
 	fs.Uint32Var(&f.ledgersSpan, "ledgers-span", defaultLedgersSpan,
-		"ledgers one ledgers request scans, "+spanRange+" (1 = a point read)")
+		"ledgers one ledgers request reads, "+spanRange+" (1 = a point read)")
 	fs.Uint32Var(&f.txPageSpan, "txpage-span", defaultTxPageSpan,
-		"ledgers one txpage request scans, "+spanRange)
+		"ledgers one txpage request reads, "+spanRange)
 	fs.IntVar(&f.txPageLimit, "txpage-limit", defaultTxPageLimit,
 		"the most transactions one txpage request makes (the page size), >= 1")
 	fs.StringVar(&f.passphrase, "network-passphrase", network.PublicNetworkPassphrase,

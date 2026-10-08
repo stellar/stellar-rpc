@@ -35,7 +35,7 @@ func ledgersRequest(ds *queryDataset, p queryPlan) queryRequest {
 				// The read must have materialized the ledger. Only its length is
 				// read; the measured work is the read, not a decode of the bytes.
 				if len(raw) == 0 {
-					return false, fmt.Errorf("ledger %d decoded to zero bytes", seq)
+					return false, fmt.Errorf("ledger %d has zero bytes", seq)
 				}
 				read++
 				return true, nil

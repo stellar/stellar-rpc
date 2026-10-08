@@ -13,7 +13,7 @@ import (
 
 const catalogBaseDirPerm os.FileMode = 0o755 // owner rwx, group/others rx
 
-// Temp-dir prefixes for scratch catalogs, one per bench.
+// Temp-dir prefixes for scratch catalogs, one per bench subcommand.
 const (
 	scratchPrefixIngest = "bench-ingest-catalog-"
 	scratchPrefixQuery  = "bench-query-catalog-"
