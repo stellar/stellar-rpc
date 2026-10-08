@@ -205,8 +205,8 @@ func (s scenarioSummary) latencyMetrics(outcome string) []benchMetric {
 // queryReport collects scenarios in run order and writes the query report. It
 // keeps only aggregated rows and counts. It is not safe for concurrent use.
 type queryReport struct {
-	// tier is the subcommand, queryTierCold or queryTierHot, that bench.txt
-	// names.
+	// tier is queryTierCold or queryTierHot. bench.txt puts it in each
+	// benchmark name.
 	tier      string
 	scenarios []scenarioSummary
 }
@@ -369,7 +369,7 @@ func writeCSVTable(path string, header []string, rows [][]string) error {
 	return nil
 }
 
-// writeTextFile writes text to path, with the same permissions as the CSVs.
+// writeTextFile writes text to path and replaces any existing file.
 func writeTextFile(path, text string) error {
 	f, err := os.Create(path)
 	if err != nil {

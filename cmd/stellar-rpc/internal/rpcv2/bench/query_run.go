@@ -144,11 +144,11 @@ func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan)
 	p.Settings["fixedReadRange"] = strings.Join(fixed, ",")
 }
 
-// runQueryBench is the body both subcommands share: open the dataset, run the
-// scenarios, write the report. tier is the subcommand that bench.txt names.
-// The open time goes into setupNs.storeOpen. A failure after the dataset opens
-// still writes the CSVs of the scenarios added so far, logged as PARTIAL, and
-// no bench.txt.
+// runQueryBench runs a query benchmark for either subcommand and writes its
+// report. tier is the subcommand name that bench.txt records. The dataset open
+// time goes into setupNs.storeOpen. A failure after the dataset opens still
+// writes the CSVs of the scenarios added so far, logged as PARTIAL, but no
+// bench.txt.
 func runQueryBench(
 	ctx context.Context, logger *supportlog.Entry, env runEnv, tier string, p queryPlan,
 	open func() (*queryDataset, func(), error),
