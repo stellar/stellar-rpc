@@ -9,7 +9,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
-// queryPlan is the parsed and validated flag set of one bench-query run.
+// queryPlan is the parsed and validated flag set of one bench query run.
 type queryPlan struct {
 	Types     []string
 	TargetRPS []float64
@@ -26,8 +26,8 @@ type queryPlan struct {
 	Settings map[string]string
 }
 
-// queryDataset is what one bench-query run reads: the registry over the files
-// a bench-ingest run left on disk, and the ledger range the requests read.
+// queryDataset is what one bench query run reads: the registry over the files
+// a bench ingest run left on disk, and the ledger range the requests read.
 // Every request takes a read view and resolves its tier through ReadView. The
 // cold dataset publishes no hot handle; the hot one freezes no artifact.
 type queryDataset struct {

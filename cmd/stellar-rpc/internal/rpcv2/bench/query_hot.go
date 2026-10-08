@@ -60,7 +60,7 @@ func newQueryHotCommand() *cobra.Command {
 	fs := cmd.Flags()
 	fs.Uint32Var(&chunkID, "chunk", 0, "the chunk to query (required)")
 	fs.StringVar(&hotDir, "hot-dir", "",
-		"root holding the hot chunk databases, as bench-ingest hot's --hot-dir laid it out (required)")
+		"root holding the hot chunk databases, as bench ingest hot's --hot-dir laid it out (required)")
 	fs.StringVar(&catalogDir, "catalog-dir", "",
 		"base dir for the run's scratch catalog; default: --hot-dir")
 	fs.Uint32Var(&sampleLedgers, "sample-ledgers", 0,
@@ -121,7 +121,7 @@ func runQueryHot(ctx context.Context, logger *supportlog.Entry, env runEnv, opts
 // openHotDataset opens one chunk's hot database and returns the queryDataset
 // over it, plus its release. opts must pass validate.
 //
-// bench-ingest hot discards its catalog, so the chunk is marked ready in a
+// bench ingest hot discards its catalog, so the chunk is marked ready in a
 // scratch catalog and the existing database is opened through
 // query.OpenRegistry, as the daemon does at startup. Nothing is frozen, so only
 // the hot tier serves. The dataset ends at the last committed ledger, because a

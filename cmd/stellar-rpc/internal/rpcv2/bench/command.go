@@ -25,7 +25,7 @@ func NewCommand() *cobra.Command {
 		Use:   "bench",
 		Short: "Benchmark ingestion and reads",
 	}
-	cmd.AddCommand(newIngestCommand())
+	cmd.AddCommand(newIngestCommand(), newQueryCommand())
 	return cmd
 }
 

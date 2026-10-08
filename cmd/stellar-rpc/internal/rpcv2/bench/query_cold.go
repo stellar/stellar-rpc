@@ -65,7 +65,7 @@ func newQueryColdCommand() *cobra.Command {
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk to query (required)")
 	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to query starting at --start-chunk")
 	fs.StringVar(&coldDir, "cold-dir", "",
-		"root of the frozen artifact tree to query, as bench-ingest cold's --cold-out-dir laid it out (required)")
+		"root of the frozen artifact tree to query, as bench ingest cold's --cold-out-dir laid it out (required)")
 	fs.StringVar(&catalogDir, "catalog-dir", "",
 		"base dir for the run's scratch catalog; default: --cold-dir")
 	markRequired(cmd, "start-chunk", "cold-dir")
@@ -121,7 +121,7 @@ func runQueryCold(ctx context.Context, logger *supportlog.Entry, env runEnv, opt
 // openColdDataset rebuilds the catalog state a frozen artifact tree implies and
 // returns the queryDataset over it, plus its release. opts must pass validate.
 //
-// The tree has no catalog: bench-ingest cold discards its scratch catalog. Each
+// The tree has no catalog: bench ingest cold discards its scratch catalog. Each
 // chunk in the range runs the freeze bracket for each kind on disk; the chunk
 // one past the range gets a "ready" hot key with no handle. LastCompleteChunk
 // is the highest ready hot chunk minus one, and NewReadView fails without one;

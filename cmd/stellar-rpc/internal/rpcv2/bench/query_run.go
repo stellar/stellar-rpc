@@ -15,7 +15,7 @@ import (
 // warning.
 const minLatencyRowSamples = 100
 
-// queryRun is one bench-query run's scenarios: the dataset they read, the
+// queryRun is one bench query run's scenarios: the dataset they read, the
 // plan, the report they add to and the load generator's time source.
 type queryRun struct {
 	logger *supportlog.Entry

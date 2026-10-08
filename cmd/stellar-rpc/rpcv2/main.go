@@ -62,7 +62,6 @@ func main() {
 
 	rootCmd.AddCommand(version.NewCommand())
 	rootCmd.AddCommand(bench.NewCommand())
-	rootCmd.AddCommand(bench.NewQueryCommand())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "could not run: %v\n", err)
