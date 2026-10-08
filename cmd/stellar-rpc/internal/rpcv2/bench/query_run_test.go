@@ -348,7 +348,7 @@ func TestQueryColdCommandWithoutTxHashIndex(t *testing.T) {
 	coldRoot := ingestColdChunk(t)
 	require.NoError(t, os.Remove(txhashIndexPath(t, geometry.NewLayout(coldRoot), 0, 0)))
 
-	cmd := NewQueryCommand()
+	cmd := newQueryCommand()
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{
