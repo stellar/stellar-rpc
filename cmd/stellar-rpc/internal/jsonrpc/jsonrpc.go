@@ -15,12 +15,11 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/creachadair/jrpc2"
+	"github.com/creachadair/jrpc2/handler"
 	"github.com/go-chi/chi/middleware"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/cors"
-	"github.com/stellar-experimental/jrpc2"
-	"github.com/stellar-experimental/jrpc2/handler"
-	"github.com/stellar-experimental/jrpc2/jhttp"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
@@ -52,15 +51,13 @@ const (
 type Handler struct {
 	http.Handler
 
-	bridge jhttp.Bridge
-	logger *log.Entry
+	bridge *bridge
 }
 
-// Close closes all the resources held by the Handler instances.
+// Close stops accepting JSON-RPC requests, cancels those in flight and waits
+// for their handlers to return, so none outlives the stores closed after it.
 func (h Handler) Close() {
-	if err := h.bridge.Close(); err != nil {
-		h.logger.WithError(err).Warn("could not close bridge")
-	}
+	h.bridge.Close()
 }
 
 // HandlerSpec describes one JSON-RPC method: its handler plus the per-method
@@ -236,24 +233,11 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry) j
 
 // NewHandler constructs a Handler instance from the given method specs
 func NewHandler(params Params) Handler {
-	bridgeOptions := jhttp.BridgeOptions{
-		Server: &jrpc2.ServerOptions{
-			Logger: func(text string) { params.Logger.Debug(text) },
-			// Disable built-in rpc.* methods (e.g. rpc.serverInfo) that
-			// bypass the handler allowlist and request limiters.
-			DisableBuiltin: true,
-		},
-	}
-
 	handlersMap := handler.Map{}
 	for _, spec := range params.Specs {
 		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger)
 	}
-	bridge := jhttp.NewBridge(decorateHandlers(
-		params.Daemon,
-		params.Logger,
-		handlersMap),
-		&bridgeOptions)
+	rpc := newBridge(decorateHandlers(params.Daemon, params.Logger, handlersMap))
 
 	// globalQueueRequestBacklogLimiter is a metric for measuring the total concurrent inflight requests
 	globalQueueRequestBacklogLimiter := prometheus.NewGauge(prometheus.GaugeOpts{
@@ -262,7 +246,7 @@ func NewHandler(params Params) Handler {
 	})
 
 	queueLimitedBridge := network.MakeHTTPBacklogQueueLimiter(
-		bridge,
+		rpc,
 		globalQueueRequestBacklogLimiter,
 		uint64(params.GlobalQueueLimit),
 		params.Logger)
@@ -297,8 +281,7 @@ func NewHandler(params Params) Handler {
 	})
 
 	return Handler{
-		bridge:  bridge,
-		logger:  params.Logger,
+		bridge:  rpc,
 		Handler: corsMiddleware.Handler(handler),
 	}
 }

@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/stellar-experimental/jrpc2"
+	"github.com/creachadair/jrpc2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/network"

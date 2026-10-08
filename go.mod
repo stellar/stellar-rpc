@@ -14,6 +14,7 @@ require (
 	github.com/aws/smithy-go v1.28.1
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/cenkalti/backoff/v4 v4.3.0
+	github.com/creachadair/jrpc2 v1.3.3
 	github.com/dustin/go-humanize v1.0.1
 	github.com/fsouza/fake-gcs-server v1.49.2
 	github.com/go-chi/chi v4.1.2+incompatible
@@ -25,7 +26,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go-stellar-sdk v0.7.4-0.20261007200820-dfb8bbf4347b
+	github.com/stellar/go-stellar-sdk v0.7.4-0.20260927163220-0f59d2edfb0d
 	github.com/stellar/streamhash v0.1.1-0.20261008060912-872a4a3b5ea4
 	github.com/stretchr/testify v1.12.1
 )
@@ -34,7 +35,6 @@ require (
 	github.com/dchest/siphash v1.2.3
 	github.com/mattn/go-sqlite3 v1.14.17
 	github.com/rubenv/sql-migrate v1.5.2
-	github.com/stellar-experimental/jrpc2 v0.0.0-20261007183142-4ada2aea5d56
 	go.uber.org/goleak v1.3.0
 )
 
@@ -100,7 +100,7 @@ require (
 	github.com/aws/aws-sdk-go v1.55.8 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/creachadair/mds v0.26.1 // indirect
+	github.com/creachadair/mds v0.25.10 // indirect
 	github.com/djherbis/fscache v0.10.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
@@ -112,6 +112,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.11 // indirect
 	github.com/googleapis/gax-go/v2 v2.17.0 // indirect
+	github.com/hashicorp/golang-lru v1.0.2 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect

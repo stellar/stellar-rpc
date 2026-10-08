@@ -5,7 +5,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/stellar-experimental/jrpc2"
+	"github.com/creachadair/jrpc2"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
