@@ -5,18 +5,43 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/creachadair/jrpc2"
 	"github.com/creachadair/jrpc2/handler"
 	"github.com/creachadair/jrpc2/jhttp"
+	"github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/go-stellar-sdk/support/log"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 )
+
+// unlimited lets requests run as long as their handlers take.
+var unlimited = durationLimits{limit: network.RequestDurationLimiterNoLimit, logger: log.DefaultLogger}
+
+type counter struct{ n atomic.Int64 }
+
+func (c *counter) Inc() { c.n.Add(1) }
+
+// testLogger returns a quiet logger whose entries hook records.
+func testLogger() (*log.Entry, *logtest.Hook) {
+	hook := new(logtest.Hook)
+	logger := log.New()
+	logger.SetOutput(io.Discard)
+	logger.SetLevel(logrus.DebugLevel)
+	logger.AddHook(hook)
+	return logger, hook
+}
 
 // bridgeMethods is the method table the bridge tests serve. Its raw result is
 // compact and free of HTML characters, so jhttp.Bridge re-encodes it to the
@@ -137,7 +162,7 @@ func TestBridge_ParityWithJHTTP(t *testing.T) {
 	methods := bridgeMethods()
 	old := jhttp.NewBridge(methods, &jhttp.BridgeOptions{Server: &jrpc2.ServerOptions{DisableBuiltin: true}})
 	t.Cleanup(func() { _ = old.Close() })
-	b := newBridge(methods)
+	b := newBridge(methods, unlimited)
 	t.Cleanup(b.Close)
 	for _, tc := range bridgeCases() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -153,7 +178,7 @@ func TestBridge_ParityWithJHTTP(t *testing.T) {
 // to match.
 func TestBridge_RawResultPassthrough(t *testing.T) {
 	raw := json.RawMessage("{\n  \"pretty\": \"<kept>\"\n}")
-	b := newBridge(handler.Map{"raw": handler.New(func(context.Context) (any, error) { return raw, nil })})
+	b := newBridge(handler.Map{"raw": handler.New(func(context.Context) (any, error) { return raw, nil })}, unlimited)
 	t.Cleanup(b.Close)
 	rec := postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"raw"}`)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -168,7 +193,7 @@ func TestBridge_RequestContext(t *testing.T) {
 	b := newBridge(handler.Map{"m": handler.New(func(hctx context.Context) (any, error) {
 		disconnect()
 		return nil, hctx.Err()
-	})})
+	})}, unlimited)
 	t.Cleanup(b.Close)
 	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/",
 		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"m"}`))
@@ -192,7 +217,7 @@ func TestBridge_CloseDrains(t *testing.T) {
 		time.Sleep(50 * time.Millisecond) // unwinding takes a while
 		close(unwound)
 		return nil, hctx.Err()
-	})})
+	})}, unlimited)
 	served := make(chan *httptest.ResponseRecorder, 1)
 	go func() { served <- postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"slow"}`) }()
 	<-started
@@ -207,4 +232,69 @@ func TestBridge_CloseDrains(t *testing.T) {
 	rec := postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"slow"}`)
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.Equal(t, errBridgeClosed.Error()+"\n", rec.Body.String())
+}
+
+// A request that outlasts the global limit is answered 504 with no body, and
+// one past the limit or the warning is counted and logged.
+func TestBridge_DurationLimits(t *testing.T) {
+	const ok = `{"jsonrpc":"2.0","id":1,"result":1}`
+	for _, tc := range []struct {
+		name                     string
+		warning, limit, run      time.Duration
+		wantCode                 int
+		wantBody                 string
+		wantWarnings, wantLimits int64
+	}{
+		{"limited", time.Second / 20, time.Second / 10, 10 * time.Second, http.StatusGatewayTimeout, "", 0, 1},
+		{"not limited", 5 * time.Second, 10 * time.Second, time.Second / 10, http.StatusOK, ok, 0, 0},
+		{"warned", time.Second / 10, 10 * time.Second, time.Second / 5, http.StatusOK, ok, 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var warnings, limits counter
+			logger, hook := testLogger()
+			b := newBridge(handler.Map{"slow": handler.New(func(ctx context.Context) (any, error) {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(tc.run):
+					return 1, nil
+				}
+			})}, durationLimits{tc.warning, tc.limit, &warnings, &limits, logger})
+			t.Cleanup(b.Close)
+			rec := postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"slow"}`)
+			require.Equal(t, tc.wantCode, rec.Code)
+			require.Equal(t, tc.wantBody, rec.Body.String())
+			require.Equal(t, tc.wantWarnings, warnings.n.Load())
+			require.Equal(t, tc.wantLimits, limits.n.Load())
+			require.Len(t, hook.AllEntries(), int(tc.wantWarnings+tc.wantLimits))
+		})
+	}
+}
+
+// A panic while serving is answered 500 and its stack logged, whether the
+// handler ran on the request's goroutine or on its own.
+func TestBridge_Panic(t *testing.T) {
+	methods := handler.Map{
+		"panic": handler.New(func(context.Context) (any, error) { panic("test panic") }),
+		"ok":    handler.New(func(context.Context) (any, error) { return 1, nil }),
+	}
+	for name, body := range map[string]string{
+		"single":        `{"jsonrpc":"2.0","id":1,"method":"panic"}`,
+		"batch element": `[{"jsonrpc":"2.0","id":1,"method":"panic"},{"jsonrpc":"2.0","id":2,"method":"ok"}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			logger, hook := testLogger()
+			b := newBridge(methods, durationLimits{limit: network.RequestDurationLimiterNoLimit, logger: logger})
+			t.Cleanup(b.Close)
+			rec := postBridge(t, b, body)
+			require.Equal(t, http.StatusInternalServerError, rec.Code)
+			require.Empty(t, rec.Body.String())
+			entries := hook.AllEntries()
+			require.NotEmpty(t, entries)
+			require.Equal(t, "test panic when calling panic", entries[0].Message)
+			for _, e := range entries {
+				require.Equal(t, logrus.WarnLevel, e.Level)
+			}
+		})
+	}
 }

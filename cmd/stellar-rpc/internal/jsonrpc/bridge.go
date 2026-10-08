@@ -15,9 +15,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/creachadair/jrpc2"
 	"golang.org/x/sync/semaphore"
+
+	"github.com/stellar/go-stellar-sdk/support/log"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/util"
 )
 
 const contentTypeJSON = "application/json"
@@ -33,9 +40,12 @@ var (
 // is written as is. It stands in for jhttp.Bridge, which ran every request
 // through an in-memory client and server and re-encoded each response on the
 // way, and keeps its wire behavior; TestBridge_ParityWithJHTTP checks that.
+// It enforces the global duration limit itself, so a response is never
+// buffered to be swapped for a 504.
 type bridge struct {
 	methods jrpc2.Assigner
 	sem     *semaphore.Weighted // bounds the handlers running at once, as jrpc2.Server does
+	limits  durationLimits
 
 	mu     sync.RWMutex // read-held while a request's handlers run
 	closed bool
@@ -43,11 +53,20 @@ type bridge struct {
 	cancel context.CancelFunc
 }
 
-func newBridge(methods jrpc2.Assigner) *bridge {
+// durationLimits are the global request-duration thresholds, with the counters
+// and logger for requests that pass them, as network's HTTP limiter had them.
+type durationLimits struct {
+	warning, limit     time.Duration
+	warnings, timeouts interface{ Inc() }
+	logger             *log.Entry
+}
+
+func newBridge(methods jrpc2.Assigner, limits durationLimits) *bridge {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &bridge{
 		methods: methods,
 		sem:     semaphore.NewWeighted(int64(runtime.NumCPU())),
+		limits:  limits,
 		ctx:     ctx,
 		cancel:  cancel,
 	}
@@ -64,6 +83,7 @@ func (b *bridge) Close() {
 
 // ServeHTTP implements http.Handler.
 func (b *bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	defer b.recoverPanic(w)
 	w.Header().Set("Accept-Post", contentTypeJSON)
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -78,34 +98,88 @@ func (b *bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid content-type charset", http.StatusUnsupportedMediaType)
 		return
 	}
-	if err := b.serve(w, r); err != nil {
+	start := time.Now()
+	ctx, cancel := b.limits.bound(r.Context())
+	defer cancel()
+	batch, rsps, err := b.serve(ctx, r)
+	if b.limits.timedOut(r, time.Since(start)) {
+		if r.Context().Err() == nil {
+			w.WriteHeader(http.StatusGatewayTimeout)
+		}
+		return
+	}
+	if err == nil && len(rsps) == 0 {
+		w.WriteHeader(http.StatusNoContent) // only notifications, or an empty batch
+		return
+	}
+	if err == nil {
+		err = write(w, batch, rsps)
+	}
+	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = fmt.Fprintln(w, err.Error()) //nolint:gosec // a read or parse error, as text; jhttp.Bridge did the same
 	}
 }
 
-// serve answers the requests in r's body.
-func (b *bridge) serve(w http.ResponseWriter, r *http.Request) error {
+// serve runs the requests in r's body on ctx and returns their responses.
+func (b *bridge) serve(ctx context.Context, r *http.Request) (bool, []*response, error) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		return err
+		return false, nil, err
 	}
 	reqs, err := jrpc2.ParseRequests(body)
 	if err != nil {
-		return err
+		return false, nil, err
 	}
 	batch := len(reqs) > 0 && reqs[0].Batch
 	// Invalid requests are answered first, as jhttp.Bridge did.
 	slices.SortStableFunc(reqs, func(x, y *jrpc2.ParsedRequest) int { return rank(x) - rank(y) })
-	rsps, err := b.run(r.Context(), reqs)
-	if err != nil {
-		return err
+	rsps, err := b.run(ctx, reqs)
+	return batch, rsps, err
+}
+
+// bound returns ctx ending at the limit, as the handlers see it.
+func (l durationLimits) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	if l.limit == network.RequestDurationLimiterNoLimit {
+		return ctx, func() {}
 	}
-	if len(rsps) == 0 {
-		w.WriteHeader(http.StatusNoContent) // only notifications, or an empty batch
-		return nil
+	return context.WithTimeout(ctx, l.limit)
+}
+
+// timedOut reports whether a request that took elapsed passed the limit, and
+// counts and logs it if it passed the limit or, failing that, the warning.
+func (l durationLimits) timedOut(r *http.Request, elapsed time.Duration) bool {
+	switch {
+	case l.limit == network.RequestDurationLimiterNoLimit:
+	case l.limit != 0 && elapsed >= l.limit:
+		l.timeouts.Inc()
+		l.logger.Infof("Request processing for %s exceed limiting threshold of %v", r.URL.Path, l.limit)
+		return true
+	case l.warning != 0 && l.warning < l.limit && elapsed >= l.warning:
+		l.warnings.Inc()
+		l.logger.Infof("Request processing for %s exceed warning threshold of %v", r.URL.Path, l.warning)
 	}
-	return write(w, batch, rsps)
+	return false
+}
+
+// handlerPanic is the call stack of a panic recovered in a handler's call.
+type handlerPanic []string
+
+// recoverPanic answers 500 to a request whose serving panicked and logs the
+// stack, as network's HTTP limiter did.
+func (b *bridge) recoverPanic(w http.ResponseWriter) {
+	p := recover()
+	if p == nil {
+		return
+	}
+	stack, ok := p.(handlerPanic)
+	if !ok {
+		stack = util.CallStack(p, "", "(*bridge).ServeHTTP", 8)
+	}
+	w.WriteHeader(http.StatusInternalServerError)
+	for _, line := range stack {
+		b.limits.logger.Warn(line)
+	}
 }
 
 // rank orders invalid requests before valid ones.
@@ -130,6 +204,7 @@ func (b *bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*respo
 
 	rsps := make([]*response, len(reqs))
 	var wg sync.WaitGroup
+	var crashed atomic.Pointer[handlerPanic]
 	for i, pr := range reqs {
 		method, rsp := b.route(ctx, pr)
 		if method == nil {
@@ -142,6 +217,12 @@ func (b *bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*respo
 		}
 		call := func() {
 			defer b.sem.Release(1)
+			defer func() {
+				if p := recover(); p != nil {
+					stack := handlerPanic(util.CallStack(p, pr.Method, "(*bridge).run.func", 8))
+					crashed.CompareAndSwap(nil, &stack)
+				}
+			}()
 			v, err := method(ctx, pr.ToRequest())
 			rsps[i] = respond(pr, v, err)
 		}
@@ -152,6 +233,9 @@ func (b *bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*respo
 		}
 	}
 	wg.Wait()
+	if stack := crashed.Load(); stack != nil {
+		panic(*stack) // recoverPanic answers 500 for the whole request
+	}
 	return slices.DeleteFunc(rsps, func(r *response) bool { return r == nil }), nil
 }
 

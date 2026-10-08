@@ -2,18 +2,12 @@ package network
 
 import (
 	"context"
-	"maps"
 	"math"
-	"net/http"
-	"reflect"
-	"runtime"
 	"time"
 
 	"github.com/creachadair/jrpc2"
 
 	"github.com/stellar/go-stellar-sdk/support/log"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/util"
 )
 
 const maxDuration = time.Duration(math.MaxInt64)
@@ -35,166 +29,6 @@ type requestDurationLimiter struct {
 	logger           *log.Entry
 	warningCounter   increasingCounter
 	limitCounter     increasingCounter
-}
-
-type httpRequestDurationLimiter struct {
-	requestDurationLimiter
-
-	httpDownstreamHandler http.Handler
-}
-
-func MakeHTTPRequestDurationLimiter(
-	downstream http.Handler,
-	warningThreshold time.Duration,
-	limitThreshold time.Duration,
-	warningCounter increasingCounter,
-	limitCounter increasingCounter,
-	logger *log.Entry,
-) http.Handler {
-	// make sure the warning threshold is less then the limit threshold; otherwise, just set it to the limit threshold.
-	if warningThreshold > limitThreshold {
-		warningThreshold = limitThreshold
-	}
-	return &httpRequestDurationLimiter{
-		httpDownstreamHandler: downstream,
-		requestDurationLimiter: requestDurationLimiter{
-			warningThreshold: warningThreshold,
-			limitThreshold:   limitThreshold,
-			logger:           logger,
-			warningCounter:   warningCounter,
-			limitCounter:     limitCounter,
-		},
-	}
-}
-
-type bufferedResponseWriter struct {
-	header     http.Header
-	buffer     []byte
-	statusCode int
-}
-
-func makeBufferedResponseWriter(rw http.ResponseWriter) *bufferedResponseWriter {
-	header := rw.Header()
-	bw := &bufferedResponseWriter{
-		header: make(http.Header, 0),
-	}
-	maps.Copy(bw.header, header)
-	return bw
-}
-
-func (w *bufferedResponseWriter) Header() http.Header {
-	return w.header
-}
-
-func (w *bufferedResponseWriter) Write(buf []byte) (int, error) {
-	w.buffer = append(w.buffer, buf...)
-	return len(buf), nil
-}
-
-func (w *bufferedResponseWriter) WriteHeader(statusCode int) {
-	w.statusCode = statusCode
-}
-
-func (w *bufferedResponseWriter) WriteOut(ctx context.Context, rw http.ResponseWriter) {
-	// update the headers map.
-	headers := rw.Header()
-	for k := range headers {
-		delete(headers, k)
-	}
-	maps.Copy(headers, w.header)
-
-	if len(w.buffer) == 0 {
-		if w.statusCode != 0 {
-			rw.WriteHeader(w.statusCode)
-		}
-		return
-	}
-	if w.statusCode != 0 {
-		rw.WriteHeader(w.statusCode)
-	}
-
-	if ctx.Err() == nil {
-		// the following return size/error won't help us much at this point. The request is already finalized.
-		rw.Write(w.buffer) //nolint:errcheck
-	}
-}
-
-// TODO: refactor and simplify this function
-//
-//nolint:gocognit,cyclop
-func (q *httpRequestDurationLimiter) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	if q.limitThreshold == RequestDurationLimiterNoLimit {
-		// if specified max duration, pass-through
-		q.httpDownstreamHandler.ServeHTTP(res, req)
-		return
-	}
-	var warningCh <-chan time.Time
-	if q.warningThreshold != time.Duration(0) && q.warningThreshold < q.limitThreshold {
-		warningCh = time.NewTimer(q.warningThreshold).C
-	}
-	var limitCh <-chan time.Time
-	if q.limitThreshold != time.Duration(0) {
-		limitCh = time.NewTimer(q.limitThreshold).C
-	}
-	requestCompleted := make(chan []string, 1)
-	requestCtx, requestCtxCancel := context.WithTimeout(req.Context(), q.limitThreshold)
-	defer requestCtxCancel()
-	timeLimitedRequest := req.WithContext(requestCtx)
-	responseBuffer := makeBufferedResponseWriter(res)
-	go func() {
-		defer func() {
-			if err := recover(); err != nil {
-				functionName := runtime.FuncForPC(reflect.ValueOf(q.httpDownstreamHandler.ServeHTTP).Pointer()).Name()
-				callStack := util.CallStack(err, functionName, "(*httpRequestDurationLimiter).ServeHTTP.func1()", 8)
-				requestCompleted <- callStack
-			} else {
-				close(requestCompleted)
-			}
-		}()
-		q.httpDownstreamHandler.ServeHTTP(responseBuffer, timeLimitedRequest)
-	}()
-
-	warn := false
-	for {
-		select {
-		case <-warningCh:
-			// warn
-			warn = true
-		case <-limitCh:
-			// limit
-			requestCtxCancel()
-			if q.limitCounter != nil {
-				q.limitCounter.Inc()
-			}
-			if q.logger != nil {
-				q.logger.Infof("Request processing for %s exceed limiting threshold of %v", req.URL.Path, q.limitThreshold)
-			}
-			if req.Context().Err() == nil {
-				res.WriteHeader(http.StatusGatewayTimeout)
-			}
-			return
-		case errStrings := <-requestCompleted:
-			if warn {
-				if q.warningCounter != nil {
-					q.warningCounter.Inc()
-				}
-				if q.logger != nil {
-					q.logger.Infof("Request processing for %s exceed warning threshold of %v", req.URL.Path, q.warningThreshold)
-				}
-			}
-			if len(errStrings) == 0 {
-				responseBuffer.WriteOut(req.Context(), res)
-			} else {
-				res.WriteHeader(http.StatusInternalServerError)
-				for _, errStr := range errStrings {
-					if q.logger != nil {
-						q.logger.Warn(errStr)
-					}
-				}
-			}
-			return
-		}
-	}
 }
 
 type RPCRequestDurationLimiter struct {

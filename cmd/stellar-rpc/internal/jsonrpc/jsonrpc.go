@@ -237,19 +237,6 @@ func NewHandler(params Params) Handler {
 	for _, spec := range params.Specs {
 		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger)
 	}
-	rpc := newBridge(decorateHandlers(params.Daemon, params.Logger, handlersMap))
-
-	// globalQueueRequestBacklogLimiter is a metric for measuring the total concurrent inflight requests
-	globalQueueRequestBacklogLimiter := prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: params.Daemon.MetricsNamespace(), Subsystem: subsystemNetwork, Name: "global_inflight_requests",
-		Help: "Number of concurrenty in-flight http requests",
-	})
-
-	queueLimitedBridge := network.MakeHTTPBacklogQueueLimiter(
-		rpc,
-		globalQueueRequestBacklogLimiter,
-		uint64(params.GlobalQueueLimit),
-		params.Logger)
 
 	globalQueueRequestExecutionDurationWarningCounter := prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: params.Daemon.MetricsNamespace(),
@@ -263,15 +250,27 @@ func NewHandler(params Params) Handler {
 		Name:      "global_request_execution_duration_threshold_limit",
 		Help:      "The metric measures the count of requests that surpassed the limit threshold for execution time",
 	})
-	handler := network.MakeHTTPRequestDurationLimiter(
-		queueLimitedBridge,
-		params.GlobalDurationWarning,
-		params.GlobalDurationLimit,
-		globalQueueRequestExecutionDurationWarningCounter,
-		globalQueueRequestExecutionDurationLimitCounter,
+	rpc := newBridge(decorateHandlers(params.Daemon, params.Logger, handlersMap), durationLimits{
+		warning:  params.GlobalDurationWarning,
+		limit:    params.GlobalDurationLimit,
+		warnings: globalQueueRequestExecutionDurationWarningCounter,
+		timeouts: globalQueueRequestExecutionDurationLimitCounter,
+		logger:   params.Logger,
+	})
+
+	// globalQueueRequestBacklogLimiter is a metric for measuring the total concurrent inflight requests
+	globalQueueRequestBacklogLimiter := prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: params.Daemon.MetricsNamespace(), Subsystem: subsystemNetwork, Name: "global_inflight_requests",
+		Help: "Number of concurrenty in-flight http requests",
+	})
+
+	queueLimitedBridge := network.MakeHTTPBacklogQueueLimiter(
+		rpc,
+		globalQueueRequestBacklogLimiter,
+		uint64(params.GlobalQueueLimit),
 		params.Logger)
 
-	handler = http.MaxBytesHandler(handler, maxHTTPRequestSize)
+	handler := http.MaxBytesHandler(queueLimitedBridge, maxHTTPRequestSize)
 
 	corsMiddleware := cors.New(cors.Options{
 		AllowedOrigins:         []string{},
