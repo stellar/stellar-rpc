@@ -13,11 +13,9 @@ import (
 // of a file.
 const evictSupported = true
 
-// evictFile requests that the kernel drop path's pages from the OS page cache
-// with POSIX_FADV_DONTNEED. The request is best effort. It acts on the inode's
-// page cache, so it also applies to pages that other open descriptors read.
-// The kernel keeps dirty pages, pages under writeback and pages that a process
-// has mapped.
+// evictFile asks the kernel to drop path's pages from the page cache with
+// POSIX_FADV_DONTNEED, including pages that other descriptors read. The request
+// is best effort: the kernel keeps dirty, under-writeback and mapped pages.
 func evictFile(path string) error {
 	f, err := os.Open(path)
 	if err != nil {

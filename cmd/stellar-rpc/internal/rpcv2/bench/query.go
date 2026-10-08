@@ -84,8 +84,8 @@ type queryFlags struct {
 // defaultHotWarmup is --warmup's default for bench-query hot.
 const defaultHotWarmup = 20
 
-// queryTierFlags returns the flag set a tier's subcommand binds. bind takes
-// the --warmup default from the struct, so the tier's default is set here.
+// queryTierFlags returns the flags for tier's subcommand, preset to the tier's
+// --warmup default.
 func queryTierFlags(tier string) queryFlags {
 	if tier == queryTierHot {
 		return queryFlags{warmup: defaultHotWarmup}
@@ -93,6 +93,8 @@ func queryTierFlags(tier string) queryFlags {
 	return queryFlags{}
 }
 
+// bind registers the flags on cmd. f.warmup is the --warmup default, so build f
+// with queryTierFlags.
 func (f *queryFlags) bind(cmd *cobra.Command) {
 	fs := cmd.Flags()
 	fs.StringVar(&f.types, "types", strings.Join(allQueryTypes, ","),

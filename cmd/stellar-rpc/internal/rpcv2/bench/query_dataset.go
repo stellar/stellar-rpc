@@ -37,8 +37,8 @@ type queryPlan struct {
 	Settings map[string]string
 }
 
-// cacheScenario is the settings.cacheScenario value of the plan's cache
-// controls.
+// cacheScenario names the page-cache state the plan's measured iterations start
+// from, for settings.cacheScenario.
 func (p queryPlan) cacheScenario() string {
 	switch {
 	case p.Warmup > 0:
@@ -102,9 +102,8 @@ func (ds *queryDataset) verifyServes(types []string) error {
 	return nil
 }
 
-// evictColdArtifacts requests page-cache eviction and counts successful calls.
-// A missing file is skipped. Off Linux nothing can be evicted and the count is
-// zero; settings.pageCacheEviction records that eviction is unsupported.
+// evictColdArtifacts requests page-cache eviction of EvictPaths and returns how
+// many files it advised. It skips a missing file and, off Linux, advises none.
 func (ds *queryDataset) evictColdArtifacts() (int, error) {
 	if !evictSupported {
 		return 0, nil

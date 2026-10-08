@@ -81,11 +81,11 @@ type scenarioReport struct {
 	queryType string
 	targetRPS float64
 	result    scenarioResult
-	// pageCacheEvict is the time of the eviction-request pass before the
-	// scenario.
+	// pageCacheEvict is how long the page-cache eviction requests before the
+	// scenario took.
 	pageCacheEvict time.Duration
-	// evicted is true when the pass advised at least one file. Otherwise
-	// scenarios.csv leaves page_cache_evict_ns empty.
+	// evicted reports whether those requests advised at least one file; if
+	// not, scenarios.csv leaves page_cache_evict_ns empty.
 	evicted bool
 }
 

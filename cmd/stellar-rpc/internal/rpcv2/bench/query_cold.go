@@ -192,8 +192,8 @@ func openColdDataset(logger *supportlog.Entry, opts coldQueryOptions) (*queryDat
 	return ds, release, nil
 }
 
-// coldArtifactPaths lists every file the chunks are served from: each chunk's
-// frozen artifacts and the frozen tx-hash window indexes, read off the catalog.
+// coldArtifactPaths lists the artifact files the catalog records as frozen for
+// chunks, plus every frozen tx-hash index file in the catalog.
 func coldArtifactPaths(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.ID) ([]string, error) {
 	var paths []string
 	for _, c := range chunks {
