@@ -16,12 +16,12 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
-// NewQueryCommand returns the `bench-query` command tree: `cold` benchmarks
+// newQueryCommand returns the `bench query` command tree: `cold` benchmarks
 // reads served from frozen artifacts, `hot` reads served from a hot chunk
 // database. Both read through query.ReadView.
-func NewQueryCommand() *cobra.Command {
+func newQueryCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "bench-query",
+		Use:   "query",
 		Short: "Benchmark full-history reads",
 	}
 	cmd.AddCommand(newQueryColdCommand(), newQueryHotCommand())
@@ -45,7 +45,7 @@ const (
 // maxTargetRPS is the highest rate --target-rps accepts.
 const maxTargetRPS = 100_000
 
-// The tier names bench-query registers its subcommands under.
+// The tier names bench query registers its subcommands under.
 const (
 	queryTierCold = "cold"
 	queryTierHot  = "hot"
@@ -56,7 +56,7 @@ const (
 // uint32.
 const maxReadSpan = chunk.LedgersPerChunk
 
-// queryFlags is the flag set both bench-query subcommands share, beyond --out
+// queryFlags is the flag set both bench query subcommands share, beyond --out
 // and the profiling flags newBenchCommand binds. The spellings and value
 // formats of --types, --target-rps, --duration and --warmup are the campaign
 // runner's argv contract.

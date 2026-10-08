@@ -197,7 +197,7 @@ func TestQueryCommandsRefuseUsedOut(t *testing.T) {
 		{[]string{queryTierHot, "--chunk", "0", "--hot-dir", hotRoot}, hotRoot},
 	} {
 		t.Run(tc.args[0], func(t *testing.T) {
-			requireRefusesUsedOut(t, NewQueryCommand(), tc.args, tc.input)
+			requireRefusesUsedOut(t, newQueryCommand(), tc.args, tc.input)
 		})
 	}
 }
@@ -234,7 +234,7 @@ func TestQueryCommandsRejectBadInputsBeforeOut(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := filepath.Join(t.TempDir(), "out")
-			cmd := NewQueryCommand()
+			cmd := newQueryCommand()
 			cmd.SetOut(io.Discard)
 			cmd.SetErr(io.Discard)
 			cmd.SetArgs(append(tc.args, "--out", out))
@@ -244,15 +244,15 @@ func TestQueryCommandsRejectBadInputsBeforeOut(t *testing.T) {
 	}
 }
 
-// runQueryCommand runs bench-query with args and --out, checks the run record,
+// runQueryCommand runs bench query with args and --out, checks the run record,
 // and returns the scenarios.csv rows.
 func runQueryCommand(t *testing.T, args ...string) []map[string]string {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "out")
-	cmd := NewQueryCommand()
+	cmd := NewCommand()
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
-	cmd.SetArgs(append(args, "--out", out))
+	cmd.SetArgs(append(append([]string{"query"}, args...), "--out", out))
 	require.NoError(t, cmd.Execute())
 
 	data, err := os.ReadFile(filepath.Join(out, runRecordFile))
@@ -260,6 +260,7 @@ func runQueryCommand(t *testing.T, args ...string) []map[string]string {
 	var record runRecord
 	require.NoError(t, json.Unmarshal(data, &record))
 	assert.Equal(t, runStatusOK, record.Status)
+	assert.Equal(t, "bench query "+args[0], record.Command)
 	assert.Positive(t, record.SetupNs["storeOpen"])
 	assert.FileExists(t, filepath.Join(out, queryLatencyFile))
 	_, rows := readCSVTable(t, filepath.Join(out, queryScenariosFile))
@@ -276,7 +277,7 @@ func TestQueryHotCommandRecordsRun(t *testing.T) {
 	assert.Equal(t, "20", rows[0]["planned"])
 }
 
-// ingestColdChunk runs bench-ingest cold over one full fixture chunk 0 and
+// ingestColdChunk runs bench ingest cold over one full fixture chunk 0 and
 // returns its --cold-dir.
 func ingestColdChunk(t *testing.T) string {
 	t.Helper()

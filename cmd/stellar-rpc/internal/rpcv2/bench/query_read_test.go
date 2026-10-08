@@ -17,17 +17,17 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
-// executeQuery runs bench-query with args and a new --out, and requires success.
+// executeQuery runs bench query with args and a new --out, and requires success.
 func executeQuery(t *testing.T, args ...string) {
 	t.Helper()
-	cmd := NewQueryCommand()
+	cmd := newQueryCommand()
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs(append(args, "--out", filepath.Join(t.TempDir(), "out")))
 	require.NoError(t, cmd.Execute())
 }
 
-// requireNoScratchCatalog fails when dir holds a bench-query scratch catalog.
+// requireNoScratchCatalog fails when dir holds a bench query scratch catalog.
 func requireNoScratchCatalog(t *testing.T, dir string) {
 	t.Helper()
 	for _, name := range dirNames(t, dir) {
