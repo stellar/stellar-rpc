@@ -27,7 +27,7 @@ func TestCommandRecordsFailedRun(t *testing.T) {
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{
-		"hot",
+		"ingest", "hot",
 		"--pack-dir", packDir,
 		"--start-chunk", "0",
 		"--hot-dir", t.TempDir(),
@@ -40,7 +40,7 @@ func TestCommandRecordsFailedRun(t *testing.T) {
 	require.NoError(t, readErr)
 	var record runRecord
 	require.NoError(t, json.Unmarshal(data, &record))
-	assert.Equal(t, "bench-ingest hot", record.Command)
+	assert.Equal(t, "bench ingest hot", record.Command)
 	assert.Equal(t, err.Error(), record.Error)
 	assert.Equal(t, packDir, record.Flags["pack-dir"])
 	assert.Equal(t, outDir, record.Flags["out"])
@@ -71,7 +71,7 @@ func TestCommandRejectsBadFlagsBeforeOut(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			outDir := filepath.Join(t.TempDir(), "csv")
-			cmd := NewCommand()
+			cmd := newIngestCommand()
 			cmd.SetOut(io.Discard)
 			cmd.SetErr(io.Discard)
 			cmd.SetArgs(append(tc.args, "--out", outDir))
@@ -175,7 +175,7 @@ func TestIngestCommandsRefuseUsedOut(t *testing.T) {
 		{"hot", "--start-chunk", "0", "--hot-dir", t.TempDir(), "--pack-dir", missing},
 	} {
 		t.Run(args[0], func(t *testing.T) {
-			requireRefusesUsedOut(t, NewCommand(), args, missing)
+			requireRefusesUsedOut(t, newIngestCommand(), args, missing)
 		})
 	}
 }
@@ -208,8 +208,10 @@ func requireRefusesUsedOut(t *testing.T, cmd *cobra.Command, args []string, miss
 // TestWriteRunRecordInProgress checks the JSON of a start record.
 func TestWriteRunRecordInProgress(t *testing.T) {
 	outDir := t.TempDir()
-	parent := &cobra.Command{Use: "bench-ingest"}
+	root := &cobra.Command{Use: "bench"}
+	parent := &cobra.Command{Use: "ingest"}
 	cmd := &cobra.Command{Use: "cold"}
+	root.AddCommand(parent)
 	parent.AddCommand(cmd)
 
 	flags := map[string]string{"cold-out-dir": "/bench/ds", "workers": "4"}
@@ -222,7 +224,7 @@ func TestWriteRunRecordInProgress(t *testing.T) {
 	var record runRecord
 	require.NoError(t, json.Unmarshal(data, &record))
 	assert.Equal(t, 2, record.SchemaVersion)
-	assert.Equal(t, "bench-ingest cold", record.Command)
+	assert.Equal(t, "bench ingest cold", record.Command)
 	assert.Equal(t, "2026-08-28T09:00:00Z", record.StartedAt)
 	assert.Equal(t, "/bench/ds", record.Flags["cold-out-dir"])
 	assert.Equal(t, runStatusRunning, record.Status)
@@ -239,8 +241,10 @@ func TestWriteRunRecordInProgress(t *testing.T) {
 // TestWriteRunRecord checks the JSON of a successful run.
 func TestWriteRunRecord(t *testing.T) {
 	outDir := t.TempDir()
-	parent := &cobra.Command{Use: "bench-ingest"}
+	root := &cobra.Command{Use: "bench"}
+	parent := &cobra.Command{Use: "ingest"}
 	cmd := &cobra.Command{Use: "cold"}
+	root.AddCommand(parent)
 	parent.AddCommand(cmd)
 
 	flags := map[string]string{"start-chunk": "1000", "num-chunks": "10", "workers": "4"}
@@ -257,7 +261,7 @@ func TestWriteRunRecord(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &got))
 
 	assert.Equal(t, 2, got.SchemaVersion)
-	assert.Equal(t, "bench-ingest cold", got.Command) // CommandPath returns "parent child"
+	assert.Equal(t, "bench ingest cold", got.Command) // CommandPath joins every ancestor
 	assert.Equal(t, "1000", got.Flags["start-chunk"])
 	assert.Equal(t, "10", got.Flags["num-chunks"])
 	assert.Equal(t, uint64(4096), got.PeakRSSBytes)
