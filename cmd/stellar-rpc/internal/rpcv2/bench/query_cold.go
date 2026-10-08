@@ -125,8 +125,8 @@ func runQueryCold(ctx context.Context, logger *supportlog.Entry, env runEnv, opt
 // chunk in the range runs the freeze bracket for each kind on disk; the chunk
 // one past the range gets a "ready" hot key with no handle. LastCompleteChunk
 // is the highest ready hot chunk minus one, and NewReadView fails without one;
-// a hot key with no handle resolves to no tier. Retention is full history from
-// the range's first chunk; the latest ledger is the range's last.
+// a hot key with no handle resolves to no tier. Retention keeps every ledger
+// from the range's first chunk; the latest ledger is the range's last.
 func openColdDataset(logger *supportlog.Entry, opts coldQueryOptions) (*queryDataset, func(), error) {
 	layout := geometry.NewLayout(opts.ColdRoot)
 	cat, releaseCat, err := openScratchCatalog(

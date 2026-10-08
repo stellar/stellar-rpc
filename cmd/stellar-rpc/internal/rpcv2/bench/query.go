@@ -22,7 +22,7 @@ import (
 func newQueryCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "query",
-		Short: "Benchmark full-history reads",
+		Short: "Benchmark reads",
 	}
 	cmd.AddCommand(newQueryColdCommand(), newQueryHotCommand())
 	return cmd
