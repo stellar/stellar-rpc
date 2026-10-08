@@ -281,7 +281,7 @@ func (q *queryReport) write(outDir string) ([]string, error) {
 // for a run that succeeded.
 func (q *queryReport) writeBench(outDir string) (string, error) {
 	path := filepath.Join(outDir, queryBenchFile)
-	if err := writeTextFile(path, q.benchText(runtime.GOOS, runtime.GOARCH)); err != nil {
+	if err := writeTextFile(path, q.benchText()); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -289,9 +289,9 @@ func (q *queryReport) writeBench(outDir string) (string, error) {
 
 // benchText renders bench.txt: the scenarios in Go benchmark format, for
 // benchstat. A scenario with no planned iteration has no line.
-func (q *queryReport) benchText(goos, goarch string) string {
+func (q *queryReport) benchText() string {
 	var b strings.Builder
-	b.WriteString("goos: " + goos + "\ngoarch: " + goarch + "\n")
+	b.WriteString("goos: " + runtime.GOOS + "\ngoarch: " + runtime.GOARCH + "\n")
 	for _, sc := range q.scenarios {
 		res := sc.result
 		if res.planned == 0 {
