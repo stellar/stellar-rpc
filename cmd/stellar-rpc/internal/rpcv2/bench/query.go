@@ -81,7 +81,7 @@ type queryFlags struct {
 	seed             int64
 }
 
-// defaultHotWarmup is --warmup's default for bench-query hot.
+// defaultHotWarmup is --warmup's default for bench query hot.
 const defaultHotWarmup = 20
 
 // queryTierFlags returns the flags for tier's subcommand, preset to the tier's

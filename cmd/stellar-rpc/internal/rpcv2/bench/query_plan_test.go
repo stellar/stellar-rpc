@@ -91,7 +91,7 @@ func TestQueryPlanPoolAndNotFoundFraction(t *testing.T) {
 }
 
 func TestQueryCacheControls(t *testing.T) {
-	for _, cmd := range NewQueryCommand().Commands() {
+	for _, cmd := range newQueryCommand().Commands() {
 		t.Run(cmd.Name(), func(t *testing.T) {
 			warmup := cmd.Flags().Lookup("warmup")
 			require.NotNil(t, warmup)
