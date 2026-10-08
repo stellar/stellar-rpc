@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/streamhash"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 )
@@ -117,15 +119,14 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 			fmt.Appendf(nil, "term-%d", i),
 			FieldContractID,
 		)
-		slot, err := m.Lookup(term)
+		slot, _, err := m.Lookup(term)
 		require.NoError(t, err, "lookup term-%d", i)
 
 		record, ok := records[int(slot)]
 		require.True(t, ok, "record missing at slot %d (term-%d)", slot, i)
 		require.GreaterOrEqual(t, len(record), IndexRecordFingerprintLen, "record at slot %d too short", slot)
 
-		// Fingerprint must match term[:4].
-		assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen],
+		assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen],
 			"fingerprint mismatch at slot %d", slot)
 
 		// Deserialize bitmap.
@@ -152,7 +153,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 	// Probe a batch of unseen terms. For each, the MPHF either
 	// fast-no-matches (ErrKeyNotFound — already covered by mphf_test)
 	// or returns a slot whose fingerprint does NOT match the unseen
-	// term's first four bytes. The latter is the case index.pack's
+	// term's routed key. The latter is the case index.pack's
 	// fingerprint check screens. 2000 probes keep P(zero collisions)
 	// negligible.
 	var collisions, mismatches int
@@ -161,7 +162,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 			fmt.Appendf(nil, "never-seen-%d", i),
 			FieldTopic0,
 		)
-		slot, err := m.Lookup(unseen)
+		slot, _, err := m.Lookup(unseen)
 		if errors.Is(err, ErrKeyNotFound) {
 			continue
 		}
@@ -171,7 +172,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 		record, ok := records[int(slot)]
 		require.True(t, ok)
 		recordFP := record[:IndexRecordFingerprintLen]
-		if string(recordFP) != string(unseen[:IndexRecordFingerprintLen]) {
+		if string(recordFP) != string(routedFP(unseen)) {
 			mismatches++
 		}
 	}
@@ -223,7 +224,7 @@ func TestWriteIndex_ZeroTerms_WritesEmptyIndex(t *testing.T) {
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
-	_, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
+	_, _, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
 	assert.ErrorIs(t, lerr, ErrKeyNotFound)
 }
 
@@ -266,7 +267,7 @@ func TestWriteIndex_SlotsAreDense(t *testing.T) {
 					fmt.Appendf(nil, "term-%d", i),
 					FieldContractID,
 				)
-				slot, err := m.Lookup(term)
+				slot, _, err := m.Lookup(term)
 				require.NoError(t, err)
 				assert.Less(t, slot, uint32(n))
 				seen[slot] = struct{}{}
@@ -299,11 +300,11 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 			fmt.Appendf(nil, "term-%d", i),
 			FieldContractID,
 		)
-		slot, err := m.Lookup(term)
+		slot, _, err := m.Lookup(term)
 		require.NoError(t, err)
 		record, ok := records[int(slot)]
 		require.True(t, ok)
-		assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
+		assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen])
 	}
 }
 
@@ -324,7 +325,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	require.Greater(t, len(record), IndexRecordFingerprintLen)
 
 	term := ComputeTermKey([]byte("only"), FieldContractID)
-	assert.Equal(t, term[:IndexRecordFingerprintLen], record[:IndexRecordFingerprintLen])
+	assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen])
 
 	bm := roaring.New()
 	require.NoError(t, bm.UnmarshalBinary(record[IndexRecordFingerprintLen:]))
@@ -367,4 +368,11 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, hashed, "index.pack carries a content hash")
 	require.NoError(t, r.Verify(context.Background()))
+}
+
+// routedFP is the fingerprint the writer stores for term.
+func routedFP(term TermKey) []byte {
+	rk := routedKey(testIndexSecret, term)
+	v, _ := streamhash.Fingerprint(rk[:])
+	return binary.LittleEndian.AppendUint32(nil, v)
 }

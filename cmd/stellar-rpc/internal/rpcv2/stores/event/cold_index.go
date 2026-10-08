@@ -71,15 +71,14 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // order. Each record is:
 //
 //	offset  size  field
-//	0       4     fingerprint (first 4 bytes of the TermKey hash)
+//	0       4     fingerprint (streamhash.Fingerprint of the routed key)
 //	4       N     serialized roaring bitmap (Bitmap.MarshalBinary)
 //
-// The cold reader uses mphf.Lookup(term) → slot to find the record
-// position, packfile.Reader.ReadItem(slot, ...) to read the bytes,
-// verifies the 4-byte fingerprint against term[:4], and then
-// deserializes the bitmap on match. Unseen terms still produce a
-// slot (vanilla MPHF semantics) but their fingerprint mismatches —
-// the cold reader rejects them at that point.
+// The cold reader uses mphf.Lookup(term) → slot and fingerprint,
+// packfile.Reader.ReadItem(slot, ...) to read the bytes, verifies the
+// fingerprint, and then deserializes the bitmap on match. Unseen terms
+// still produce a slot (vanilla MPHF semantics) but their fingerprint
+// mismatches — the cold reader rejects them at that point.
 //
 // streamhash's MPHF is a *minimal* perfect hash: slots are dense in
 // [0, len(bitmaps)), so packfile record positions exactly equal
@@ -124,13 +123,10 @@ func WriteColdIndex(
 
 	entries := make([]indexEntry, 0, len(bitmaps))
 	for term, bitmap := range bitmaps {
-		slot, lerr := m.Lookup(term)
+		slot, fp, lerr := m.Lookup(term)
 		if lerr != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", lerr)
 		}
-		// App fingerprint stays on the ORIGINAL term key, not the routed key.
-		var fp [IndexRecordFingerprintLen]byte
-		copy(fp[:], term[:IndexRecordFingerprintLen])
 		// Mutate in place — bitmaps is uniquely owned by the caller, built
 		// single-threaded either way: cold backfill from the .pack, or the freeze
 		// from the read-only hot DB.

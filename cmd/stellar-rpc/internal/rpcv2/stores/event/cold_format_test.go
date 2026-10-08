@@ -13,6 +13,7 @@ import (
 
 	"github.com/stellar/streamhash"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
@@ -145,7 +146,7 @@ func TestBuild_KnownKeysGetUniqueSlotsInRange(t *testing.T) {
 
 	seen := make(map[uint32]int, n)
 	for i := range n {
-		slot, err := m.Lookup(keyFor(i))
+		slot, _, err := m.Lookup(keyFor(i))
 		require.NoError(t, err)
 		assert.Less(t, slot, uint32(n), "slot %d out of range for key %d", slot, i)
 		if prev, dup := seen[slot]; dup {
@@ -165,10 +166,10 @@ func TestBuild_LookupIsDeterministic(t *testing.T) {
 
 	for i := range n {
 		k := keyFor(i)
-		first, err := m.Lookup(k)
+		first, _, err := m.Lookup(k)
 		require.NoError(t, err)
 		for range 5 {
-			repeat, err := m.Lookup(k)
+			repeat, _, err := m.Lookup(k)
 			require.NoError(t, err)
 			assert.Equal(t, first, repeat, "Lookup must be deterministic across calls")
 		}
@@ -198,7 +199,7 @@ func TestLookup_UnseenKeyBehavior(t *testing.T) {
 			fmt.Appendf(nil, "never-added-%d", i),
 			FieldTopic0,
 		)
-		slot, err := m.Lookup(unseen)
+		slot, _, err := m.Lookup(unseen)
 		switch {
 		case errors.Is(err, ErrKeyNotFound):
 			fastNoMatch++
@@ -224,7 +225,7 @@ func TestBuild_EmptyIndexSucceeds(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
 	assert.True(t, m.isEmpty())
-	_, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
+	_, _, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
 	assert.ErrorIs(t, lerr, ErrKeyNotFound)
 }
 
@@ -241,7 +242,7 @@ func TestOpen_RoundTripsBuiltFile(t *testing.T) {
 	expected := make(map[TermKey]uint32, n)
 	for i := range n {
 		k := keyFor(i)
-		slot, err := built.Lookup(k)
+		slot, _, err := built.Lookup(k)
 		require.NoError(t, err)
 		expected[k] = slot
 	}
@@ -252,7 +253,7 @@ func TestOpen_RoundTripsBuiltFile(t *testing.T) {
 	t.Cleanup(func() { _ = reopened.Close() })
 
 	for k, want := range expected {
-		got, err := reopened.Lookup(k)
+		got, _, err := reopened.Lookup(k)
 		require.NoError(t, err)
 		assert.Equal(t, want, got, "slot for key %x must round-trip via Open", k)
 	}
@@ -272,7 +273,7 @@ func TestBuild_AcceptsManyKeys(t *testing.T) {
 
 	seen := make(map[uint32]struct{}, n)
 	for i := range n {
-		slot, err := m.Lookup(keyFor(i))
+		slot, _, err := m.Lookup(keyFor(i))
 		require.NoError(t, err)
 		assert.Less(t, slot, uint32(n))
 		seen[slot] = struct{}{}
@@ -349,7 +350,7 @@ func TestBuild_WritesKeyedRoutingMetadata(t *testing.T) {
 		rk := stores.BlindKey(secret, k[:])
 		want, err := raw.QueryRank(rk[:])
 		require.NoError(t, err, "routed key %d must be in the build set", i)
-		got, err := m.Lookup(k)
+		got, _, err := m.Lookup(k)
 		require.NoError(t, err)
 		assert.Equal(t, uint32(want), got, "Lookup must equal QueryRank over the routed key")
 	}
@@ -398,4 +399,11 @@ func TestOpenMPHF_RejectsMissingOrMalformedMetadata(t *testing.T) {
 
 	_, err = openMPHF(build(t, streamhash.WithMetadata([]byte{0x7f, 0x00})))
 	assert.ErrorIs(t, err, errBadIndexMetadata, "malformed metadata")
+}
+
+// index.pack's format id must differ from events.pack's, and stay past 0xB,
+// whose fingerprints this code cannot read.
+func TestPackFormatsAreDistinct(t *testing.T) {
+	require.NotEqual(t, eventsPackFormat, indexPackFormat)
+	require.Equal(t, indexPackFormat, packfile.Format(0xFE1E000D))
 }
