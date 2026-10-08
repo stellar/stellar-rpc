@@ -30,7 +30,6 @@ type lookupOutcome uint8
 
 const (
 	outcomeNone lookupOutcome = iota
-
 	outcomeFound
 	outcomeNotFound
 )

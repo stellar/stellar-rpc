@@ -23,9 +23,9 @@ const (
 	queryTypeLedgers = "ledgers"
 	// queryTypeTxPage: getTransactions' paged ledger read.
 	queryTypeTxPage = "txpage"
-	// queryTypeTxHash: getTransaction's by-hash lookup through the tx-hash indexes.
+	// queryTypeTxHash: getTransaction's by-hash lookup.
 	queryTypeTxHash = "txhash"
-	// queryTypeEvents: ReadView.QueryEvents, getEvents' path.
+	// queryTypeEvents: getEvents' event page read.
 	queryTypeEvents = "events"
 )
 
