@@ -89,21 +89,23 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '29'
-      # stellar-core master (#5472 merged, 73f2bdd1) without vnext: its current
-      # host is the p29 stand-in at rs-soroban-env cb32250d, the same commit
-      # soroban-env-host-prev pins.
-      core_deb_version: '29.0.1-3625.73f2bdd1a.noble'
-      core_docker_img: 'stellar/unsafe-stellar-core:29.0.1-3625.73f2bdd1a.noble'
+      # stellar-core 29.0.0: its src/rust/soroban/p29 is rs-soroban-env v29.0.0
+      # (a721944b), the commit soroban-env-host-prev pins.
+      core_deb_version: '29.0.0-3589.4eb833373.noble'
+      core_docker_img: 'stellar/stellar-core:29.0.0-3589.4eb833373.noble'
 
   integration-p30-pkg:
     name: Integration tests (P30)
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '30'
-      # The same core commit's vnext build: its p30 host is rs-soroban-env
-      # 169890d5, the commit soroban-env-host-curr pins.
-      core_deb_version: '29.0.1-3626.73f2bdd1a.noble~vnext'
-      core_docker_img: 'stellar/unsafe-stellar-core:29.0.1-3626.73f2bdd1a.noble-vnext'
+      # No stellar-core build implements all of protocol 30 yet. This is the
+      # vnext build of master at 88d2431d7, whose p30 host is rs-soroban-env
+      # fddfd567: CAP-0084, but neither CAP-0087 (the ML-DSA host functions
+      # soroban-env-host-curr 8abed902 adds) nor CAP-0088. Move to a build
+      # with stellar-core #5455/#5478 and #5423 once one is published.
+      core_deb_version: '29.0.1-3630.88d2431d7.noble~vnext'
+      core_docker_img: 'stellar/unsafe-stellar-core:29.0.1-3630.88d2431d7.noble-vnext'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)
