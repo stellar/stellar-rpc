@@ -66,10 +66,9 @@ mod prev {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    // See the matching `curr::make_recording_auth_mode`. `-prev` is now
-    // soroban-env-host 29.0.0 (core's protocol-29 stand-in), which supports
-    // v2 (`AddressV2`) credentials, so `use_upgraded_auth` passes through —
-    // matching simulateTransaction's behavior on a protocol-29 ledger.
+    // See the matching `curr::make_recording_auth_mode`. Every `-prev` host
+    // since 27.1.0 supports v2 (`AddressV2`) credentials, so `use_upgraded_auth`
+    // passes through, matching simulateTransaction on the previous protocol.
     pub(crate) fn make_recording_auth_mode(
         disable_non_root_auth: bool,
         use_upgraded_auth: bool,

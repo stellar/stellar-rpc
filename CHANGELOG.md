@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## [v29.0.0](https://github.com/stellar/stellar-rpc/compare/v28.0.1...v29.0.0)
+
+### Added
+* The preflight hosts have been rotated to soroban-env-host 29.0.0 (28.0.1 for the previous protocol) and integration tests now run against stellar-core 29.0.0.
+
 ## [v28.0.1](https://github.com/stellar/stellar-rpc/compare/v28.0.0...v28.0.1)
 
 ### Fixed

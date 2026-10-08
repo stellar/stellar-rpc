@@ -324,13 +324,11 @@ func BenchmarkGetPreflight(b *testing.B) {
 
 // TestGetPreflightUseUpgradedAuthOnPrevProtocol locks in the behavior that
 // requesting v2 (AddressV2) credentials on the protocol served by the prev
-// soroban-env host succeeds. The prev host is 29.0.0 (core's protocol-29
-// stand-in), which supports v2 credentials (UseUpgradedAuth shipped in
-// v27.1.0), so the
-// flag passes through to the host rather than being silently dropped — the
-// pre-P28 "silently ignored" contract applied only while the prev host
-// predated v2 credentials. (Asserting the credential version itself requires
-// an auth-recording contract; that is covered by the integration tests.)
+// soroban-env host succeeds. Every prev host since 27.1.0 supports v2
+// credentials (UseUpgradedAuth), so the flag passes through to the host rather
+// than being silently dropped. (Asserting the credential version itself
+// requires an auth-recording contract; that is covered by the integration
+// tests.)
 func TestGetPreflightUseUpgradedAuthOnPrevProtocol(t *testing.T) {
 	prevHostProtocol := supportedProtocolVersions[0]
 	params := getPreflightParameters(t, prevHostProtocol)
