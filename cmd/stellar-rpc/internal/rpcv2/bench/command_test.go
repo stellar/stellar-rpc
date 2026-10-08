@@ -12,8 +12,11 @@ import (
 // calls NewCommand unconditionally at startup) — and pins each subcommand's
 // required flags.
 func TestNewCommand(t *testing.T) {
-	cmd := NewCommand()
-	require.Equal(t, "bench-ingest", cmd.Use)
+	root := NewCommand()
+	require.Equal(t, "bench", root.Use)
+	cmd, _, err := root.Find([]string{"ingest"})
+	require.NoError(t, err)
+	require.Equal(t, "ingest", cmd.Use)
 
 	requiredBySubcommand := map[string][]string{
 		"cold": {"start-chunk", "cold-out-dir"},
