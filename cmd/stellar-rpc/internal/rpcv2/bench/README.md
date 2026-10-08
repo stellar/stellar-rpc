@@ -306,7 +306,7 @@ If you cancel the run, `status` is `failed`, and `error` contains
 line for each scenario that has at least one planned iteration, in run order:
 
 ```
-BenchmarkQuery/tier=cold/type=ledgers/rps=10  600  812345 ns/op  790123 p50-ns  2345678 p99-ns  2400000 p99-from-due-ns  20 items/op  0 dropped
+BenchmarkQuery/tier=cold/type=ledgers/rps=10  600  812345 ns/op  790123 p50-ns  2345678 p99-ns  2400000 p99-from-due-ns  10 items/op  0 dropped
 ```
 
 The fields are tab-separated. The name has the parts `tier=<cold|hot>`,
@@ -336,6 +336,11 @@ To compare two builds:
    Both builds must use the same subcommand, dataset and flags, cache controls
    included. The name contains the tier. It does not contain the dataset or
    the other flags, so `benchstat` cannot see a difference in them.
+   Run all the runs on the same host, and alternate the builds run by run
+   (old, new, old, new, ...). Then a change of the host or of the dataset
+   state over time affects the two builds equally.
+   For `hot`, give each run a fresh copy of the chunk database under
+   `--hot-dir`, because a run changes it (see section 8.2).
 2. Put the `bench.txt` files of each build into one file, for example
    `cat old-*/bench.txt > old.txt` and `cat new-*/bench.txt > new.txt`.
 3. Run `benchstat old.txt new.txt`.
@@ -350,6 +355,11 @@ run held the target rate. Dropped iterations do not fail a run.
 
 `benchstat` shows the `ns` units in seconds, for example `p99-sec`. To
 compare the rates of one build, run `benchstat -col /rps new.txt`.
+
+The txhash `outcome=found` and `outcome=not_found` lines repeat the requests
+that the txhash line without an outcome counts. Thus, the `geomean` row counts
+these requests two times. To remove the outcome lines, run
+`benchstat -filter '/outcome:""' old.txt new.txt`.
 
 `benchstat` tests each metric of each scenario separately. It does not correct
 for multiple comparisons. Thus, when there are many scenarios, expect some

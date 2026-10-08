@@ -281,8 +281,9 @@ func (q *queryReport) write(outDir string) ([]string, error) {
 // for a run that succeeded.
 func (q *queryReport) writeBench(outDir string) (string, error) {
 	path := filepath.Join(outDir, queryBenchFile)
-	if err := writeTextFile(path, q.benchText()); err != nil {
-		return "", err
+	//nolint:gosec // same mode as the CSVs from os.Create; the report is not secret
+	if err := os.WriteFile(path, []byte(q.benchText()), 0o666); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
 	}
 	return path, nil
 }
@@ -361,22 +362,6 @@ func writeCSVTable(path string, header []string, rows [][]string) error {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	if err := w.WriteAll(rows); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", path, err)
-	}
-	return nil
-}
-
-// writeTextFile writes text to path and replaces any existing file.
-func writeTextFile(path, text string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-	if _, err := f.WriteString(text); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	if err := f.Close(); err != nil {

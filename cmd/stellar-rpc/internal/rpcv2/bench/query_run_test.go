@@ -458,5 +458,5 @@ func TestQueryBenchWritesPartialReport(t *testing.T) {
 	assert.Equal(t, queryTypeLedgers, rows[0]["query_type"])
 	assert.FileExists(t, filepath.Join(env.OutDir, queryLatencyFile))
 	assert.NoFileExists(t, filepath.Join(env.OutDir, queryBenchFile))
-	assert.Contains(t, output.String(), "wrote 2 PARTIAL report files")
+	assert.Contains(t, output.String(), "wrote 2 PARTIAL CSVs")
 }

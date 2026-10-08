@@ -172,7 +172,7 @@ func runQueryBench(
 			logger.Warnf("writing the PARTIAL report: %v", err)
 		}
 		if len(written) > 0 {
-			logger.Warnf("run incomplete: wrote %d PARTIAL report files to %s (they cover only the scenarios that ran)",
+			logger.Warnf("run incomplete: wrote %d PARTIAL CSVs to %s (they cover only the scenarios that ran)",
 				len(written), env.OutDir)
 		}
 		return runErr
