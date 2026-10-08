@@ -81,9 +81,7 @@ bootstrap_box() {
   rm -rf "$WORK_DIR/stellar-rpc"
 
   log "installing build deps"
-  apt-get install -y -qq --no-install-recommends \
-    git build-essential \
-    libpq5 libsodium23 libunwind8 libc++1-14
+  apt-get install -y -qq --no-install-recommends git build-essential
 
   GO_VERSION=1.26.5
   curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C /usr/local
@@ -120,6 +118,20 @@ bootstrap_box() {
     git checkout "$TARGET_SHA"
   fi
   log "checked out $TARGET_SHA; handing off to the Go runner"
+}
+
+# install_core installs the latest stable stellar-core, so captive core keeps up with pubnet protocol upgrades.
+install_core() {
+  log "installing stellar-core"
+  local codename
+  codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+  curl -fsSL https://apt.stellar.org/SDF.asc -o /etc/apt/trusted.gpg.d/SDF.asc
+  # the core package links libc++ 20, which comes from apt.llvm.org
+  curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+  echo "deb https://apt.stellar.org $codename stable" > /etc/apt/sources.list.d/SDF.list
+  echo "deb http://apt.llvm.org/$codename/ llvm-toolchain-$codename-20 main" > /etc/apt/sources.list.d/llvm.list
+  apt-get update -qq -o Acquire::Retries=3
+  apt-get install -y -qq --no-install-recommends -o Acquire::Retries=3 stellar-core
 }
 
 # run_leg hands off to a leg's runner package. The Go runner owns the

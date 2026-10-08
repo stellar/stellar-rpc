@@ -7,4 +7,5 @@
 LEG_TITLE="Backfill ingestion"
 
 bootstrap_box
+install_core
 run_leg ./cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/backfill-test/runner

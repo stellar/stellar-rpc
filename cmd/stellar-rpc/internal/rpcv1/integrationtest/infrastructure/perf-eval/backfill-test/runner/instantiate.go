@@ -25,7 +25,7 @@ import (
 const (
 	// runner runs w/ cwd = repo root, so paths are relative to there
 	legDir   = "cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/backfill-test"
-	corePath = "/usr/local/bin/stellar-core" // fetched from S3
+	corePath = "/usr/bin/stellar-core" // apt-installed by install_core
 	// daemon output; the box log's console/syslog tee drains at ~45 KB/s, which throttled request logging
 	daemonLogPath = "/var/log/stellar-rpc.log"
 )
@@ -76,9 +76,9 @@ func instantiate(ctx context.Context) error {
 	if err != nil {
 		return bail("loading AWS config: %v", err)
 	}
-	fetch := &harness.S3Fetcher{Client: s3.NewFromConfig(awsCfg), Bucket: cfg.Bucket}
+	s3Client := s3.NewFromConfig(awsCfg)
 
-	coreCfg, err := prepareFixtures(ctx, fetch, repoRoot, cfg.WorkDir, binaryPath)
+	coreCfg, err := prepareFixtures(ctx, repoRoot, cfg.WorkDir, binaryPath)
 	if err != nil {
 		return bail("%v", err)
 	}
@@ -114,7 +114,7 @@ func instantiate(ctx context.Context) error {
 		return bail("writing results: %v", err)
 	}
 	if err := harness.PublishResult(
-		ctx, fetch.Client, cfg.Bucket, cfg.ResultKey, "ok", cfg.RunID, cfg.TargetSHA, cfg.ResultsFile, ""); err != nil {
+		ctx, s3Client, cfg.Bucket, cfg.ResultKey, "ok", cfg.RunID, cfg.TargetSHA, cfg.ResultsFile, ""); err != nil {
 		return bail("publishing result: %v", err)
 	}
 
@@ -125,18 +125,11 @@ func instantiate(ctx context.Context) error {
 	return nil
 }
 
-// prepareFixtures fetches stellar-core, builds stellar-rpc into binaryPath,
-// and writes the SDK's captive-core pubnet config, returning its path.
+// prepareFixtures builds stellar-rpc into binaryPath and writes the SDK's
+// captive-core pubnet config, returning its path.
 func prepareFixtures(
-	ctx context.Context, fetch *harness.S3Fetcher, repoRoot, workDir, binaryPath string,
+	ctx context.Context, repoRoot, workDir, binaryPath string,
 ) (string, error) {
-	if err := fetch.FetchVerified(ctx, "core/stellar-core.zst", corePath, true, "stellar-core"); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(corePath, 0o755); err != nil {
-		return "", fmt.Errorf("chmod stellar-core: %w", err)
-	}
-
 	logger.Infof("building stellar-rpc")
 	if err := harness.RunStreaming(ctx, repoRoot, nil, 40, "make", "build-libs"); err != nil {
 		return "", fmt.Errorf("make build-libs failed: %w", err)

@@ -92,7 +92,7 @@ func instantiate(ctx context.Context) error {
 	return nil
 }
 
-// fetchCorpus streams the golden DB, stellar-core, and ledger bundles from S3,
+// fetchCorpus streams the golden DB and ledger bundles from S3,
 // returning the bundle paths and the golden DB fetch duration.
 func fetchCorpus(ctx context.Context, fetch *harness.S3Fetcher, goldenDB string) ([]string, int, error) {
 	// current/prev1/prev2 lets a run fall back to an older golden DB snapshot
@@ -113,14 +113,6 @@ func fetchCorpus(ctx context.Context, fetch *harness.S3Fetcher, goldenDB string)
 	}
 	if goldenFetchSecs < 0 {
 		return nil, 0, errors.New("no golden.sqlite.zst in current/, prev1/, or prev2/")
-	}
-
-	const corePath = "/usr/local/bin/stellar-core" // fetch pre-built core cached in S3
-	if err := fetch.FetchVerified(ctx, "core/stellar-core.zst", corePath, true, "stellar-core"); err != nil {
-		return nil, 0, err
-	}
-	if err := os.Chmod(corePath, 0o755); err != nil {
-		return nil, 0, fmt.Errorf("chmod stellar-core: %w", err)
 	}
 
 	var bundlePaths []string

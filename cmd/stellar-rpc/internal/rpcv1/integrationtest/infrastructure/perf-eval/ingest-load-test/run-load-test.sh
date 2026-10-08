@@ -7,6 +7,7 @@ log "clearing stale apply-load state"
 rm -f /tmp/bench-results.json /tmp/load-test-ledgers-*.xdr.zstd
 
 bootstrap_box
+install_core
 
 # The integration test binary links rpcv2's grocksdb + zstd; build them like CI's setup-go does.
 log "building native libs (zstd, rocksdb)"
