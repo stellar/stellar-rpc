@@ -24,7 +24,7 @@ func NewGetVersionInfoHandler(
 		// version once it starts core, which is after handlers are built.
 		captiveCoreVersion := daemon.CoreVersion()
 		protocolVersion, err := getProtocolVersion(ctx, ledgerReader)
-		if err != nil {
+		if err != nil && ctx.Err() == nil { // a canceled request is not a fault
 			logger.WithError(err).Error("failed to fetch protocol version")
 		}
 

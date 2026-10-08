@@ -119,7 +119,8 @@ func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) hand
 			duration := time.Since(startTime)
 			label := prometheus.Labels{"endpoint": r.Method(), "status": "ok"}
 			simulateTransactionResponse, ok := result.(protocol.SimulateTransactionResponse)
-			if ok && simulateTransactionResponse.Error != "" {
+			simulateFailed := ok && simulateTransactionResponse.Error != ""
+			if simulateFailed {
 				label[labelStatus] = "error"
 			} else if err != nil {
 				var jsonRPCErr *jrpc2.Error
@@ -128,6 +129,10 @@ func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) hand
 					status := prometheusLabelReplacer.Replace(jsonRPCErr.Code.String())
 					label[labelStatus] = status
 				}
+			}
+			if ctx.Err() != nil && (err != nil || simulateFailed) {
+				// Failed after its context ended: the client left or timed out, not a server fault.
+				label[labelStatus] = "canceled"
 			}
 			requestMetric.With(label).Observe(duration.Seconds())
 			logResponse(logger, reqID, duration, label[labelStatus])

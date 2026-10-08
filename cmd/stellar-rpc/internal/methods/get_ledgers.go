@@ -40,6 +40,8 @@ func NewGetLedgersHandler(ledgerReader store.LedgerReader, maxLimit, defaultLimi
 
 // getLedgers fetch ledgers and relevant metadata from DB and falling back to
 // the remote rpcdatastore if necessary.
+//
+//nolint:cyclop // the context check on the datastore log adds one branch
 func (h ledgersHandler) getLedgers(
 	ctx context.Context, request protocol.GetLedgersRequest,
 ) (protocol.GetLedgersResponse, error) {
@@ -70,8 +72,10 @@ func (h ledgersHandler) getLedgers(
 	if h.datastoreLedgerReader != nil {
 		dsRange, err := h.datastoreLedgerReader.GetAvailableLedgerRange(ctx)
 		if err != nil {
-			// log error but continue using local ledger range
-			h.logger.WithError(err).Error("failed to get available ledger range from datastore")
+			// log error but continue using local ledger range; a canceled request is not a fault
+			if ctx.Err() == nil {
+				h.logger.WithError(err).Error("failed to get available ledger range from datastore")
+			}
 		} else {
 			// extend available range to include datastore
 			availableLedgerRange.FirstLedger = min(dsRange.FirstLedger, availableLedgerRange.FirstLedger)
