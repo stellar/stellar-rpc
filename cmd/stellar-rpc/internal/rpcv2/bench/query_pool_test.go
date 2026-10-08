@@ -2,15 +2,23 @@ package bench
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
 // The events scan counts only the events of the dataset's ledger range: a hot
@@ -35,12 +43,90 @@ func TestScanEventTermsStaysInRange(t *testing.T) {
 			counts := &eventTermCounts{
 				contracts: map[string]int{},
 				pairs:     map[string]int{},
-				terms:     map[string]eventTermPair{},
 			}
 			require.NoError(t, counts.scanChunk(context.Background(), ds, 0, eventScanCap))
 			assert.Equal(t, tc.want, counts.scanned)
 		})
 	}
+}
+
+// The txhash pool takes one hash from each sampled ledger, so a pool over
+// ledgers that each hold several transactions spans as many ledgers as hashes.
+func TestBuildTxHashPoolTakesOneHashPerLedger(t *testing.T) {
+	const numLedgers, txPerLedger, size = 20, 4, 8
+	hotRoot, ledgerOf := ingestMultiTxHotChunk(t, numLedgers, txPerLedger)
+	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
+		HotRoot: hotRoot, Chunk: 0,
+		Plan: queryPlan{Types: []string{queryTypeTxHash}, Passphrase: network.PublicNetworkPassphrase},
+	})
+	require.NoError(t, err)
+	defer release()
+
+	pool, err := buildTxHashPool(context.Background(), testLogger(), ds, 0, defaultSeed, size)
+	require.NoError(t, err)
+	require.Len(t, pool.hashes, size)
+	assert.Equal(t, size, pool.ledgerCount)
+	ledgers := map[uint32]struct{}{}
+	for _, h := range pool.hashes {
+		seq, ok := ledgerOf[h]
+		require.True(t, ok, "hash %x is not in the fixture", h)
+		ledgers[seq] = struct{}{}
+	}
+	assert.Len(t, ledgers, size)
+}
+
+// ingestMultiTxHotChunk writes numLedgers ledgers of chunk 0, each holding
+// txPerLedger transactions, into a hot database. It returns the --hot-dir and
+// the ledger of each transaction hash.
+func ingestMultiTxHotChunk(t *testing.T, numLedgers uint32, txPerLedger int) (string, map[[32]byte]uint32) {
+	t.Helper()
+	root := t.TempDir()
+	layout := geometry.NewLayout(root)
+	packPath := layout.LedgerPackPath(0)
+	require.NoError(t, os.MkdirAll(filepath.Dir(packPath), 0o755))
+	w, err := ledger.NewColdWriter(packPath, chunk.ID(0).FirstLedger(), ledger.ColdWriterOptions{})
+	require.NoError(t, err)
+	defer func() { _ = w.Close() }()
+
+	ledgerOf := map[[32]byte]uint32{}
+	first := chunk.ID(0).FirstLedger()
+	for seq := first; seq < first+numLedgers; seq++ {
+		envelopes := make([]xdr.TransactionEnvelope, txPerLedger)
+		processing := make([]xdr.TransactionResultMetaV1, txPerLedger)
+		for i := range envelopes {
+			envelopes[i] = xdr.TransactionEnvelope{
+				Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+				V1: &xdr.TransactionV1Envelope{Tx: xdr.Transaction{
+					SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
+				}},
+			}
+			hash, err := network.HashTransactionInEnvelope(envelopes[i], network.PublicNetworkPassphrase)
+			require.NoError(t, err)
+			ledgerOf[hash] = seq
+			processing[i] = xdr.TransactionResultMetaV1{
+				TxApplyProcessing: xdr.TransactionMeta{V: 4, V4: &xdr.TransactionMetaV4{}},
+				Result: xdr.TransactionResultPair{
+					TransactionHash: hash,
+					Result: xdr.TransactionResult{Result: xdr.TransactionResultResult{
+						Code: xdr.TransactionResultCodeTxSuccess, Results: &[]xdr.OperationResult{},
+					}},
+				},
+			}
+		}
+		require.NoError(t, w.AppendLedger(seq, rpcv2test.V2LCMBytes(t, seq, 0, envelopes, processing)))
+	}
+	require.NoError(t, w.Commit())
+
+	hotRoot := t.TempDir()
+	require.NoError(t, runHot(context.Background(), testLogger(), hotOptions{
+		Source:     sourceConfig{Kind: sourcePack, PackDir: layout.LedgersRoot()},
+		StartChunk: 0,
+		NumChunks:  1,
+		NumLedgers: numLedgers,
+		HotRoot:    hotRoot,
+		OutDir:     filepath.Join(t.TempDir(), "csv"),
+	}))
+	return hotRoot, ledgerOf
 }
 
 // A canceled context stops the txhash pool build.

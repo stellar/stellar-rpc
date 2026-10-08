@@ -19,12 +19,11 @@ import (
 )
 
 // defaultTxHashPoolSize is the --txhash-pool-size default. The other constants
-// bound the tx-hash sampler's ledger draws and the hashes it takes per ledger.
+// bound the tx-hash sampler's ledger draws.
 const (
-	defaultTxHashPoolSize  = 512
-	poolMinLedgerDraws     = 512
-	poolMaxHashesPerLedger = 16
-	poolDrawsPerLedger     = 16
+	defaultTxHashPoolSize = 512
+	poolMinLedgerDraws    = 512
+	poolDrawsPerHash      = 16
 )
 
 // eventScanCap bounds how many stored events the filter builder reads.
@@ -39,11 +38,12 @@ const minEventScanPerChunk = 500
 // included.
 const eventFilterSets = 4
 
-// txHashPool holds the hashes the txhash requests look up, sampled from the
-// dataset's ledger range, and the fraction of lookups for a hash that is not in
-// the dataset. A found lookup stops at the first index that knows the hash; a
-// not-found lookup probes every hot index and then every cold window index.
-// ledgerCount is how many ledgers supplied the hashes.
+// txHashPool holds the hashes the txhash requests look up, one from each
+// sampled ledger of the dataset's range, and the fraction of lookups for a hash
+// that is not in the dataset. A found lookup stops at the first index that
+// knows the hash; a not-found lookup probes every hot index and then every cold
+// window index. ledgerCount is how many ledgers supplied the hashes, which is
+// len(hashes).
 type txHashPool struct {
 	hashes           [][32]byte
 	notFoundFraction float64
@@ -63,11 +63,11 @@ func (p *txHashPool) pick(rng *rand.Rand) ([32]byte, bool) {
 	return p.hashes[rng.IntN(len(p.hashes))], true
 }
 
-// buildTxHashPool samples up to size transaction hashes from the dataset's
-// ledger range and checks that one of them resolves under the passphrase. size
-// must be in [1, maxTxHashPoolSize]. A pool smaller than size only logs a
-// warning; a range with no transactions is an error. It stops with ctx.Err()
-// once ctx is done.
+// buildTxHashPool samples up to size transaction hashes, one per ledger, from
+// the dataset's ledger range and checks that one of them resolves under the
+// passphrase. size must be in [1, maxTxHashPoolSize]. A pool smaller than size
+// only logs a warning; a range with no transactions is an error. It stops with
+// ctx.Err() once ctx is done.
 func buildTxHashPool(
 	ctx context.Context, logger *supportlog.Entry, ds *queryDataset, notFoundFraction float64, seed int64,
 	size int,
@@ -112,7 +112,8 @@ func buildTxHashPool(
 	s.logCoverage(logger, notFoundFraction)
 	if len(s.hashes) < size {
 		logger.Warnf("txhash pool underfilled: %d of %d requested hashes after bounded sampling; "+
-			"sparse data and repeated ledger draws can limit coverage", len(s.hashes), size)
+			"the pool takes one hash per ledger, so ledgers with no transactions and repeated "+
+			"ledger draws limit it", len(s.hashes), size)
 	}
 	return &txHashPool{hashes: s.hashes, notFoundFraction: notFoundFraction, ledgerCount: len(s.ledgers)}, nil
 }
@@ -132,11 +133,9 @@ type txHashSampler struct {
 	// stopAt is the pool size at which sampleChunk stops for the current chunk.
 	stopAt int
 
-	// hashes is the pool.
-	hashes [][32]byte
-
-	// ledgers lists every ledger that contributed a hash, in sample order; drawn
+	// hashes is the pool; ledgers[i] is the ledger hashes[i] came from. drawn
 	// holds every sequence drawn, including ones with no transactions.
+	hashes  [][32]byte
 	ledgers []uint32
 	drawn   map[uint32]struct{}
 }
@@ -151,7 +150,7 @@ func (s *txHashSampler) first() ([32]byte, uint32) {
 	return s.hashes[0], s.ledgers[0]
 }
 
-// sampleChunk adds hashes from randomly chosen ledgers of chunk c within
+// sampleChunk adds one hash from each randomly chosen ledger of chunk c within
 // [first, last] until the pool reaches s.stopAt or the chunk's draw budget is
 // spent. Hashing needs no passphrase, so a wrong one does not fail here. It
 // stops with ctx.Err() once ctx is done.
@@ -169,12 +168,9 @@ func (s *txHashSampler) sampleChunk(
 	}
 
 	span := int(hi - lo + 1)
-	// The draw budget is poolDrawsPerLedger per ledger still needed, at least
-	// poolMinLedgerDraws. Draws can repeat, so the budget can end before the
-	// pool fills.
-	needed := s.stopAt - len(s.hashes)
-	maxDraws := max(poolMinLedgerDraws,
-		((needed+poolMaxHashesPerLedger-1)/poolMaxHashesPerLedger)*poolDrawsPerLedger)
+	// Draws can repeat or land on a ledger with no transactions, so the budget
+	// can end before the pool fills.
+	maxDraws := max(poolMinLedgerDraws, (s.stopAt-len(s.hashes))*poolDrawsPerHash)
 	for draws := 0; draws < maxDraws && len(s.hashes) < s.stopAt; draws++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -184,50 +180,41 @@ func (s *txHashSampler) sampleChunk(
 			continue
 		}
 		s.drawn[seq] = struct{}{}
-		// The ledger bytes are valid only inside the callback; the hashes are
-		// copied out as [32]byte values.
-		var picked [][32]byte
+		// The ledger bytes are valid only inside the callback; the hash is
+		// copied out as a [32]byte value.
+		var hash [32]byte
+		var picked bool
 		err := reader.WithLedger(seq, func(raw []byte) error {
 			parts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
 			if err != nil {
 				return fmt.Errorf("extract tx parts: %w", err)
 			}
-			picked = sampleHashesFromLedger(s.rng, parts)
+			if len(parts) > 0 {
+				hash, picked = parts[s.rng.IntN(len(parts))].Hash, true
+			}
 			return nil
 		})
 		if err != nil {
 			return fmt.Errorf("read ledger %d: %w", seq, err)
 		}
-		if len(picked) == 0 {
+		if !picked {
 			continue
 		}
-		picked = picked[:min(len(picked), s.stopAt-len(s.hashes))]
-		s.hashes = append(s.hashes, picked...)
+		s.hashes = append(s.hashes, hash)
 		s.ledgers = append(s.ledgers, seq)
 	}
 	return nil
 }
 
-// logCoverage logs the pool's size and ledger span, and warns when one ledger
-// supplied every hash.
+// logCoverage logs the pool's size and ledger span, and warns when the pool
+// holds a single hash.
 func (s *txHashSampler) logCoverage(logger *supportlog.Entry, notFoundFraction float64) {
-	logger.Infof("txhash pool: %d hashes over %d ledgers spanning %d..%d, not-found fraction %.2f",
-		len(s.hashes), len(s.ledgers), slices.Min(s.ledgers), slices.Max(s.ledgers), notFoundFraction)
-	if len(s.ledgers) == 1 {
-		logger.Warnf("txhash pool came from ledger %d alone: every found lookup reads that "+
+	logger.Infof("txhash pool: %d hashes, one per ledger, spanning ledgers %d..%d, not-found fraction %.2f",
+		len(s.hashes), slices.Min(s.ledgers), slices.Max(s.ledgers), notFoundFraction)
+	if len(s.hashes) == 1 {
+		logger.Warnf("txhash pool holds one hash, from ledger %d: every found lookup reads that "+
 			"one ledger, so repeated lookups may benefit from cache reuse", s.ledgers[0])
 	}
-}
-
-// sampleHashesFromLedger returns at most poolMaxHashesPerLedger hashes, drawn
-// without replacement.
-func sampleHashesFromLedger(rng *rand.Rand, parts []sdkingest.LedgerTxParts) [][32]byte {
-	take := min(len(parts), poolMaxHashesPerLedger)
-	out := make([][32]byte, 0, take)
-	for _, i := range rng.Perm(len(parts))[:take] {
-		out = append(out, parts[i].Hash)
-	}
-	return out
 }
 
 // verifySampledHashResolves checks that hash pairs with its envelope in ledger
@@ -352,9 +339,11 @@ type eventTermPair struct {
 type eventTermCounts struct {
 	contracts map[string]int
 	pairs     map[string]int
-	terms     map[string]eventTermPair
 	scanned   int
 }
+
+// contractIDLen is the length of a contract ID term, where a pair key splits.
+const contractIDLen = len(xdr.ContractId{})
 
 // scanEventTerms reads up to eventScanCap stored events of the dataset's
 // ledger range and returns the contract IDs and the (contract, first topic)
@@ -367,7 +356,6 @@ func scanEventTerms(ctx context.Context, ds *queryDataset) ([][]byte, []eventTer
 	counts := &eventTermCounts{
 		contracts: map[string]int{},
 		pairs:     map[string]int{},
-		terms:     map[string]eventTermPair{},
 	}
 	stride, perChunk := eventScanPlan(len(ds.Chunks))
 	for i := 0; i < len(ds.Chunks); i += stride {
@@ -378,7 +366,7 @@ func scanEventTerms(ctx context.Context, ds *queryDataset) ([][]byte, []eventTer
 	pairKeys := byDescendingCount(counts.pairs)
 	pairs := make([]eventTermPair, len(pairKeys))
 	for i, k := range pairKeys {
-		pairs[i] = counts.terms[string(k)]
+		pairs[i] = eventTermPair{contract: k[:contractIDLen], topic: k[contractIDLen+1:]}
 	}
 	return byDescendingCount(counts.contracts), pairs, nil
 }
@@ -438,9 +426,7 @@ func (t *eventTermCounts) scanChunk(ctx context.Context, ds *queryDataset, c chu
 			t.contracts[string(cid)]++
 		}
 		if cid != nil && topic0 != nil {
-			key := string(cid) + "\x00" + string(topic0)
-			t.pairs[key]++
-			t.terms[key] = eventTermPair{contract: cid, topic: topic0}
+			t.pairs[string(cid)+"\x00"+string(topic0)]++
 		}
 		t.scanned++
 		if t.scanned >= limit {
