@@ -144,6 +144,10 @@ func (a *ReadView) resolveLedgers(c chunk.ID) (LedgerReader, func() error, error
 	}
 }
 
+// coldEventReadConcurrency is how many reads one cold events lookup or fetch
+// keeps in flight.
+const coldEventReadConcurrency = 8
+
 // Events resolves chunk c's event store as the common event.Reader the
 // query engine consumes, uniform across tiers. A cold reader is view-owned —
 // Release closes it; the hot facade is registry-owned. Returns ErrUnavailable
@@ -157,10 +161,8 @@ func (a *ReadView) Events(c chunk.ID) (event.Reader, error) {
 	}
 	switch t {
 	case tierCold:
-		// TODO(events adapter / #772): thread read concurrency
-		// (ColdReaderOptions.Concurrency → the packfile ReadItems concurrency) here;
-		// decide whether it is config-driven or caller-supplied. Default for now.
-		cr, err := event.OpenColdReader(c, a.catalog.Layout().EventsColdDirs(c), event.ColdReaderOptions{})
+		cr, err := event.OpenColdReader(c, a.catalog.Layout().EventsColdDirs(c),
+			event.ColdReaderOptions{Concurrency: coldEventReadConcurrency})
 		if err != nil {
 			return nil, err
 		}

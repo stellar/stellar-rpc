@@ -80,6 +80,11 @@ linters:
     funlen:
       lines: 100
       statements: 50
+    gomoddirectives:
+      # TODO: drop with go.mod's roaring replace once a roaring release
+      # includes RoaringBitmap/roaring#566 and #572.
+      replace-allow-list:
+        - github.com/RoaringBitmap/roaring/v2
     misspell:
       locale: US
     testifylint:

@@ -443,11 +443,9 @@ func TestColdReader_SatisfiesReaderInterface(t *testing.T) {
 	assert.Equal(t, chunkID, r.ChunkID())
 }
 
-// TestColdReader_MPHFSurvivesIndexHashDeletion pins the read-to-bytes
-// contract of openMPHF: once the MPHF has been loaded, index.hash is
-// fully resident in memory, so removing the on-disk file must not
-// break subsequent Lookups. This would fail under an mmap-backed
-// implementation if the OS released the inode on unlink.
+// TestColdReader_MPHFSurvivesIndexHashDeletion pins that an open reader
+// keeps serving after its index.hash is unlinked: the mapping keeps the
+// file's inode alive until Close.
 //
 // Open is lazy under the async-open design, so we drive a Lookup
 // before the remove to force the MPHF goroutine to complete first.
@@ -459,14 +457,13 @@ func TestColdReader_MPHFSurvivesIndexHashDeletion(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
-	// Force the background MPHF load to complete before we delete
-	// the file (otherwise the goroutine's os.ReadFile races our
-	// os.Remove).
+	// Force the background MPHF open to complete before we delete
+	// the file (otherwise the goroutine's open races our os.Remove).
 	_ = lookupOne(t, cr, topic0TermKey(t, payloads[0]))
 
 	require.NoError(t, os.Remove(filepath.Join(dir, IndexHashName(chunkID))))
 
-	// Lookup must still find every term — the MPHF lives in memory.
+	// Lookup must still find every term through the open mapping.
 	for i, p := range payloads {
 		bm := lookupOne(t, cr, topic0TermKey(t, p))
 		require.NotNil(t, bm, "lookup after index.hash deletion (payload %d)", i)
