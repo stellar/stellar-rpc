@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	coreProto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
@@ -573,6 +574,7 @@ func feeBumpExtendFootprintMissingSorobanData(t *testing.T) xdr.TransactionEnvel
 type capturingPreflightGetter struct {
 	called bool
 	params preflight.GetterParameters
+	result preflight.Preflight
 }
 
 func (c *capturingPreflightGetter) GetPreflight(
@@ -581,7 +583,7 @@ func (c *capturingPreflightGetter) GetPreflight(
 ) (preflight.Preflight, error) {
 	c.called = true
 	c.params = params
-	return preflight.Preflight{}, nil
+	return c.result, nil
 }
 
 func invokeHostFunctionEnvelope(t *testing.T) xdr.TransactionEnvelope {
@@ -679,6 +681,88 @@ func TestSimulateTransactionThreadsUseUpgradedAuth(t *testing.T) {
 	}
 }
 
+type contractEventsCoreClient func(context.Context, uint32, ...xdr.LedgerKey) (coreProto.GetLedgerEntryResponse, error)
+
+func (c contractEventsCoreClient) GetLedgerEntries(
+	ctx context.Context, ledger uint32, keys ...xdr.LedgerKey,
+) (coreProto.GetLedgerEntryResponse, error) {
+	return c(ctx, ledger, keys...)
+}
+
+func TestSimulateTransactionUsesLedgerContractEventsLimit(t *testing.T) {
+	closeMeta := xdr.LedgerCloseMeta{
+		V: 1,
+		V1: &xdr.LedgerCloseMetaV1{
+			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
+				Header: xdr.LedgerHeader{LedgerVersion: 28},
+			},
+		},
+	}
+	txB64, err := xdr.MarshalBase64(invokeHostFunctionEnvelope(t))
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name    string
+		limit   uint32
+		size    int
+		exceeds bool
+	}{
+		{name: "standard network rejects oversize", limit: 16384, size: 20000, exceeds: true},
+		{name: "unlimited network accepts oversize", limit: 4294967295, size: 20000},
+		{name: "smaller network limit", limit: 1024, size: 2000, exceeds: true},
+		{name: "exact network limit", limit: 20000, size: 19992},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledgerReader := &MockLedgerReader{}
+			ledgerReader.On("GetLatestLedgerSequence", mock.Anything).Return(uint32(2), nil)
+			ledgerReader.On("GetLedger", mock.Anything, uint32(2)).Return(closeMeta, true, nil)
+			queried := false
+			coreClient := contractEventsCoreClient(func(
+				_ context.Context, ledger uint32, keys ...xdr.LedgerKey,
+			) (coreProto.GetLedgerEntryResponse, error) {
+				queried = true
+				require.Equal(t, uint32(2), ledger)
+				require.Len(t, keys, 1)
+				require.Equal(t, xdr.LedgerEntryTypeConfigSetting, keys[0].Type)
+				require.Equal(t, xdr.ConfigSettingIdConfigSettingContractEventsV0, keys[0].ConfigSetting.ConfigSettingId)
+				entry := xdr.LedgerEntry{Data: xdr.LedgerEntryData{
+					Type: xdr.LedgerEntryTypeConfigSetting,
+					ConfigSetting: &xdr.ConfigSettingEntry{
+						ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractEventsV0,
+						ContractEvents:  &xdr.ConfigSettingContractEventsV0{TxMaxContractEventsSizeBytes: xdr.Uint32(tc.limit)},
+					},
+				}}
+				encoded, err := xdr.MarshalBase64(entry)
+				require.NoError(t, err)
+				return coreProto.GetLedgerEntryResponse{
+					Ledger:  ledger,
+					Entries: []coreProto.LedgerEntryResponse{{Entry: encoded}},
+				}, nil
+			})
+			payload := xdr.ScBytes(make([]byte, tc.size))
+			resultBytes, err := (xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &payload}).MarshalBinary()
+			require.NoError(t, err)
+			getter := &capturingPreflightGetter{result: preflight.Preflight{Result: resultBytes}}
+			handler := NewSimulateTransactionHandler(log.New(), ledgerReader, coreClient, getter, xdr.DecodeOptions{})
+			requestJSON := fmt.Sprintf(`{
+"jsonrpc":"2.0", "id":1, "method":"simulateTransaction",
+"params":{"transaction":"%s"}
+}`, txB64)
+			requests, err := jrpc2.ParseRequests([]byte(requestJSON))
+			require.NoError(t, err)
+			response, err := handler(t.Context(), requests[0].ToRequest())
+			require.NoError(t, err)
+			simResponse, ok := response.(protocol.SimulateTransactionResponse)
+			require.True(t, ok)
+			if tc.exceeds {
+				require.Contains(t, simResponse.Error, fmt.Sprintf("maximum limit (%d bytes)", tc.limit))
+			} else {
+				require.Empty(t, simResponse.Error)
+			}
+			require.True(t, queried)
+		})
+	}
+}
+
 func TestSimulateTransaction_ContractEventsSizeLimit(t *testing.T) {
 	encodedEvent := func(t *testing.T, inSuccessful bool, eventType xdr.ContractEventType, size int) []byte {
 		payload := xdr.ScBytes(make([]byte, size))
@@ -709,7 +793,7 @@ func TestSimulateTransaction_ContractEventsSizeLimit(t *testing.T) {
 				encodedEvent(t, true, xdr.ContractEventTypeContract, 7000),
 			},
 		}
-		resp, err := formatResponse(pf, protocol.FormatBase64, 100)
+		resp, err := formatResponse(pf, protocol.FormatBase64, 100, 16384)
 		require.NoError(t, err)
 		require.Contains(t, resp.Error, "total contract events size")
 		require.Contains(t, resp.Error, "exceeds maximum limit")
@@ -722,16 +806,15 @@ func TestSimulateTransaction_ContractEventsSizeLimit(t *testing.T) {
 				encodedEvent(t, true, xdr.ContractEventTypeSystem, 10000),
 			},
 		}
-		resp, err := formatResponse(pf, protocol.FormatBase64, 100)
+		resp, err := formatResponse(pf, protocol.FormatBase64, 100, 16384)
 		require.NoError(t, err)
 		require.Empty(t, resp.Error)
 	})
 
 	t.Run("return value alone can exceed the limit", func(t *testing.T) {
 		pf := preflight.Preflight{Result: make([]byte, 16385)}
-		resp, err := formatResponse(pf, protocol.FormatBase64, 100)
+		resp, err := formatResponse(pf, protocol.FormatBase64, 100, 16384)
 		require.NoError(t, err)
 		require.Contains(t, resp.Error, "exceeds maximum limit")
 	})
 }
-

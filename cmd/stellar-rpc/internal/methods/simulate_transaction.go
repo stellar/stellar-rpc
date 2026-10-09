@@ -192,7 +192,7 @@ func getSimulationResults(preflight preflight.Preflight, format string) ([]proto
 }
 
 func formatResponse(preflight preflight.Preflight,
-	format string, latestLedger uint32,
+	format string, latestLedger uint32, maxContractEventsSizeBytes uint64,
 ) (protocol.SimulateTransactionResponse, error) {
 	results, err := getSimulationResults(preflight, format)
 	if err != nil {
@@ -244,9 +244,11 @@ func formatResponse(preflight preflight.Preflight,
 		}
 	}
 	totalEventsSize += uint64(len(preflight.Result))
-	const defaultMaxContractEventsSizeBytes uint64 = 16384
-	if simResp.Error == "" && totalEventsSize > defaultMaxContractEventsSizeBytes {
-		simResp.Error = fmt.Sprintf("total contract events size (%d bytes) exceeds maximum limit (%d bytes)", totalEventsSize, defaultMaxContractEventsSizeBytes)
+	if simResp.Error == "" && totalEventsSize > maxContractEventsSizeBytes {
+		simResp.Error = fmt.Sprintf(
+			"total contract events size (%d bytes) exceeds maximum limit (%d bytes)",
+			totalEventsSize, maxContractEventsSizeBytes,
+		)
 	}
 
 	switch format {
@@ -407,7 +409,17 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 			}
 		}
 
-		simResp, err := formatResponse(result, request.Format, latestLedger)
+		var maxContractEventsSizeBytes uint64
+		if result.Error == "" && (len(result.Events) > 0 || len(result.Result) > 0) {
+			maxContractEventsSizeBytes, err = getMaxContractEventsSize(ctx, ledgerEntryGetter)
+			if err != nil {
+				return protocol.SimulateTransactionResponse{
+					Error:        err.Error(),
+					LatestLedger: latestLedger,
+				}
+			}
+		}
+		simResp, err := formatResponse(result, request.Format, latestLedger, maxContractEventsSizeBytes)
 		if err != nil {
 			return protocol.SimulateTransactionResponse{
 				Error:        err.Error(),
@@ -416,6 +428,28 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 		}
 		return simResp
 	})
+}
+
+func getMaxContractEventsSize(ctx context.Context, getter ledgerentries.LedgerEntryGetter) (uint64, error) {
+	key := xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeConfigSetting,
+		ConfigSetting: &xdr.LedgerKeyConfigSetting{
+			ConfigSettingId: xdr.ConfigSettingIdConfigSettingContractEventsV0,
+		},
+	}
+	entries, _, err := getter.GetLedgerEntries(ctx, []xdr.LedgerKey{key})
+	if err != nil {
+		return 0, fmt.Errorf("could not read contract events configuration: %w", err)
+	}
+	if len(entries) != 1 || entries[0].Entry.Data.Type != xdr.LedgerEntryTypeConfigSetting ||
+		entries[0].Entry.Data.ConfigSetting == nil {
+		return 0, errors.New("missing contract events configuration")
+	}
+	config, ok := entries[0].Entry.Data.ConfigSetting.GetContractEvents()
+	if !ok {
+		return 0, errors.New("invalid contract events configuration")
+	}
+	return uint64(config.TxMaxContractEventsSizeBytes), nil
 }
 
 // Ensures the given auth mode is valid for the given operation body. Auth mode
