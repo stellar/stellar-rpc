@@ -215,13 +215,15 @@ The command also checks the flags and the dataset directories (see section 8)
 before it changes `--out`. If a check fails, the command creates nothing in
 `--out`. When the checks pass, `bench query` writes `run.json` to `--out`. It
 writes `latency.csv` and `scenarios.csv` when at least one scenario has a
-result.
+result. It writes `bench.txt` only when the run ends with `status` set to `ok`
+(see section 7.4).
 
 If a measured request fails, the run fails after the command adds its scenario
 to the report. A failed warmup request does not fail the run. `warmup_failed`
-counts it. If the run fails or you cancel it, the command writes the
-scenarios that have a result, and the log marks the report as PARTIAL. A
-scenario that you cancel before its first measured iteration has no rows.
+counts it. If the run fails or you cancel it, the command writes the CSVs of
+the scenarios that have a result, and the log marks the report as PARTIAL. It
+does not write `bench.txt`. A scenario that you cancel before its first
+measured iteration has no rows.
 
 When the run succeeds, the log shows one summary line for each scenario. If no
 measured request succeeded, the line shows `latency=none`.
@@ -296,6 +298,72 @@ If you cancel the run, `status` is `failed`, and `error` contains
 | `settings.eventsPool` | `derived` or `unfiltered`. See section 9.2. Absent when `--types` does not include `events`, or when the pool build does not complete. |
 | `settings.fixedReadRange` | The types whose span covers all ledgers of the dataset, for example `ledgers,txpage`. Absent when no span covers them. |
 | `setupNs.storeOpen` | The time to open the dataset, before the first scenario. |
+
+### 7.4 `bench.txt`
+
+`bench.txt` contains the scenarios in the Go benchmark format, for
+`benchstat`. The first two lines are `goos` and `goarch`. Then there is one
+line for each scenario that has at least one planned iteration, in run order:
+
+```
+BenchmarkQuery/tier=cold/type=ledgers/rps=10  600  812345 ns/op  790123 p50-ns  2345678 p99-ns  2400000 p99-from-due-ns  10 items/op  0 dropped
+```
+
+The fields are tab-separated. The name has the parts `tier=<cold|hot>`,
+`type=<query_type>` and `rps=<target_rps>`. The tier is the subcommand. For
+`txhash`, one more line for each lookup outcome follows the scenario line. Its
+name ends with `/outcome=found` or `/outcome=not_found`. These lines do not
+have `dropped`.
+
+A failed run has no `bench.txt`. A measured request that fails also fails the
+run, so `bench.txt` has no failed count.
+
+| Field | Definition |
+|---|---|
+| Iterations (second field) | `succeeded`, or `count` of the outcome. When no request succeeded, `planned`. |
+| `ns/op` | The mean `latency`: `total_ns / count`, in nanoseconds. |
+| `p50-ns`, `p99-ns` | The `latency` percentiles, in nanoseconds. See section 6. |
+| `p99-from-due-ns` | The p99 of `latency_from_due`, in nanoseconds. |
+| `items/op` | `items / count` of the `latency` row. |
+| `dropped` | The dropped measured iterations. See section 1.3. |
+
+When no request succeeded, the scenario line has only `dropped`.
+
+To compare two builds:
+
+1. Run each build at least 6 times. Use a different `--out` for each run.
+   With fewer runs, `benchstat` does not show a 95% confidence interval.
+   Both builds must use the same subcommand, dataset and flags, cache controls
+   included. The name contains the tier. It does not contain the dataset or
+   the other flags, so `benchstat` cannot see a difference in them.
+   Run all the runs on the same host, and alternate the builds run by run
+   (old, new, old, new, ...). Then a change of the host or of the dataset
+   state over time affects the two builds equally.
+   For `hot`, give each run a fresh copy of the chunk database under
+   `--hot-dir`, because a run changes it (see section 8.2).
+2. Put the `bench.txt` files of each build into one file, for example
+   `cat old-*/bench.txt > old.txt` and `cat new-*/bench.txt > new.txt`.
+3. Run `benchstat old.txt new.txt`.
+4. Read the `dropped` table first. If `dropped` of a scenario changed, its
+   latency tables compare different loads. Only the requests that started
+   have a latency. Thus, do not read a lower latency of that scenario as an
+   improvement.
+5. Then read the latency tables.
+
+`status` set to `ok` means that the run completed. It does not mean that the
+run held the target rate. Dropped iterations do not fail a run.
+
+`benchstat` shows the `ns` units in seconds, for example `p99-sec`. To
+compare the rates of one build, run `benchstat -col /rps new.txt`.
+
+The txhash `outcome=found` and `outcome=not_found` lines repeat the requests
+that the txhash line without an outcome counts. Thus, the `geomean` row counts
+these requests two times. To remove the outcome lines, run
+`benchstat -filter '/outcome:""' old.txt new.txt`.
+
+`benchstat` tests each metric of each scenario separately. It does not correct
+for multiple comparisons. Thus, when there are many scenarios, expect some
+differences with p < 0.05 by chance.
 
 ## 8. Datasets
 

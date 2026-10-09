@@ -119,7 +119,7 @@ func runQueryCold(ctx context.Context, logger *supportlog.Entry, env runEnv, opt
 	if err := opts.validate(); err != nil {
 		return err
 	}
-	return runQueryBench(ctx, logger, env, opts.Plan, func() (*queryDataset, func(), error) {
+	return runQueryBench(ctx, logger, env, queryTierCold, opts.Plan, func() (*queryDataset, func(), error) {
 		return openColdDataset(logger, opts)
 	})
 }

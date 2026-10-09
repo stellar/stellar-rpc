@@ -144,12 +144,13 @@ func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan)
 	p.Settings["fixedReadRange"] = strings.Join(fixed, ",")
 }
 
-// runQueryBench is the body both subcommands share: open the dataset, run the
-// scenarios, write the report. The open time goes into setupNs.storeOpen. A
-// failure after the dataset opens still writes the scenarios added so far,
-// logged as PARTIAL.
+// runQueryBench runs a query benchmark for either subcommand and writes its
+// report. tier is the subcommand name that bench.txt records. The dataset open
+// time goes into setupNs.storeOpen. A failure after the dataset opens still
+// writes the CSVs of the scenarios added so far, logged as PARTIAL, but no
+// bench.txt.
 func runQueryBench(
-	ctx context.Context, logger *supportlog.Entry, env runEnv, p queryPlan,
+	ctx context.Context, logger *supportlog.Entry, env runEnv, tier string, p queryPlan,
 	open func() (*queryDataset, func(), error),
 ) error {
 	start := time.Now()
@@ -162,7 +163,7 @@ func runQueryBench(
 	logger.Infof("serving ledgers [%d, %d] over %d chunk(s)", ds.FirstLedger, ds.LastLedger, len(ds.Chunks))
 	warnFixedReadRange(logger, ds, p)
 
-	report := &queryReport{}
+	report := &queryReport{tier: tier}
 	run := &queryRun{logger: logger, ds: ds, plan: p, report: report, clock: timerClock{}}
 	runErr := run.scenarios(ctx)
 	written, err := report.write(env.OutDir)
@@ -171,7 +172,7 @@ func runQueryBench(
 			logger.Warnf("writing the PARTIAL report: %v", err)
 		}
 		if len(written) > 0 {
-			logger.Warnf("run incomplete: wrote %d PARTIAL CSVs to %s (rows cover only the scenarios that ran)",
+			logger.Warnf("run incomplete: wrote %d PARTIAL CSVs to %s (they cover only the scenarios that ran)",
 				len(written), env.OutDir)
 		}
 		return runErr
@@ -179,7 +180,14 @@ func runQueryBench(
 	if err != nil {
 		return err
 	}
+	if len(written) > 0 {
+		path, err := report.writeBench(env.OutDir)
+		if err != nil {
+			return err
+		}
+		written = append(written, path)
+	}
 	report.logSummary(logger)
-	logger.Infof("wrote %d CSVs to %s", len(written), env.OutDir)
+	logger.Infof("wrote %d report files to %s", len(written), env.OutDir)
 	return nil
 }

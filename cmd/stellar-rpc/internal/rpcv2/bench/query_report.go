@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -15,6 +17,7 @@ import (
 const (
 	queryLatencyFile   = "latency.csv"
 	queryScenariosFile = "scenarios.csv"
+	queryBenchFile     = "bench.txt"
 )
 
 // Query types. Each is a --types value and a latency.csv query_type value.
@@ -164,17 +167,47 @@ func (s scenarioSummary) completionRPS() float64 {
 // aggregated returns the latency.csv row of metric over all requests, or false
 // when the scenario has none.
 func (s scenarioSummary) aggregated(metric string) (row, bool) {
+	return s.find(metric, outcomeLabelAll)
+}
+
+// find returns the latency.csv row of metric and outcome, or false when the
+// scenario has none.
+func (s scenarioSummary) find(metric, outcome string) (row, bool) {
 	for _, r := range s.latency {
-		if r.metric == metric && r.outcome == outcomeLabelAll {
+		if r.metric == metric && r.outcome == outcome {
 			return r.agg, true
 		}
 	}
 	return row{}, false
 }
 
+// benchMetric is one value-unit pair of a Go benchmark line.
+type benchMetric struct{ value, unit string }
+
+// latencyMetrics returns the bench.txt latency metrics of outcome. It returns
+// nil when outcome has no latency row.
+func (s scenarioSummary) latencyMetrics(outcome string) []benchMetric {
+	lat, ok := s.find(metricLatency, outcome)
+	if !ok {
+		return nil
+	}
+	out := []benchMetric{
+		{formatFloat(float64(lat.total.Nanoseconds()) / float64(lat.n)), "ns/op"},
+		{nanos(lat.p50), "p50-ns"},
+		{nanos(lat.p99), "p99-ns"},
+	}
+	if due, ok := s.find(metricLatencyFromDue, outcome); ok {
+		out = append(out, benchMetric{nanos(due.p99), "p99-from-due-ns"})
+	}
+	return append(out, benchMetric{formatFloat(float64(lat.items) / float64(lat.n)), "items/op"})
+}
+
 // queryReport collects scenarios in run order and writes the query report. It
 // keeps only aggregated rows and counts. It is not safe for concurrent use.
 type queryReport struct {
+	// tier is queryTierCold or queryTierHot. bench.txt puts it in each
+	// benchmark name.
+	tier      string
 	scenarios []scenarioSummary
 }
 
@@ -244,6 +277,51 @@ func (q *queryReport) write(outDir string) ([]string, error) {
 	return written, nil
 }
 
+// writeBench writes bench.txt under outDir and returns its path. Call it only
+// for a run that succeeded.
+func (q *queryReport) writeBench(outDir string) (string, error) {
+	path := filepath.Join(outDir, queryBenchFile)
+	//nolint:gosec // same mode as the CSVs from os.Create; the report is not secret
+	if err := os.WriteFile(path, []byte(q.benchText()), 0o666); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	return path, nil
+}
+
+// benchText renders bench.txt: the scenarios in Go benchmark format, for
+// benchstat. A scenario with no planned iteration has no line.
+func (q *queryReport) benchText() string {
+	var b strings.Builder
+	b.WriteString("goos: " + runtime.GOOS + "\ngoarch: " + runtime.GOARCH + "\n")
+	for _, sc := range q.scenarios {
+		res := sc.result
+		if res.planned == 0 {
+			continue
+		}
+		name := "BenchmarkQuery/tier=" + q.tier + "/type=" + sc.queryType + "/rps=" + formatRPS(sc.targetRPS)
+		dropped := benchMetric{strconv.Itoa(res.measured.dropped), "dropped"}
+		if _, ok := sc.aggregated(metricLatency); !ok {
+			writeBenchLine(&b, name, res.planned, []benchMetric{dropped})
+			continue
+		}
+		writeBenchLine(&b, name, sc.succeeded, append(sc.latencyMetrics(outcomeLabelAll), dropped))
+		for _, r := range sc.latency {
+			if r.metric == metricLatency && r.outcome != outcomeLabelAll {
+				writeBenchLine(&b, name+"/outcome="+r.outcome, r.agg.n, sc.latencyMetrics(r.outcome))
+			}
+		}
+	}
+	return b.String()
+}
+
+func writeBenchLine(b *strings.Builder, name string, n int, metrics []benchMetric) {
+	b.WriteString(name + "\t" + strconv.Itoa(n))
+	for _, m := range metrics {
+		b.WriteString("\t" + m.value + " " + m.unit)
+	}
+	b.WriteString("\n")
+}
+
 // logSummary logs one line per scenario, and a warning with the first error of
 // each phase that had failed requests.
 func (q *queryReport) logSummary(logger *supportlog.Entry) {
@@ -293,6 +371,8 @@ func writeCSVTable(path string, header []string, rows [][]string) error {
 }
 
 // formatRPS renders a rate as the shortest decimal that round-trips.
-func formatRPS(rps float64) string { return strconv.FormatFloat(rps, 'f', -1, 64) }
+func formatRPS(rps float64) string { return formatFloat(rps) }
+
+func formatFloat(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 
 func nanos(d time.Duration) string { return strconv.FormatInt(d.Nanoseconds(), 10) }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -267,6 +268,57 @@ func TestQueryReportAllDropped(t *testing.T) {
 	q.logSummary(logger)
 	assert.Contains(t, output.String(), "latency=none")
 	assert.NotContains(t, output.String(), "p50=")
+}
+
+// TestQueryReportBenchText: bench.txt has one Go benchmark line per scenario
+// with a planned iteration, and one line per txhash lookup outcome; the tier
+// is part of each name.
+func TestQueryReportBenchText(t *testing.T) {
+	q := twoScenarioReport()
+	q.tier = queryTierCold
+	q.add(scenarioReport{
+		queryType: queryTypeLedgers,
+		targetRPS: 100,
+		result: scenarioResult{
+			scenarioRecord: scenarioRecord{
+				startDelays: []time.Duration{0},
+				measured:    phaseCounts{dropped: 1},
+			},
+			planned:  1,
+			schedule: 10 * time.Millisecond,
+			elapsed:  10 * time.Millisecond,
+		},
+	})
+	q.add(scenarioReport{queryType: queryTypeEvents, targetRPS: 5})
+
+	cold := q.benchText()
+	assert.Equal(t, []string{
+		"goos: " + runtime.GOOS,
+		"goarch: " + runtime.GOARCH,
+		"BenchmarkQuery/tier=cold/type=ledgers/rps=10\t2\t2000000 ns/op\t1000000 p50-ns\t3000000 p99-ns" +
+			"\t4000000 p99-from-due-ns\t5 items/op\t0 dropped",
+		"BenchmarkQuery/tier=cold/type=txhash/rps=0.5\t2\t15000 ns/op\t10000 p50-ns\t20000 p99-ns" +
+			"\t21000 p99-from-due-ns\t0.5 items/op\t1 dropped",
+		"BenchmarkQuery/tier=cold/type=txhash/rps=0.5/outcome=found\t1\t10000 ns/op\t10000 p50-ns" +
+			"\t10000 p99-ns\t12000 p99-from-due-ns\t1 items/op",
+		"BenchmarkQuery/tier=cold/type=txhash/rps=0.5/outcome=not_found\t1\t20000 ns/op\t20000 p50-ns" +
+			"\t20000 p99-ns\t21000 p99-from-due-ns\t0 items/op",
+		"BenchmarkQuery/tier=cold/type=ledgers/rps=100\t1\t1 dropped",
+		"",
+	}, strings.Split(cold, "\n"))
+
+	q.tier = queryTierHot
+	hot := q.benchText()
+	assert.NotEqual(t, cold, hot)
+	assert.Equal(t, strings.ReplaceAll(cold, "/tier=cold/", "/tier=hot/"), hot)
+
+	outDir := t.TempDir()
+	path, err := q.writeBench(outDir)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(outDir, queryBenchFile), path)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, q.benchText(), string(data))
 }
 
 // capturingLogger returns an Info-level logger and the buffer it writes to.

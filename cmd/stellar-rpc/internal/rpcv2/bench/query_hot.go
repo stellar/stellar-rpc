@@ -115,7 +115,7 @@ func runQueryHot(ctx context.Context, logger *supportlog.Entry, env runEnv, opts
 	if err := opts.validate(); err != nil {
 		return err
 	}
-	return runQueryBench(ctx, logger, env, opts.Plan, func() (*queryDataset, func(), error) {
+	return runQueryBench(ctx, logger, env, queryTierHot, opts.Plan, func() (*queryDataset, func(), error) {
 		return openHotDataset(logger, opts)
 	})
 }
