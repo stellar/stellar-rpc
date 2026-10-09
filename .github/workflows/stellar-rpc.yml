@@ -84,14 +84,6 @@ jobs:
           CGO_ENABLED: 1
           GOARCH: ${{ matrix.go_arch }}
 
-  integration-p28-pkg:
-    name: Integration tests (P28)
-    uses: ./.github/workflows/integration-tests.yml
-    with:
-      protocol_version: '28'
-      core_deb_version: '29.0.0-3589.4eb833373.noble'
-      core_docker_img: 'stellar/stellar-core:29.0.0-3589.4eb833373.noble'
-
   integration-p29-pkg:
     name: Integration tests (P29)
     uses: ./.github/workflows/integration-tests.yml

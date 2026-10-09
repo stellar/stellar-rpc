@@ -211,11 +211,9 @@ func (m inMemoryLedgerEntryGetter) Done() error {
 	return nil
 }
 
-// supportedProtocolVersions are the protocol versions the bundled soroban hosts
-// can simulate: the previous host (prev) handles protocol 28 and the current
-// host (curr) handles protocol 29. Preflight switches between them at runtime
-// based on the ledger's protocol version, so the tests exercise both paths.
-var supportedProtocolVersions = []uint32{28, 29}
+// supportedProtocolVersions are the protocol versions the bundled soroban host
+// can simulate.
+var supportedProtocolVersions = []uint32{29}
 
 func getPreflightParameters(t testing.TB, protocolVersion uint32) Parameters {
 	ledgerEntryGetter, err := newInMemoryLedgerEntryGetter(mockLedgerEntries, latestSimulateTransactionLedgerSeq)
@@ -277,7 +275,6 @@ func TestGetLedgerInfoUsesProvidedLedgerTime(t *testing.T) {
 func TestGetPreflight(t *testing.T) {
 	for _, protocolVersion := range supportedProtocolVersions {
 		t.Run(fmt.Sprintf("protocol %d", protocolVersion), func(t *testing.T) {
-			// in-memory
 			params := getPreflightParameters(t, protocolVersion)
 			result, err := GetPreflight(t.Context(), params)
 			require.NoError(t, err)
@@ -322,18 +319,22 @@ func BenchmarkGetPreflight(b *testing.B) {
 	}
 }
 
-// TestGetPreflightUseUpgradedAuthOnPrevProtocol locks in the behavior that
-// requesting v2 (AddressV2) credentials on the protocol served by the prev
-// soroban-env host succeeds. Every prev host since 27.1.0 supports v2
-// credentials (UseUpgradedAuth), so the flag passes through to the host rather
-// than being silently dropped. (Asserting the credential version itself
-// requires an auth-recording contract; that is covered by the integration
-// tests.)
-func TestGetPreflightUseUpgradedAuthOnPrevProtocol(t *testing.T) {
-	prevHostProtocol := supportedProtocolVersions[0]
-	params := getPreflightParameters(t, prevHostProtocol)
-	params.UseUpgradedAuth = true
+func TestGetPreflightRejectsPreviousProtocol(t *testing.T) {
+	params := getPreflightParameters(t, supportedProtocolVersions[0]-1)
 	result, err := GetPreflight(t.Context(), params)
 	require.NoError(t, err)
-	require.Empty(t, result.Error)
+	require.Contains(t, result.Error, "unsupported protocol version: 28")
+}
+
+func TestGetFootprintTTLPreflightRejectsPreviousProtocol(t *testing.T) {
+	params := getPreflightParameters(t, supportedProtocolVersions[0]-1)
+	params.OpBody = xdr.OperationBody{
+		Type: xdr.OperationTypeExtendFootprintTtl,
+		ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{
+			ExtendTo: 100,
+		},
+	}
+	result, err := GetPreflight(t.Context(), params)
+	require.NoError(t, err)
+	require.Contains(t, result.Error, "unsupported protocol version: 28")
 }

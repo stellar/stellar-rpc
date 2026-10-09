@@ -1,16 +1,4 @@
-// This file is included into the module graph as two different modules:
-//
-//   - crate::prev::shared for the previous protocol
-//   - crate::curr::shared for the current protocol
-//
-// This file is the `shared` part of that path, and there is a different binding
-// for `soroban_env_host` and `soroban_simulation` in each of the two parent
-// modules `crate::prev` and `crate::curr`, corresponding to two different
-// releases of soroban.
-//
-// We therefore import the different bindings for anything we use from
-// `soroban_env_host` or `soroban_simulation` from `super::` rather than
-// `crate::`.
+// Host-version-specific code is isolated here from the FFI implementation.
 use super::soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
 use super::soroban_env_host::xdr::{
     AccountId, ExtendFootprintTtlOp, HostFunction, InvokeHostFunctionOp, LedgerEntry,

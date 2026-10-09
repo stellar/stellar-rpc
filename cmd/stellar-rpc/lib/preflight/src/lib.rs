@@ -12,25 +12,7 @@ pub(crate) use sha2::{Digest, Sha256};
 #[allow(clippy::wildcard_imports)]
 use ffi::*;
 extern crate soroban_env_host_curr;
-extern crate soroban_env_host_prev;
 extern crate soroban_simulation_curr;
-extern crate soroban_simulation_prev;
-
-// We support two different versions of soroban simultaneously, switching on the
-// protocol version each supports. This is the exact same mechanism we use in
-// stellar-core to switch soroban hosts on protocol boundaries, and allows
-// synchronously cutting over between significantly different versions of the
-// host (or VM) without having to do fine-grained versioning within the VM.
-//
-// The way it is _accomplished_ is by mounting the same adaptor code (in
-// `shared.rs`) at two different paths in the module tree, and then providing
-// each with a different binding for the soroban host and simulation code. Any
-// function that mentions a type from the soroban host or simulation code must
-// be placed in the `shared.rs` file. Code that is host-version-agnostic can
-// continue to live in this file.
-//
-// This is a bit of a hack, but it works well enough for our purposes and works
-// around the absence of parametric modules in the Rust language.
 
 #[path = "."]
 mod curr {
@@ -42,33 +24,6 @@ mod curr {
 
     pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
 
-    // Constructs the recording auth mode for this protocol version. The current
-    // protocol's soroban-env can emit either v1 (`Address`) or v2 (`AddressV2`)
-    // credentials, selected by `use_upgraded_auth`.
-    pub(crate) fn make_recording_auth_mode(
-        disable_non_root_auth: bool,
-        use_upgraded_auth: bool,
-    ) -> soroban_env_host::e2e_invoke::RecordingInvocationAuthMode {
-        soroban_env_host::e2e_invoke::RecordingInvocationAuthMode::recording(
-            disable_non_root_auth,
-            use_upgraded_auth,
-        )
-    }
-}
-
-#[path = "."]
-mod prev {
-    pub(crate) use soroban_env_host_prev as soroban_env_host;
-    pub(crate) use soroban_simulation_prev as soroban_simulation;
-
-    #[allow(clippy::duplicate_mod)]
-    pub(crate) mod shared;
-
-    pub(crate) const PROTOCOL: u32 = soroban_env_host::meta::INTERFACE_VERSION.protocol;
-
-    // See the matching `curr::make_recording_auth_mode`. Every `-prev` host
-    // since 27.1.0 supports v2 (`AddressV2`) credentials, so `use_upgraded_auth`
-    // passes through, matching simulateTransaction on the previous protocol.
     pub(crate) fn make_recording_auth_mode(
         disable_non_root_auth: bool,
         use_upgraded_auth: bool,
@@ -210,18 +165,7 @@ pub extern "C" fn preflight_invoke_hf_op(
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
     catch_preflight_panic(&move || {
-        if proto <= prev::PROTOCOL {
-            prev::shared::preflight_invoke_hf_op_or_maybe_panic(
-                handle,
-                invoke_hf_op,
-                source_account,
-                ledger_info,
-                resource_config,
-                enable_debug,
-                auth_mode.into(),
-                use_upgraded_auth,
-            )
-        } else if proto == curr::PROTOCOL {
+        if proto == curr::PROTOCOL {
             curr::shared::preflight_invoke_hf_op_or_maybe_panic(
                 handle,
                 invoke_hf_op,
@@ -247,14 +191,7 @@ pub extern "C" fn preflight_footprint_ttl_op(
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
     catch_preflight_panic(&move || {
-        if proto <= prev::PROTOCOL {
-            prev::shared::preflight_footprint_ttl_op_or_maybe_panic(
-                handle,
-                op_body,
-                footprint,
-                ledger_info,
-            )
-        } else if proto == curr::PROTOCOL {
+        if proto == curr::PROTOCOL {
             curr::shared::preflight_footprint_ttl_op_or_maybe_panic(
                 handle,
                 op_body,
