@@ -99,13 +99,13 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '30'
-      # No stellar-core build implements all of protocol 30 yet. This is the
-      # vnext build of master at 88d2431d7, whose p30 host is rs-soroban-env
-      # fddfd567: CAP-0084, but neither CAP-0087 (the ML-DSA host functions
-      # soroban-env-host-curr 8abed902 adds) nor CAP-0088. Move to a build
-      # with stellar-core #5455/#5478 and #5423 once one is published.
-      core_deb_version: '29.0.1-3630.88d2431d7.noble~vnext'
-      core_docker_img: 'stellar/unsafe-stellar-core:29.0.1-3630.88d2431d7.noble-vnext'
+      # stellar-core master at ba6a4e6e3, after stellar/stellar-core#5478 made
+      # protocol 30 the current protocol with CAP-0084 and CAP-0087. Its p30
+      # host is rs-soroban-env 8abed902, the same as soroban-env-host-curr.
+      # It requires the 95 contract cost params in the *.p30 upgrade
+      # fixtures. CAP-0088 (#5423) is not in this build yet.
+      core_deb_version: '29.0.1-3637.ba6a4e6e3.noble'
+      core_docker_img: 'stellar/unsafe-stellar-core:29.0.1-3637.ba6a4e6e3.noble'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)
