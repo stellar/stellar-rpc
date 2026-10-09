@@ -1,4 +1,4 @@
-FROM golang:1.25-bookworm AS build
+FROM golang:1.26-bookworm AS build
 ARG RUST_TOOLCHAIN_VERSION=stable
 ARG REPOSITORY_VERSION
 
@@ -18,7 +18,7 @@ RUN apt clean
 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain $RUST_TOOLCHAIN_VERSION
 
-RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} build-stellar-rpc
+RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} build-rpc-v1
 
 # Move the binary to a common location
 RUN mv stellar-rpc /bin/stellar-rpc
@@ -31,16 +31,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # ca-certificates are required to make tls connections
 RUN apt update && apt install -y --no-install-recommends ca-certificates curl wget gnupg apt-utils jq
-RUN curl -sSL https://apt.stellar.org/SDF.asc | gpg --dearmor >/etc/apt/trusted.gpg.d/SDF.gpg
-RUN echo "deb https://apt.stellar.org noble stable" >/etc/apt/sources.list.d/SDF.list
-RUN echo "deb https://apt.stellar.org noble unstable" >/etc/apt/sources.list.d/SDF-unstable.list
-
-# install llvm-20 so that core can be installed
-RUN wget -O /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
-RUN echo 'deb http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main' > /etc/apt/sources.list.d/llvm.list
-RUN echo 'deb-src http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main' >> /etc/apt/sources.list.d/llvm.list
-
-RUN apt update && apt install -y --no-install-recommends stellar-core=${STELLAR_CORE_VERSION}
+COPY scripts/install-stellar-core.sh /tmp/install-stellar-core.sh
+RUN CHANNELS="stable unstable" /tmp/install-stellar-core.sh "${STELLAR_CORE_VERSION}"
 RUN apt clean
 
 # Copy the binary from the build stage

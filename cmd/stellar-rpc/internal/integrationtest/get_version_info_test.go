@@ -5,18 +5,18 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
 func setVersionInfoForTests() {
-	config.CommitHash = "commitHash"
-	config.BuildTimestamp = "buildTimestamp"
+	version.CommitHash = "commitHash"
+	version.BuildTimestamp = "buildTimestamp"
 }
 
 func TestGetVersionInfoSucceeds(t *testing.T) {
 	setVersionInfoForTests()
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 
 	result, err := test.GetRPCLient().GetVersionInfo(t.Context())
 	assert.NoError(t, err)

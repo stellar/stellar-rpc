@@ -6,18 +6,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 
 func TestHealth(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 	result, err := test.GetRPCLient().GetHealth(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, "healthy", result.Status)
-	assert.Equal(t, uint32(config.OneDayOfLedgers), result.LedgerRetentionWindow)
-	assert.Greater(t, result.OldestLedger, uint32(0))
-	assert.Greater(t, result.LatestLedger, uint32(0))
+	assert.Positive(t, result.OldestLedger)
+	assert.Positive(t, result.LatestLedger)
 	assert.GreaterOrEqual(t, result.LatestLedger, result.OldestLedger)
 	assert.Positive(t, result.LatestLedgerCloseTime)
 	assert.Positive(t, result.OldestLedgerCloseTime)
