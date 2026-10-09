@@ -23,11 +23,8 @@ type record struct {
 	// in passthrough mode.
 	payload []byte
 	// current is the active record bytes that item(i) slices into. In
-	// passthrough mode it aliases the caller's read buffer (scratch in
-	// ReadItem, readBufPool buf in ReadRange / ReadItems). In encoder
-	// mode it points at payload after Decode. putRecord clears current
-	// so the alias doesn't outlive the read call (which would let a
-	// future borrower's encoder grow into a returned-to-pool buffer).
+	// passthrough mode it aliases scratch. In encoder mode it points at
+	// payload after Decode.
 	current []byte
 	sizes   []uint32
 	offsets []int // prefix sum: offsets[i] = byte offset of item i within the record
@@ -78,10 +75,8 @@ func (r *record) itemsInRecord(recordIdx int) int {
 //
 // In passthrough mode r.current aliases the caller's input slice (r.payload
 // stays owned and untouched); r.item's "valid until next decode" contract
-// is preserved because every read path that calls decode owns the
-// underlying buffer (r.scratch in ReadItem; the pooled coalesced-read buf
-// in ReadRange / ReadItems) and does not reuse it before the next
-// iteration finishes.
+// is preserved because every read path decodes from r.scratch and does not
+// reuse it before the next iteration finishes.
 func (r *record) decode(data []byte, recordIdx int) error {
 	n := r.itemsInRecord(recordIdx)
 	itemsPerRecord := r.reader.itemsPerRecord
@@ -107,21 +102,6 @@ func (r *record) decode(data []byte, recordIdx int) error {
 	}
 
 	// Apply the Reader's RecordDecoder, or alias verbatim in passthrough mode.
-	// Passthrough sets r.current to alias the caller's read buffer (r.scratch
-	// in ReadItem; the pooled coalesced-read buf in ReadRange / ReadItems).
-	// The aliasing is load-bearing on two invariants:
-	//   1. r.item's documented validity ("until the next decode call")
-	//      matches the lifetime of the caller's read buffer.
-	//   2. A single record is decoded by exactly one goroutine; within
-	//      ReadItems each worker owns its own buffer and decodes its
-	//      records serially within the worker. If intra-record-decode
-	//      parallelism is ever introduced, this aliasing breaks silently
-	//      and a copy must replace the alias here.
-	//
-	// putRecord clears r.current so the alias doesn't outlive the read
-	// call (which would let a future borrower's encoder grow into a
-	// returned-to-pool buffer); r.payload (owned bytes for encoder mode)
-	// keeps its capacity for cap-reuse on the next encoder decode.
 	dec := r.reader.recordDecoder
 	if dec != nil {
 		var err error
