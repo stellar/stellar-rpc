@@ -25,7 +25,7 @@ import (
 const (
 	// runner runs w/ cwd = repo root, so paths are relative to there
 	legDir   = "cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/backfill-test"
-	corePath = "/usr/bin/stellar-core" // apt-installed by install_core
+	corePath = "/usr/bin/stellar-core" // apt-installed by scripts/install-stellar-core.sh
 	// daemon output; the box log's console/syslog tee drains at ~45 KB/s, which throttled request logging
 	daemonLogPath = "/var/log/stellar-rpc.log"
 )

@@ -103,6 +103,7 @@ type recordingMetrics struct {
 	backfillPasses    int
 	gaugesSet         map[string]int // how many times each gauge group was set
 	lastCommittedVals []uint32       // every value the last-committed gauge was set to, in order
+	liveHotChunksVals []int          // every value the live-hot-chunks gauge was set to, in order
 }
 
 func newRecordingMetrics() *recordingMetrics {
@@ -128,17 +129,28 @@ func (r *recordingMetrics) BackfillPass(time.Duration) {
 	r.backfillPasses++
 }
 
-func (*recordingMetrics) BackfillRetry()             {}
-func (*recordingMetrics) BackfillPlanned(int)        {}
-func (*recordingMetrics) BackfillCompleted(int)      {}
-func (*recordingMetrics) ChunkBoundary()             {}
-func (*recordingMetrics) Freeze(time.Duration)       {}
-func (*recordingMetrics) Rebuild(time.Duration)      {}
-func (*recordingMetrics) Prune(int, time.Duration)   {}
-func (*recordingMetrics) LiveHotChunks(int)          {}
+func (*recordingMetrics) BackfillRetry()           {}
+func (*recordingMetrics) BackfillPlanned(int)      {}
+func (*recordingMetrics) BackfillCompleted(int)    {}
+func (*recordingMetrics) ChunkBoundary()           {}
+func (*recordingMetrics) Freeze(time.Duration)     {}
+func (*recordingMetrics) Rebuild(time.Duration)    {}
+func (*recordingMetrics) Prune(int, time.Duration) {}
+func (r *recordingMetrics) LiveHotChunks(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.liveHotChunksVals = append(r.liveHotChunksVals, n)
+}
 func (*recordingMetrics) Discard(int, time.Duration) {}
 func (*recordingMetrics) FailedDestroy()             {}
 func (*recordingMetrics) TxIndexInconsistency()      {}
+
+// liveHotChunksSeq returns the values the live-hot-chunks gauge was set to, in order.
+func (r *recordingMetrics) liveHotChunksSeq() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int(nil), r.liveHotChunksVals...)
+}
 
 // lastCommittedSeq returns the values the last-committed gauge was set to, in order.
 func (r *recordingMetrics) lastCommittedSeq() []uint32 {

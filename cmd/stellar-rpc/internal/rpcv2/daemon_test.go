@@ -80,11 +80,13 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	configPath, dataDir := writeTempConfig(t, "")
 
 	var served atomic.Int32
+	rec := newRecordingMetrics()
 	opts := daemonOptions{
 		Backend:    &fakeBackend{tip: chunk.FirstLedgerSeq + 10},
 		Core:       &fakeCore{}, // default getter blocks until ctx cancel
 		ServeReads: countingServeReads(&served),
 		Logger:     silentLogger(),
+		Metrics:    rec,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -103,6 +105,9 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	}
 
 	assert.Equal(t, int32(1), served.Load(), "reads served once")
+	// Fresh store: the resume open created chunk 0's hot DB, and no lifecycle
+	// tick runs until a chunk completes, so startup must count it.
+	assert.Equal(t, []int{1}, rec.liveHotChunksSeq(), "live hot chunks seeded after the resume open")
 
 	// validateConfig pinned earliest_ledger before start (cpi is a constant now,
 	// not a pinned value).
