@@ -18,7 +18,9 @@ version = "=28.0.1"
 
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
-version = "=29.0.0"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "c0a3e54f920523fa5fbcb026eb303cbcbf673196"
+version = "=30.0.0"
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
@@ -26,14 +28,13 @@ version = "=28.0.1"
 
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
-version = "=29.0.0"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "c0a3e54f920523fa5fbcb026eb303cbcbf673196"
 features = ["unstable-next-api"]
+version = "=30.0.0"
 
 [workspace.dependencies.stellar-xdr]
 version = "=28.0.0"
-# `type_enum` provides the `Type`/`TypeVariant` reflection enums used by
-# xdr2json. It was enabled by default in stellar-xdr v26 but is opt-in since
-# v27.
 features = ["serde", "type_enum"]
 
 [workspace.dependencies.rand]
