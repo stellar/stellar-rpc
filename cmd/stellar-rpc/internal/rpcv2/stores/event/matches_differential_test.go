@@ -1,13 +1,15 @@
 package event
 
 // The in-memory chunk the match-path tests run against, served through
-// LookupKeys, and the borrow-safety gate over it.
+// LookupKeys, and the concurrent-ingest gate that checks a hot store
+// against it.
 
 import (
 	"context"
 	"errors"
 	"iter"
 	"math/rand"
+	"slices"
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -21,8 +23,8 @@ import (
 
 // diffCorpus is an in-memory chunk with one distinct event per id.
 type diffCorpus struct {
-	raw    [][]byte
-	mirror *ConcurrentBitmaps
+	raw   [][]byte
+	index Bitmaps
 }
 
 // diffReader serves the corpus through LookupKeys, the seam Matches reads the
@@ -45,11 +47,7 @@ func (r diffReader) LookupKeys(
 ) ([]*roaring.Bitmap, IDRange, error) {
 	out := make([]*roaring.Bitmap, len(keys))
 	for i, k := range keys {
-		bm, err := r.c.mirror.Get(k)
-		if err != nil {
-			return nil, IDRange{}, err
-		}
-		out[i] = bm
+		out[i] = r.c.index[k]
 	}
 	return out, window, nil
 }
@@ -119,7 +117,7 @@ func newDiffVocab(tb testing.TB) *diffVocab {
 
 func newDiffCorpus(t *testing.T, rng *rand.Rand, v *diffVocab, n int) *diffCorpus {
 	t.Helper()
-	c := &diffCorpus{mirror: NewConcurrentBitmapsFromBitmaps(NewBitmaps())}
+	c := &diffCorpus{index: NewBitmaps()}
 	for id := range n {
 		var cid xdr.ContractId
 		copy(cid[:], v.contracts[rng.Intn(len(v.contracts))])
@@ -146,7 +144,7 @@ func newDiffCorpus(t *testing.T, rng *rand.Rand, v *diffVocab, n int) *diffCorpu
 		keys, err := TermsForBytes(raw)
 		require.NoError(t, err)
 		for _, k := range keys {
-			c.mirror.AddTo(k, uint32(id))
+			c.index.AddTo(k, uint32(id))
 		}
 	}
 	return c
@@ -197,81 +195,52 @@ func collectOrdinals(t *testing.T, r Reader, filters []Filter, w IDRange, desc b
 	return out
 }
 
-// The match path holds mirror snapshots across a whole walk while AddTo
-// publishes new termStates on the same keys, sparse-to-dense promotion
-// included. Under -race any write reaching a held snapshot fails the run;
-// without it, the identity check pins that a pinned window ignores later ingest.
-func TestMatches_ConcurrentIngestBorrowSafety(t *testing.T) {
+// Matches runs beside ingestion that fills, rotates and seals slabs. A walk
+// over the events committed when it started must find exactly the matches
+// among them: an id the offsets count is already indexed, wherever its slab
+// is held, and nothing ingested later leaks in.
+func TestMatches_FindsEveryCommittedEventDuringIngest(t *testing.T) {
 	rng := rand.New(rand.NewSource(20260830))
 	v := newDiffVocab(t)
-	const corpusSize = 400
-	const pinned = corpusSize / 2
-
-	corpus := &diffCorpus{mirror: NewConcurrentBitmapsFromBitmaps(NewBitmaps())}
-	keysByID := make([][]TermKey, corpusSize)
-	for id := range corpusSize {
-		var cid xdr.ContractId
-		copy(cid[:], v.contracts[rng.Intn(len(v.contracts))])
-		topics := make([]xdr.ScVal, 0, 3)
-		for range 1 + rng.Intn(3) {
-			topics = append(topics, v.topics[rng.Intn(len(v.topics))])
-		}
-		sym := xdr.ScSymbol("data")
-		ev := xdr.ContractEvent{
-			ContractId: &cid,
-			Type:       v.types[rng.Intn(len(v.types))],
-			Body: xdr.ContractEventBody{
-				V: 0,
-				V0: &xdr.ContractEventV0{
-					Topics: topics,
-					Data:   xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym},
-				},
-			},
-		}
-		raw, err := ev.MarshalBinary()
-		require.NoError(t, err)
-		corpus.raw = append(corpus.raw, raw)
-		keys, err := TermsForBytes(raw)
-		require.NoError(t, err)
-		keysByID[id] = keys
-	}
-	// Only the pinned window is indexed up front; the writer feeds the rest
-	// live, and most keys cross the promotion threshold mid-run.
-	for id := range pinned {
-		for _, k := range keysByID[id] {
-			corpus.mirror.AddTo(k, uint32(id))
-		}
-	}
-
-	r := diffReader{corpus}
+	const (
+		ledgers         = 16
+		eventsPerLedger = 5000 // more than one slab in all
+	)
+	corpus := newDiffCorpus(t, rng, v, ledgers*eventsPerLedger)
 	et := xdr.ContractEventTypeContract
 	filters := []Filter{
-		{ContractID: v.contracts[0]},
-		{Topics: [protocol.MaxTopicCount][]byte{0: v.topicRaw[1]}, EventType: &et},
-		{TopicCount: TopicCountFilter{Count: 2}},
+		{ContractID: v.contracts[0], Topics: [protocol.MaxTopicCount][]byte{0: v.topicRaw[1]}},
+		{ContractID: v.contracts[1], TopicCount: TopicCountFilter{Count: 3}, EventType: &et},
 	}
-	window := IDRange{Start: 0, End: pinned}
-	want := collectOrdinals(t, r, filters, window, false)
-	require.NotEmpty(t, want, "fixture sanity: the pinned window must match something")
+	want := collectOrdinals(t, diffReader{corpus}, filters, IDRange{End: uint32(len(corpus.raw))}, false)
+	require.NotEmpty(t, want, "fixture sanity: the filters must match something")
 
+	h := openHotStoreForTest(t, chunk.ID(0))
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for id := pinned; id < corpusSize; id++ {
-			for _, k := range keysByID[id] {
-				corpus.mirror.AddTo(k, uint32(id))
+		for l := range ledgers {
+			payloads := make([]Payload, eventsPerLedger)
+			for i := range payloads {
+				payloads[i] = Payload{ContractEventBytes: corpus.raw[l*eventsPerLedger+i]}
+			}
+			if err := ingestLedgerEvents(h.store, chunk.ID(0).FirstLedger()+uint32(l), payloads); err != nil {
+				t.Errorf("ingest ledger %d: %v", l, err)
+				return
 			}
 		}
 	}()
-	for {
+	for ingesting := true; ingesting; {
 		select {
 		case <-done:
-			require.Equal(t, want, collectOrdinals(t, r, filters, window, false),
-				"pinned window changed after ingest completed")
-			return
+			ingesting = false
 		default:
-			require.Equal(t, want, collectOrdinals(t, r, filters, window, false),
-				"pinned window changed mid-ingest")
 		}
+		committed := mustEventCount(t, h.store)
+		n, _ := slices.BinarySearch(want, committed)
+		got := collectOrdinals(t, h.store, filters, IDRange{End: committed}, false)
+		require.Equal(t, append([]uint32(nil), want[:n]...), got, "over the first %d events", committed)
 	}
+	require.NoError(t, h.store.index.settle())
+	requireSealedSlabs(t, h.raw, 1)
 }
