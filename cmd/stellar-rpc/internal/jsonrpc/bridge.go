@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -162,22 +161,15 @@ func (l durationLimits) timedOut(r *http.Request, elapsed time.Duration) bool {
 	return false
 }
 
-// handlerPanic is the call stack of a panic recovered in a handler's call.
-type handlerPanic []string
-
-// recoverPanic answers 500 to a request whose serving panicked and logs the
-// stack, as network's HTTP limiter did.
+// recoverPanic answers 500 to a request whose serving panicked outside a
+// handler call and logs the stack, as network's HTTP limiter did.
 func (b *bridge) recoverPanic(w http.ResponseWriter) {
 	p := recover()
 	if p == nil {
 		return
 	}
-	stack, ok := p.(handlerPanic)
-	if !ok {
-		stack = util.CallStack(p, "", "(*bridge).ServeHTTP", 8)
-	}
 	w.WriteHeader(http.StatusInternalServerError)
-	for _, line := range stack {
+	for _, line := range util.CallStack(p, "", "(*bridge).ServeHTTP", 8) {
 		b.limits.logger.Warn(line)
 	}
 }
@@ -204,7 +196,6 @@ func (b *bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*respo
 
 	rsps := make([]*response, len(reqs))
 	var wg sync.WaitGroup
-	var crashed atomic.Pointer[handlerPanic]
 	for i, pr := range reqs {
 		method, rsp := b.route(ctx, pr)
 		if method == nil {
@@ -218,9 +209,11 @@ func (b *bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*respo
 		call := func() {
 			defer b.sem.Release(1)
 			defer func() {
-				if p := recover(); p != nil {
-					stack := handlerPanic(util.CallStack(p, pr.Method, "(*bridge).run.func", 8))
-					crashed.CompareAndSwap(nil, &stack)
+				if p := recover(); p != nil { // answer just this call, as the duration limiter does
+					for _, line := range util.CallStack(p, pr.Method, "(*bridge).run.func", 8) {
+						b.limits.logger.Warn(line)
+					}
+					rsps[i] = respond(pr, nil, network.ErrFailToProcessDueToInternalIssue)
 				}
 			}()
 			v, err := method(ctx, pr.ToRequest())
@@ -233,9 +226,6 @@ func (b *bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*respo
 		}
 	}
 	wg.Wait()
-	if stack := crashed.Load(); stack != nil {
-		panic(*stack) // recoverPanic answers 500 for the whole request
-	}
 	return slices.DeleteFunc(rsps, func(r *response) bool { return r == nil }), nil
 }
 

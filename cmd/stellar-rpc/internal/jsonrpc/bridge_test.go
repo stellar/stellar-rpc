@@ -271,24 +271,29 @@ func TestBridge_DurationLimits(t *testing.T) {
 	}
 }
 
-// A panic while serving is answered 500 and its stack logged, whether the
-// handler ran on the request's goroutine or on its own.
+// A handler panic answers just that call with -32003 and its stack is logged,
+// whether the handler ran on the request's goroutine or on its own.
 func TestBridge_Panic(t *testing.T) {
 	methods := handler.Map{
 		"panic": handler.New(func(context.Context) (any, error) { panic("test panic") }),
 		"ok":    handler.New(func(context.Context) (any, error) { return 1, nil }),
 	}
-	for name, body := range map[string]string{
-		"single":        `{"jsonrpc":"2.0","id":1,"method":"panic"}`,
-		"batch element": `[{"jsonrpc":"2.0","id":1,"method":"panic"},{"jsonrpc":"2.0","id":2,"method":"ok"}]`,
+	failed := `{"jsonrpc":"2.0","id":1,"error":` +
+		`{"code":-32003,"message":"[-32003] request failed to process due to internal issue"}}`
+	for name, tc := range map[string]struct{ body, want string }{
+		"single": {`{"jsonrpc":"2.0","id":1,"method":"panic"}`, failed},
+		"batch element": {
+			`[{"jsonrpc":"2.0","id":1,"method":"panic"},{"jsonrpc":"2.0","id":2,"method":"ok"}]`,
+			`[` + failed + `,{"jsonrpc":"2.0","id":2,"result":1}]`,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			logger, hook := testLogger()
 			b := newBridge(methods, durationLimits{limit: network.RequestDurationLimiterNoLimit, logger: logger})
 			t.Cleanup(b.Close)
-			rec := postBridge(t, b, body)
-			require.Equal(t, http.StatusInternalServerError, rec.Code)
-			require.Empty(t, rec.Body.String())
+			rec := postBridge(t, b, tc.body)
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, tc.want, rec.Body.String())
 			entries := hook.AllEntries()
 			require.NotEmpty(t, entries)
 			require.Equal(t, "test panic when calling panic", entries[0].Message)
