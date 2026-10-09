@@ -4,6 +4,8 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,9 +63,12 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 	addr, redirector, shutdown := createTestServer(ctx)
 	hoistFunction := bindRPCHoist(redirector)
 
+	var returned atomic.Bool
 	longExecutingHandler := handler.New(func(ctx context.Context, _ *jrpc2.Request) (any, error) {
 		select {
 		case <-ctx.Done():
+			time.Sleep(time.Second / 20) // still unwinding after the limiter has answered
+			returned.Store(true)
 			return nil, ctx.Err()
 		case <-time.After(time.Second * 10):
 		}
@@ -73,8 +78,10 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 	warningCounter := TestingCounter{}
 	limitCounter := TestingCounter{}
 	logCounter := makeTestLogCounter()
+	inflight := new(sync.WaitGroup)
 	*hoistFunction = MakeJrpcRequestDurationLimiter(
 		longExecutingHandler,
+		inflight,
 		time.Second/20,
 		time.Second/10,
 		&warningCounter,
@@ -98,6 +105,8 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 	require.Zero(t, warningCounter.count)
 	require.Equal(t, int64(1), limitCounter.count)
 	require.Equal(t, [7]int{0, 0, 0, 0, 1, 0, 0}, logCounter.writtenLogEntries)
+	inflight.Wait()
+	require.True(t, returned.Load(), "inflight did not wait for the handler")
 	shutdown()
 }
 
@@ -121,6 +130,7 @@ func TestJRPCRequestDurationLimiter_NoLimiting(t *testing.T) {
 	logCounter := makeTestLogCounter()
 	*hoistFunction = MakeJrpcRequestDurationLimiter(
 		longExecutingHandler,
+		new(sync.WaitGroup),
 		time.Second*5,
 		time.Second*10,
 		&warningCounter,
@@ -164,6 +174,7 @@ func TestJRPCRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 	logCounter := makeTestLogCounter()
 	*hoistFunction = MakeJrpcRequestDurationLimiter(
 		longExecutingHandler,
+		new(sync.WaitGroup),
 		time.Second/10,
 		time.Second*10,
 		&warningCounter,

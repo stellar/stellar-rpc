@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -51,13 +52,15 @@ const (
 type Handler struct {
 	http.Handler
 
-	bridge *bridge
+	bridge   *bridge
+	inflight *sync.WaitGroup
 }
 
 // Close stops accepting JSON-RPC requests, cancels those in flight and waits
 // for their handlers to return, so none outlives the stores closed after it.
 func (h Handler) Close() {
 	h.bridge.Close()
+	h.inflight.Wait() // handlers a duration limiter stopped waiting for
 }
 
 // HandlerSpec describes one JSON-RPC method: its handler plus the per-method
@@ -178,7 +181,7 @@ func toSnakeCase(s string) string {
 
 // wrapWithLimiters applies the per-method backlog-queue and request-duration
 // limiters (and their metrics) around a single method handler.
-func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry) jrpc2.Handler {
+func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry, inflight *sync.WaitGroup) jrpc2.Handler {
 	longName := toSnakeCase(spec.MethodName)
 	queueLimiterGaugeName := longName + "_inflight_requests"
 	queueLimiterGaugeHelp := "Number of concurrenty in-flight " + spec.MethodName + " requests"
@@ -215,6 +218,7 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry) j
 	requestDurationWarn := spec.RequestDurationLimit / warningThresholdDenominator
 	durationLimiter := network.MakeJrpcRequestDurationLimiter(
 		queueLimiter.Handle,
+		inflight,
 		requestDurationWarn,
 		spec.RequestDurationLimit,
 		requestDurationWarnCounter,
@@ -234,8 +238,9 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry) j
 // NewHandler constructs a Handler instance from the given method specs
 func NewHandler(params Params) Handler {
 	handlersMap := handler.Map{}
+	inflight := new(sync.WaitGroup)
 	for _, spec := range params.Specs {
-		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger)
+		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger, inflight)
 	}
 
 	globalQueueRequestExecutionDurationWarningCounter := prometheus.NewCounter(prometheus.CounterOpts{
@@ -280,7 +285,8 @@ func NewHandler(params Params) Handler {
 	})
 
 	return Handler{
-		bridge:  rpc,
-		Handler: corsMiddleware.Handler(handler),
+		bridge:   rpc,
+		inflight: inflight,
+		Handler:  corsMiddleware.Handler(handler),
 	}
 }

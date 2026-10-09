@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -35,10 +36,12 @@ type RPCRequestDurationLimiter struct {
 	requestDurationLimiter
 
 	jrpcDownstreamHandler jrpc2.Handler
+	inflight              *sync.WaitGroup // downstream calls, which can outlive Handle past the limit
 }
 
 func MakeJrpcRequestDurationLimiter(
 	downstream jrpc2.Handler,
+	inflight *sync.WaitGroup,
 	warningThreshold time.Duration,
 	limitThreshold time.Duration,
 	warningCounter increasingCounter,
@@ -52,6 +55,7 @@ func MakeJrpcRequestDurationLimiter(
 
 	return &RPCRequestDurationLimiter{
 		jrpcDownstreamHandler: downstream,
+		inflight:              inflight,
 		requestDurationLimiter: requestDurationLimiter{
 			warningThreshold: warningThreshold,
 			limitThreshold:   limitThreshold,
@@ -87,7 +91,7 @@ func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Reque
 	requestCtx, requestCtxCancel := context.WithTimeout(ctx, q.limitThreshold)
 	defer requestCtxCancel()
 
-	go func() {
+	q.inflight.Go(func() {
 		defer func() {
 			if err := recover(); err != nil {
 				q.logger.Errorf("Request for method %s resulted in an error : %v", req.Method(), err)
@@ -97,7 +101,7 @@ func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Reque
 		var res requestResultOutput
 		res.data, res.err = q.jrpcDownstreamHandler(requestCtx, req)
 		requestCompleted <- res
-	}()
+	})
 
 	warn := false
 	for {

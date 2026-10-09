@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,7 +38,7 @@ func TestWrapWithLimiters_ClientDisconnect(t *testing.T) {
 				},
 				QueueLimit:           1,
 				RequestDurationLimit: time.Minute,
-			}, host.MakeNoOpDaemon(), log.DefaultLogger)
+			}, host.MakeNoOpDaemon(), log.DefaultLogger, new(sync.WaitGroup))
 
 			req := (&jrpc2.ParsedRequest{ID: "1", Method: test.method}).ToRequest()
 			_, err := h(ctx, req)
