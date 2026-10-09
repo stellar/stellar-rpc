@@ -100,6 +100,14 @@ func run(ctx context.Context, cfg StartConfig) error {
 		}
 	}()
 
+	// Seed the hot-chunk gauge after the resume open, which may have created
+	// the live chunk's key. The lifecycle tick keeps it current from here.
+	hotKeys, err := cat.HotChunkKeys()
+	if err != nil {
+		return fmt.Errorf("startup read hot chunk keys: %w", err)
+	}
+	metrics.LiveHotChunks(len(hotKeys))
+
 	// The live ingestion stream. It owns the captive-core process (started on the
 	// loop's first pull, torn down when the loop exits), so there is no eager
 	// prepare and no closer to defer — the loop's ctx-scoped iteration is the

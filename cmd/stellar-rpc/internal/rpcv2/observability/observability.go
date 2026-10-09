@@ -30,9 +30,8 @@ type Metrics interface {
 	// id is logged at the call site; this metric is a plain counter.
 	ChunkBoundary()
 
-	// LiveHotChunks sets the count of hot-chunk DBs currently on disk (the
-	// hot:chunk key count). Reported by every lifecycle tick after the discard
-	// stage so the gauge tracks the live + awaiting-discard set.
+	// LiveHotChunks sets the count of hot-chunk DBs on disk (the hot:chunk key
+	// count). Set at startup and by every lifecycle tick after its destroys.
 	LiveHotChunks(count int)
 
 	// BackfillPass records one completed backfill pass's wall-clock.
