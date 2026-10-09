@@ -91,10 +91,6 @@ type openResult struct {
 	idx     *index
 	appData []byte
 
-	// Decoded from trailer for internal use (int casts of uint32 trailer fields).
-	totalItems     int
-	itemsPerRecord int
-
 	err error
 }
 
@@ -131,12 +127,10 @@ var recordWorkspacePool = sync.Pool{
 // not touch it.
 type Reader struct {
 	// Hot fields (touched by every read call) first so they share a cache line.
-	file           readAtCloser
-	idx            *index
-	totalItems     int
-	itemsPerRecord int
-	concurrency    int
-	recordDecoder  RecordDecoder
+	file          readAtCloser
+	idx           *index
+	concurrency   int
+	recordDecoder RecordDecoder
 	// recordChecksum mirrors trailer.HasRecordChecksum, hoisted out of the
 	// cold trailer struct because record.decode reads it per record.
 	recordChecksum bool
@@ -183,8 +177,6 @@ func Open(path string, opts ReaderOptions) *Reader {
 		r.trailer = res.trailer
 		r.idx = res.idx
 		r.appData = res.appData
-		r.totalItems = res.totalItems
-		r.itemsPerRecord = res.itemsPerRecord
 		r.recordChecksum = res.trailer.HasRecordChecksum
 		return nil
 	})
@@ -277,31 +269,12 @@ func openFile(f readAtCloser, fileSize int64, firstRead func(int64) int) openRes
 			ErrChecksum, trailer.AppDataCRC, computed)}
 	}
 
-	// A trailer claiming records or items needs an itemsPerRecord. Checked
-	// before the default below, which would read it as one item per record.
-	if itemsPerRecord <= 0 && (recordCount > 0 || totalItems > 0) {
-		return openResult{err: fmt.Errorf("%w: invalid itemsPerRecord %d in trailer",
-			ErrCorrupt, itemsPerRecord)}
-	}
-
-	// Empty packfiles may legitimately have itemsPerRecord==0 on disk;
-	// default the *internal* int to 1 so modulo math is well-defined. The
-	// Trailer view keeps the on-disk value verbatim.
-	internalItemsPerRecord := max(itemsPerRecord, 1)
-
-	idx, err := parseIndex(tail[:indexSize], recordCount, totalItems, internalItemsPerRecord, indexBase)
+	idx, err := parseIndex(tail[:indexSize], recordCount, totalItems, itemsPerRecord, indexBase)
 	if err != nil {
 		return openResult{err: err}
 	}
 
-	return openResult{
-		file:           f,
-		trailer:        trailer,
-		idx:            idx,
-		appData:        appData,
-		totalItems:     totalItems,
-		itemsPerRecord: internalItemsPerRecord,
-	}
+	return openResult{file: f, trailer: trailer, idx: idx, appData: appData}
 }
 
 // getRecord borrows a workspace from the process-wide pool and binds this
@@ -337,7 +310,7 @@ func (r *Reader) TotalItems() (int, error) {
 	if err := r.waitOpen(); err != nil {
 		return 0, err
 	}
-	return r.totalItems, nil
+	return r.idx.items, nil
 }
 
 // Trailer returns the parsed trailer.
@@ -377,7 +350,7 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 	if err := r.waitOpen(); err != nil {
 		return err
 	}
-	if position < 0 || position >= r.totalItems {
+	if position < 0 || position >= r.idx.items {
 		return ErrPositionOutOfRange
 	}
 
@@ -422,9 +395,9 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 			yield(nil, err)
 			return
 		}
-		if start < 0 || count < 0 || start > r.totalItems || count > r.totalItems-start {
+		if start < 0 || count < 0 || start > r.idx.items || count > r.idx.items-start {
 			yield(nil, fmt.Errorf("%w: ReadRange(%d, %d) out of [0, %d)",
-				ErrPositionOutOfRange, start, count, r.totalItems))
+				ErrPositionOutOfRange, start, count, r.idx.items))
 			return
 		}
 		if count == 0 {
@@ -510,9 +483,9 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 	}
 
 	for i, pos := range positions {
-		if pos < 0 || pos >= r.totalItems {
+		if pos < 0 || pos >= r.idx.items {
 			return fmt.Errorf("%w: ReadItems position %d out of [0, %d)",
-				ErrPositionOutOfRange, pos, r.totalItems)
+				ErrPositionOutOfRange, pos, r.idx.items)
 		}
 		if i > 0 && positions[i] <= positions[i-1] {
 			return fmt.Errorf("%w: ReadItems positions at %d: %d <= %d",
@@ -606,11 +579,20 @@ func (r *Reader) Verify(ctx context.Context) error {
 		return nil
 	}
 
-	hasher := newContentHasher(r.itemsPerRecord)
-	i := 0
-	for item, err := range r.ReadRange(0, r.totalItems) {
+	// The writer digests per record, so each digest ends where its record ends.
+	hasher := newContentHasher()
+	var tab groupTable
+	i, rec, left := 0, 0, 0
+	for item, err := range r.ReadRange(0, r.idx.items) {
 		if err != nil {
 			return err
+		}
+		if left == 0 {
+			s, err := tab.record(r.idx, rec)
+			if err != nil {
+				return err
+			}
+			rec, left = rec+1, s.n
 		}
 		toHash := item
 		if r.contentHashExtract != nil {
@@ -621,7 +603,8 @@ func (r *Reader) Verify(ctx context.Context) error {
 		}
 		hasher.Add(toHash)
 		i++
-		if i%r.itemsPerRecord == 0 {
+		if left--; left == 0 {
+			hasher.flushChunk()
 			if err := ctx.Err(); err != nil {
 				return err
 			}
