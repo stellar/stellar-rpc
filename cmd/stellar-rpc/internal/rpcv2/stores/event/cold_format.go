@@ -17,9 +17,9 @@ package event
 //   4. MPHF wrapper around github.com/stellar/streamhash —
 //      buildMPHF + openMPHF + Lookup. The writer builds the
 //      index.hash file via buildMPHF; the reader opens it via
-//      openMPHF and routes term-key queries through LookupBatch.
+//      openMPHF and routes term-key queries through Lookup.
 //
-// Writer-side code (ColdWriter, WriteColdIndex) lives in
+// Writer-side code (ColdWriter, ColdIndexBuilder) lives in
 // cold_writer.go + cold_index.go; the reader lives in cold_reader.go.
 
 import (
@@ -27,8 +27,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"iter"
 	"math"
-	"os"
 	"sort"
 
 	"github.com/stellar/streamhash"
@@ -64,6 +64,12 @@ func EventsPackName(chunkID chunk.ID) string {
 // IndexPackName returns the index.pack filename for chunkID.
 func IndexPackName(chunkID chunk.ID) string {
 	return chunkID.String() + "-index.pack"
+}
+
+// IndexRunsDirName returns the name of the directory ColdIndexBuilder spills
+// chunkID's runs into while it builds the index.
+func IndexRunsDirName(chunkID chunk.ID) string {
+	return chunkID.String() + "-index.runs"
 }
 
 // IndexHashName returns the index.hash filename for chunkID.
@@ -395,7 +401,7 @@ func decodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
 // `field || value`) to a unique slot in [0, N), where N is the
 // number of unique terms in a Chunk. index.pack holds each slot's
 // bitmap, in slot order. The cold reader looks up a TermKey via
-// LookupBatch, reads the slot's bitmap, and MUST verify the 4-byte
+// Lookup, reads the slot's bitmap, and MUST verify the 4-byte
 // fingerprint index.pack stores for the slot before trusting it: an
 // MPHF returns a slot for every input, including keys never added
 // at build time. False positives are screened by the fingerprint
@@ -449,8 +455,8 @@ func decodeEventsMeta(data []byte) ([stores.SecretLen]byte, error) {
 	return secret, nil
 }
 
-// ErrKeyNotFound is returned by Lookup when streamhash decides the
-// supplied key was not in the build set. Vanilla MPHF semantics
+// ErrKeyNotFound is what Lookup reports when streamhash decides
+// the supplied key was not in the build set. Vanilla MPHF semantics
 // return a slot for any input (the design doc assumes this and uses
 // a 4-byte fingerprint in index.pack to screen false positives).
 // streamhash adds a partial fingerprint of its own: routing-stage
@@ -460,73 +466,37 @@ func decodeEventsMeta(data []byte) ([stores.SecretLen]byte, error) {
 // streamhash's check still need the 4-byte fingerprint downstream.
 var ErrKeyNotFound = errors.New("events: key not in build set")
 
-// mphf wraps a streamhash MPHF index, suitable for repeated Lookup
+// mphf wraps a streamhash MPHF index, suitable for repeated lookups
 // against term keys.
 type mphf struct {
 	idx    *streamhash.Index
 	secret [stores.SecretLen]byte
 }
 
-// buildMPHF constructs an MPHF over every TermKey in bitmaps,
-// writes the serialized form to outputPath, and returns an opened
-// handle ready for immediate Lookup. The freeze path needs slot
-// assignments before closing so it can populate index.pack at the
-// correct offsets.
-//
-// len(bitmaps) supplies streamhash's required total-keys count;
-// the map is iterated once to feed keys to the builder. The bitmap
-// values are not consumed — only the TermKey participates in
-// MPHF construction.
-//
-// Memory usage is bounded by streamhash's internal partition buffers,
-// not by the chunk's unique-term count.
-//
-// Duplicate keys are rejected by streamhash.
-//
-// ctx is propagated to streamhash.NewBuilder so a long index build
-// honors caller cancellation. The AddKey/Finish loop also checks
-// ctx between keys so cancellation surfaces promptly on large
-// inputs.
-//
-// secret is the chunk's deterministic routing secret (ColdIndexSecret),
-// stored in metadata so readers route identically. Because it is fixed
-// per chunk, an ErrBlockOverflow is non-retryable: a rebuild routes the
-// same keys to the same blocks.
-//
-//nolint:nonamedreturns // named err carries through to the deferred builder.Close
+// buildMPHF writes the MPHF over keys, which are routed and ascend, to
+// outputPath and opens it. total is how many keys there are.
 func buildMPHF(
-	ctx context.Context, bitmaps Bitmaps, outputPath string, secret [stores.SecretLen]byte,
+	ctx context.Context, keys iter.Seq2[TermKey, error], total uint64, outputPath string, secret [stores.SecretLen]byte,
 ) (m *mphf, err error) {
-	total := len(bitmaps)
-
-	tmpDir, terr := os.MkdirTemp("", "eventstore-unsorted-")
-	if terr != nil {
-		return nil, fmt.Errorf("events: create tmp dir for streamhash builder: %w", terr)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	builder, builderErr := streamhash.NewUnsortedBuilder(ctx, outputPath, uint64(total), tmpDir,
+	builder, builderErr := streamhash.NewSortedBuilder(ctx, outputPath, total,
 		streamhash.WithMetadata(encodeEventsMeta(secret)))
 	if builderErr != nil {
 		return nil, fmt.Errorf("events: create streamhash builder: %w", builderErr)
 	}
-	// streamhash.Builder owns temp partition files and fds. On any
-	// error path below, builder.Close must run to release them.
-	// builder.Finish takes ownership and Close becomes a no-op
-	// on the success path.
+	// builder.Finish takes ownership of the builder's files; Close releases
+	// them on every error path before it and is a no-op after it.
 	defer func() {
 		if err != nil {
 			_ = builder.Close()
 		}
 	}()
 
-	var i int
-	for key := range bitmaps {
-		if err = ctx.Err(); err != nil {
-			return nil, fmt.Errorf("events: build MPHF canceled after %d keys: %w", i, err)
+	var i uint64
+	for key, kerr := range keys {
+		if kerr != nil {
+			return nil, kerr
 		}
-		rk := routedKey(secret, key)
-		if err = builder.AddKey(rk[:], 0); err != nil {
+		if err = builder.AddKey(key[:], 0); err != nil {
 			return nil, fmt.Errorf("events: add key %d: %w", i, err)
 		}
 		i++
@@ -567,8 +537,15 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 	return TermKey(stores.BlindKey(secret, term[:]))
 }
 
-// Lookup returns the dense slot in [0, N) that key maps to, and the
-// fingerprint that index.pack must store for that slot.
+// slotLookup is one key's answer from Lookup.
+type slotLookup struct {
+	slot uint32
+	fp   [IndexRecordFingerprintLen]byte
+	err  error
+}
+
+// Lookup returns, for each key, the dense slot in [0, N) it maps to
+// and the fingerprint that index.pack must store for that slot.
 //
 // streamhash returns ErrKeyNotFound for keys its routing-stage check
 // can prove were never in the build set; callers should treat this
@@ -577,24 +554,11 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 // 4-byte fingerprint index.pack stores for that slot: an MPHF can
 // map an unseen key to a valid build-set slot, and only the
 // fingerprint catches that residual collision.
-func (m *mphf) Lookup(key TermKey) (uint32, [IndexRecordFingerprintLen]byte, error) {
-	rk := routedKey(m.secret, key)
-	slot, err := slotOf(m.idx.QueryRank(rk[:]))
-	return slot, fingerprintOf(rk), err
-}
-
-// slotLookup is one key's answer from LookupBatch, as Lookup returns it.
-type slotLookup struct {
-	slot uint32
-	fp   [IndexRecordFingerprintLen]byte
-	err  error
-}
-
-// LookupBatch is Lookup for every key at once. streamhash requests the keys'
-// index pages together rather than one lookup after another, so on a cold
-// page cache the lookups cost about one round of reads instead of one per
-// key. results[i] answers keys[i].
-func (m *mphf) LookupBatch(keys []TermKey) []slotLookup {
+//
+// streamhash requests the keys' index pages together rather than one
+// lookup after another, so on a cold page cache the lookups cost about
+// one round of reads instead of one per key. results[i] answers keys[i].
+func (m *mphf) Lookup(keys []TermKey) []slotLookup {
 	routed := make([]TermKey, len(keys))
 	queries := make([][]byte, len(keys))
 	results := make([]slotLookup, len(keys))
@@ -607,6 +571,25 @@ func (m *mphf) LookupBatch(keys []TermKey) []slotLookup {
 		results[i].slot, results[i].err = slotOf(r.Rank, r.Err)
 	}
 	return results
+}
+
+// Close unmaps the index file; callers must call it (see openMPHF).
+func (m *mphf) Close() error {
+	return m.idx.Close()
+}
+
+// isEmpty reports whether the index holds zero terms (an eventless chunk).
+func (m *mphf) isEmpty() bool { return m.numKeys() == 0 }
+
+// numKeys returns the number of keys the MPHF was built over (0 for an
+// eventless chunk); the cold reader cross-checks it against index.pack's
+// record count.
+func (m *mphf) numKeys() uint64 { return m.idx.NumKeys() }
+
+// lookupRouted is Lookup's answer for one key already routed.
+func (m *mphf) lookupRouted(rk TermKey) (uint32, [IndexRecordFingerprintLen]byte, error) {
+	slot, err := slotOf(m.idx.QueryRank(rk[:]))
+	return slot, fingerprintOf(rk), err
 }
 
 // fingerprintOf is the fingerprint index.pack stores for the term routed to rk.
@@ -633,16 +616,3 @@ func slotOf(rank uint64, err error) (uint32, error) {
 	}
 	return uint32(rank), nil
 }
-
-// Close unmaps the index file; callers must call it (see openMPHF).
-func (m *mphf) Close() error {
-	return m.idx.Close()
-}
-
-// isEmpty reports whether the index holds zero terms (an eventless chunk).
-func (m *mphf) isEmpty() bool { return m.numKeys() == 0 }
-
-// numKeys returns the number of keys the MPHF was built over (0 for an
-// eventless chunk); the cold reader cross-checks it against index.pack's
-// record count.
-func (m *mphf) numKeys() uint64 { return m.idx.NumKeys() }

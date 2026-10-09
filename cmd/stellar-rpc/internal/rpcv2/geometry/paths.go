@@ -20,6 +20,7 @@ import (
 //	├── events/
 //	│   ├── data/{bucket:05d}/{chunk:08d}-events.pack
 //	│   └── index/{bucket:05d}/{chunk:08d}-index.pack (+ -index.hash)
+//	│       (+ {chunk:08d}-index.runs/ while the chunk's events index is being built)
 //	└── txhash/
 //	    ├── raw/{bucket:05d}/{chunk:08d}.bin
 //	    └── index/{idx:08d}/{lo:08d}-{hi:08d}.idx
@@ -128,6 +129,16 @@ func (l Layout) EventsPaths(c chunk.ID) []string {
 		filepath.Join(d.Index, event.IndexPackName(c)),
 		filepath.Join(d.Index, event.IndexHashName(c)),
 	}
+}
+
+// ScratchPaths are the directories a build of (chunk, kind) uses and removes
+// before the kind is frozen. A crashed build leaves them, and they are not
+// in ArtifactPaths, so the sweep removes them with the key.
+func (l Layout) ScratchPaths(c chunk.ID, kind Kind) []string {
+	if kind != KindEvents {
+		return nil
+	}
+	return []string{filepath.Join(l.EventsIndexBucketDir(c), event.IndexRunsDirName(c))}
 }
 
 // TxHashBinPath is a chunk's raw txhash run. Leaf owned by txhash.ColdBinName.

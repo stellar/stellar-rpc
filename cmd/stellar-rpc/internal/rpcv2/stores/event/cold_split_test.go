@@ -80,7 +80,6 @@ func newSplitFixture() *splitFixture {
 
 	f.add("edge", append(everyOther(0, 9), everyOther(45, 54)...)...)
 	f.add("mid", everyOther(30, 33)...)
-	f.add("empty-term")
 	for i := range uint32(100) {
 		f.add(fmt.Sprintf("single-%d", i), i*7919)
 	}
@@ -91,7 +90,7 @@ func newSplitFixture() *splitFixture {
 func buildSplitFixture(t *testing.T, bitmaps Bitmaps) string {
 	t.Helper()
 	dir, _ := buildColdFixture(t, indexTestChunkID, 1, 1)
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, bitmaps, dir, testIndexSecret))
+	require.NoError(t, writeColdIndex(context.Background(), indexTestChunkID, bitmaps, dir, testIndexSecret))
 	return dir
 }
 
@@ -107,9 +106,9 @@ func openSplitFixture(t *testing.T, f *splitFixture) (*ColdReader, func(TermKey)
 	m, err := cr.waitMPHF()
 	require.NoError(t, err)
 	onSplitSlot := func(key TermKey) bool {
-		slot, _, lerr := m.Lookup(key)
-		_, _, split := layout.locate(slot)
-		return lerr == nil && split
+		hit := m.Lookup([]TermKey{key})[0]
+		_, _, split := layout.locate(hit.slot)
+		return hit.err == nil && split
 	}
 	for _, name := range splitTerms {
 		require.True(t, onSplitSlot(f.key(name)), "%s must be split", name)
@@ -194,7 +193,7 @@ func TestColdReader_UnseenKeyOnASplitSlotMisses(t *testing.T) {
 	assert.Equal(t, everyID, covered)
 }
 
-func TestWriteColdIndex_SplitsAtTheThreshold(t *testing.T) {
+func TestColdIndex_SplitsAtTheThreshold(t *testing.T) {
 	f := &splitFixture{bitmaps: NewBitmaps(), oracle: map[string]*roaring.Bitmap{}}
 	f.add("seven", everyOther(0, 7)...) // about 57 KB, one entry
 	f.add("eight", everyOther(0, 8)...) // about 65 KB, split
@@ -212,9 +211,9 @@ func TestWriteColdIndex_SplitsAtTheThreshold(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
 	slot := func(name string) uint32 {
-		s, _, lerr := m.Lookup(f.key(name))
-		require.NoError(t, lerr)
-		return s
+		hit := m.Lookup([]TermKey{f.key(name)})[0]
+		require.NoError(t, hit.err)
+		return hit.slot
 	}
 
 	split := slot("eight")
@@ -250,8 +249,8 @@ func TestWriteColdIndex_SplitsAtTheThreshold(t *testing.T) {
 	}
 }
 
-// TestWriteColdIndex_RebuildIsByteIdentical guards freeze-vs-walk identity over split terms.
-func TestWriteColdIndex_RebuildIsByteIdentical(t *testing.T) {
+// TestColdIndex_RebuildIsByteIdentical guards freeze-vs-walk identity over split terms.
+func TestColdIndex_RebuildIsByteIdentical(t *testing.T) {
 	read := func(dir string) []byte {
 		b, err := os.ReadFile(filepath.Join(dir, IndexPackName(indexTestChunkID)))
 		require.NoError(t, err)
@@ -283,10 +282,10 @@ func TestColdReader_CorruptSplitIndexIsCorrupt(t *testing.T) {
 	built := buildSplitFixture(t, f.bitmaps)
 	m, err := openMPHF(filepath.Join(built, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
-	denseSlot, _, err := m.Lookup(f.key("dense"))
-	require.NoError(t, err)
-	midSlot, _, err := m.Lookup(f.key("mid"))
-	require.NoError(t, err)
+	hits := m.Lookup([]TermKey{f.key("dense"), f.key("mid")})
+	require.NoError(t, hits[0].err)
+	require.NoError(t, hits[1].err)
+	denseSlot, midSlot := hits[0].slot, hits[1].slot
 	keys := int(m.numKeys())
 	require.NoError(t, m.Close())
 

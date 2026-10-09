@@ -189,8 +189,10 @@ The pack and the index are **separate storage roots**. They are read
 completely differently — the pack is streamed sequentially and holds
 almost all of the bytes, while `index.pack` is probed at random — so a
 deployment can put the index on storage with the IOPS to serve those
-probes without moving the pack's terabytes with it. The two roots
-default to siblings:
+probes without moving the pack's terabytes with it. The index root also
+takes the build's scratch: the runs an index build spills
+(`{chunk}-index.runs/`) are written there and read back three times at
+finalize. The two roots default to siblings:
 
 ```
 events/
@@ -208,6 +210,7 @@ events/
     │   ├── 00000000-index.pack
     │   ├── 00000001-index.hash
     │   ├── 00000001-index.pack
+    │   ├── 00000002-index.runs/   (while chunk 2's index is being built)
     │   ...
     ├── 00001/
     │   ...
@@ -273,7 +276,7 @@ The resulting bitmap contains the event IDs matching the term, over the range th
 
 3. Compress into zstd blocks and write cold events.pack with offset index and ledger offset array embedded.
 
-4. Build MPHF from term keys, serialize bitmaps with fingerprint prefixes into index.pack, and write index.hash.
+4. Build the index the way backfill does (§13): spill one slab at a time, then merge the runs into index.hash and index.pack.
 
 5. Mark segment as frozen in DB; queries now served from cold files.
 
@@ -390,16 +393,16 @@ When populating cold segments from historical ledger data, the system writes col
 For each segment (10,000 ledgers):
 1. For each ledger:
    a. Append events to events.pack (record compression is handled internally by the packfile library).
-   b. Update in-memory bitmaps.
+   b. Add the event's terms to the in-memory slab; when the next slab starts, write the slab's terms as one sorted run under `{chunk}-index.runs/` beside the index files.
    c. Update in-memory ledger offset array.
 
 2. At segment completion (10,000 ledgers):
    a. Finalize events.pack (flush remaining data, embed offset index and ledger offset array).
-   b. Build MPHF and serialize bitmaps into index.pack, write index.hash.
+   b. Merge the runs three times: count the distinct terms, build the MPHF over the terms in key order (index.hash), then write each term's bitmap at its slot into index.pack, a term over 64 KiB as one entry per slab; then remove the runs directory.
    c. Mark segment as available in DB.
 ```
 
-The in-memory bitmaps and ledger offset array must be retained for the entire segment since they are needed to generate `index.hash`, `index.pack`, and the packfile metadata in step 2.
+Only the ledger offset array is retained for the whole segment (the packfile metadata needs it). The index build holds one slab of postings in memory; everything else waits on disk in the runs until step 2 merges them.
 
 If a backfill worker fails mid-segment, the incomplete segment is discarded and restarted. Segments are independent so backfill can be parallelized across multiple workers. The cold segments produced are identical in format to those produced by freeze.
 

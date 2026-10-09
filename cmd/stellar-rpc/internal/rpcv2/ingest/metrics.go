@@ -25,7 +25,7 @@ const (
 // so it is its own ledger-scoped signal (MetricSink.ColdExtract), mirroring the
 // hot path's type-less extract phase.
 const (
-	stageTermIndex = "term_index" // per-event term derivation + mirror update (events cold)
+	stageTermIndex = "term_index" // per-event term derivation + index add (events cold)
 	stageWrite     = "write"      // store write / pack append
 	stageFinalize  = "finalize"   // per-chunk commit (pack trailer, index build, .bin write)
 )

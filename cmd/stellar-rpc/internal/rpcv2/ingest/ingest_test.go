@@ -636,7 +636,7 @@ func TestEventsColdWriter_V0KeepsOffsetsContiguous(t *testing.T) {
 // TestWriteColdChunk_EventlessChunk_FullyReadable drives a full cold chunk of V0
 // (pre-Soroban, eventless) ledgers with Events enabled — the common backfill
 // case for early history. The whole chunk has zero contract events;
-// event.WriteColdIndex publishes a valid EMPTY index for it, so all
+// the events index writer publishes a valid EMPTY index for it, so all
 // three cold artifacts exist and the chunk is fully readable: a term-filtered
 // Lookup resolves to "no matches" through the ordinary path instead of a
 // missing-file error.
@@ -1583,9 +1583,9 @@ func TestWriteColdChunk_ConstructorFailure_EmitsAggregate(t *testing.T) {
 	require.Zero(t, countCleanColdIngests(sink), "no clean ColdIngest on the rollback path")
 }
 
-// ───────────────────────── events Finish-then-WriteColdIndex failure ─────────────────────────
+// ───────────────────────── events Finish-then-ColdIndexBuilder.Write failure ─────────────────────────
 
-// TestEventsCold_FinishThenIndexFails_LeavesInertPack forces WriteColdIndex to
+// TestEventsCold_FinishThenIndexFails_LeavesInertPack forces ColdIndexBuilder.Write to
 // fail AFTER writer.Finish has committed events.pack, by planting a directory
 // where the index.hash file must be written (buildMPHF then hits EISDIR).
 // Finalize must surface the error; the index-less events.pack stays on disk —
@@ -1599,7 +1599,7 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	ing, err := newEventsCold(sameDirs(filepath.Join(coldDir, chunkID.BucketID())), chunkID, nil, testEventsSecret())
 	require.NoError(t, err)
 
-	// Ingest one event-bearing ledger so the mirror is non-empty, exercising a
+	// Ingest one event-bearing ledger so the index is non-empty, exercising a
 	// real (non-empty) MPHF build.
 	rawEv, _, _ := marshalLCMWithEvent(t, first)
 	txParts, closedAt := extractFor(t, rawEv)
@@ -1611,14 +1611,14 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 	require.NoError(t, os.Mkdir(indexHashPath, 0o755))
 
 	ferr := ing.finalize(context.Background())
-	require.Error(t, ferr, "Finalize must fail when WriteColdIndex fails")
-	require.Contains(t, ferr.Error(), "WriteColdIndex")
+	require.Error(t, ferr, "Finalize must fail when ColdIndexBuilder.Write fails")
+	require.Contains(t, ferr.Error(), "write cold index")
 
 	// The committed events.pack stays in place as inert scratch (Finish ran,
 	// so the later Close does not drop it either).
 	packPath := filepath.Join(bucketDir, event.EventsPackName(chunkID))
 	_, statErr := os.Stat(packPath)
-	require.NoError(t, statErr, "the index-less events.pack stays on disk after WriteColdIndex failure")
+	require.NoError(t, statErr, "the index-less events.pack stays on disk after ColdIndexBuilder.Write failure")
 
 	// Close is still safe/idempotent afterwards and does not remove the pack.
 	require.NoError(t, ing.close())
@@ -1628,7 +1628,7 @@ func TestEventsCold_FinishThenIndexFails_LeavesInertPack(t *testing.T) {
 
 // TestEventsCold_FinalizeAfterFailedIngest_Refuses asserts the failed-write
 // latch: once a write errors (here shaping a malformed TransactionEvent),
-// finalize must refuse rather than commit a pack+index whose mirror may be ahead
+// finalize must refuse rather than commit a pack+index whose index may be ahead
 // of the offsets commit point.
 func TestEventsCold_FinalizeAfterFailedIngest_Refuses(t *testing.T) {
 	chunkID := chunk.ID(0)
