@@ -90,7 +90,7 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 
 	// one-write:create — write from scratch (BuildColdIndex truncates any crashed
 	// partial). MkdirAll is idempotent, so the index dir is created on demand.
-	indexDir := layout.TxHashIndexDir(w)
+	indexDir := layout.TxHashIndexDir(cov)
 	if mkErr := os.MkdirAll(indexDir, 0o755); mkErr != nil {
 		return fmt.Errorf("buildTxhashIndex mkdir %s: %w", indexDir, mkErr)
 	}

@@ -133,7 +133,7 @@ func (c *Catalog) DestroyTxHashIndexKey(cov geometry.TxHashIndexCoverage) error 
 	if err := durable.DeleteFileIfExists(path); err != nil {
 		return err
 	}
-	dir := c.layout.TxHashIndexDir(cov.Index)
+	dir := c.layout.TxHashIndexDir(cov)
 	if err := durable.FsyncDir(dir); err != nil { // unlink durable BEFORE key delete
 		return err
 	}
