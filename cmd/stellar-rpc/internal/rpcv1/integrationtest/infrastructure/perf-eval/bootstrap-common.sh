@@ -81,9 +81,7 @@ bootstrap_box() {
   rm -rf "$WORK_DIR/stellar-rpc"
 
   log "installing build deps"
-  apt-get install -y -qq --no-install-recommends \
-    git build-essential \
-    libpq5 libsodium23 libunwind8 libc++1-14
+  apt-get install -y -qq --no-install-recommends git build-essential
 
   GO_VERSION=1.26.5
   curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C /usr/local
