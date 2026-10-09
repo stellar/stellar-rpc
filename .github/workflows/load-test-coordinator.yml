@@ -11,7 +11,7 @@ defaults:
 
 on:
   push:
-    branches: [release/**, bypass-jrpc2-marshal]
+    branches: [release/**]
   workflow_dispatch:
     inputs:
       target_ref:
