@@ -3,6 +3,7 @@ package bench
 import (
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -16,18 +17,23 @@ type queryPlan struct {
 	Duration  time.Duration
 	Warmup    int
 
-	LedgersSpan uint32
-	TxPageSpan  uint32
-	TxPageLimit int
-	Passphrase  string
-	Seed        int64
+	LedgersSpan      uint32
+	TxPageSpan       uint32
+	TxPageLimit      int
+	EventsLimit      int
+	NotFoundFraction float64
+	Passphrase       string
+	Seed             int64
+
+	// TxHashPoolSize caps the sampled pool, in [1, maxTxHashPoolSize].
+	TxHashPoolSize int
 
 	// Settings receives the values run.json records under settings.
 	Settings map[string]string
 }
 
 // queryDataset is what one bench query run reads: the registry over the files
-// a bench ingest run left on disk, and the ledger range the requests read.
+// a bench ingest run left on disk, and the ledger range the requests and pools read.
 // Every request takes a read view and resolves its tier through ReadView. The
 // cold dataset publishes no hot handle; the hot one freezes no artifact.
 type queryDataset struct {
@@ -40,7 +46,7 @@ type queryDataset struct {
 	// Chunks is the benchmarked chunk range, ascending.
 	Chunks []chunk.ID
 
-	// FirstLedger and LastLedger bound the ledgers the requests read.
+	// FirstLedger and LastLedger bound the ledgers the requests and pools read.
 	FirstLedger, LastLedger uint32
 }
 
@@ -49,18 +55,26 @@ func (ds *queryDataset) view() (*query.ReadView, error) {
 	return ds.registry.NewReadView()
 }
 
-// verifyServes resolves the ledger store of every chunk, one read view per
-// chunk.
-func (ds *queryDataset) verifyServes() error {
+// verifyServes checks, one read view per chunk, that every chunk serves its
+// ledger store and, when types includes events, its events store.
+func (ds *queryDataset) verifyServes(types []string) error {
+	events := slices.Contains(types, queryTypeEvents)
 	for _, c := range ds.Chunks {
 		view, err := ds.view()
 		if err != nil {
 			return fmt.Errorf("acquire read view: %w", err)
 		}
 		_, err = view.Ledgers(c)
+		if err != nil {
+			view.Release()
+			return fmt.Errorf("chunk %s has no servable ledger store: %w", c, err)
+		}
+		if events {
+			_, err = view.Events(c)
+		}
 		view.Release()
 		if err != nil {
-			return fmt.Errorf("chunk %s has no servable ledger store: %w", c, err)
+			return fmt.Errorf("chunk %s has no servable events store: %w", c, err)
 		}
 	}
 	return nil

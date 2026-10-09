@@ -21,7 +21,18 @@ type requestTiming struct {
 	// latencyFromDue spans the iteration's due time to its response.
 	latencyFromDue time.Duration
 	items          int
+	// outcome is the txhash lookup result, or outcomeNone.
+	outcome lookupOutcome
 }
+
+// lookupOutcome splits txhash latencies by lookup result.
+type lookupOutcome uint8
+
+const (
+	outcomeNone lookupOutcome = iota
+	outcomeFound
+	outcomeNotFound
+)
 
 // queryRequest sends one request and measures its own latency, usually by
 // calling timed. Calls run concurrently, each with its own rng. A request must
@@ -37,7 +48,7 @@ const maxConcurrent = 512
 const maxRPS = float64(time.Second)
 
 // maxIterations caps a scenario's iterations, warmup included. At the cap one
-// scenario peaks at about 5.6 GB of memory.
+// scenario peaks at about 6.4 GB of memory.
 const maxIterations = 100_000_000
 
 // phaseCounts counts one phase's iterations. Each iteration is started or
