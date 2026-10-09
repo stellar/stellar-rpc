@@ -135,7 +135,7 @@ func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) hand
 				label[labelStatus] = "canceled"
 			}
 			requestMetric.With(label).Observe(duration.Seconds())
-			logResponse(logger, reqID, duration, label[labelStatus])
+			logResponse(logger, reqID, r.ID(), duration, label[labelStatus])
 			return result, err
 		})
 	}
@@ -156,12 +156,12 @@ func logRequest(logger *log.Entry, reqID string, req *jrpc2.Request) {
 	logger.Debug("starting JSONRPC request params")
 }
 
-func logResponse(logger *log.Entry, reqID string, duration time.Duration, status string) {
+func logResponse(logger *log.Entry, reqID, jsonReq string, duration time.Duration, status string) {
 	logger = logger.WithFields(log.F{
 		"subsys":   "jsonrpc",
 		"req":      reqID,
 		"duration": duration.String(),
-		"json_req": reqID,
+		"json_req": jsonReq,
 		"status":   status,
 	})
 	logger.Info("finished JSONRPC request")
