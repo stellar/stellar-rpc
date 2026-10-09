@@ -177,25 +177,38 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 // to batch — but exposing this method satisfies the Reader
 // interface so callers can program against batched lookups
 // uniformly.
-func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
+//
+// Each bitmap is a point-in-time image of its term: a sparse term is
+// copied out of the mirror's published id list, a dense one is
+// denseState.snapshot, the immutable clone shared with every other
+// reader. Neither grows under its holder, so a walk never sees an id
+// written after its lookup.
+//
+// The window is ignored — these images are whole-chunk and already in
+// memory, and a whole term agrees with the index inside any window — so the
+// covered range is the whole id space, and a query over the hot store runs
+// in one stage rather than looking up ids it is already holding.
+func (h *HotStore) LookupKeys(
+	ctx context.Context, keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, IDRange, error) {
 	if h.chunkStore.IsClosed() {
-		return nil, stores.ErrStoreClosed
+		return nil, IDRange{}, stores.ErrStoreClosed
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, IDRange{}, err
 	}
 	if len(keys) == 0 {
-		return nil, nil
+		return nil, window, nil
 	}
 	results := make([]*roaring.Bitmap, len(keys))
 	for i, key := range keys {
 		bm, err := h.mirror.Get(key)
 		if err != nil {
-			return nil, fmt.Errorf("events: LookupKeys for chunk %s: %w", h.chunkID, err)
+			return nil, IDRange{}, fmt.Errorf("events: LookupKeys for chunk %s: %w", h.chunkID, err)
 		}
 		results[i] = bm // nil for misses — Get already returns nil bitmap for not-found
 	}
-	return results, nil
+	return results, IDRange{End: math.MaxUint32}, nil
 }
 
 // FetchEvents decodes the events_data row for each provided eventID
