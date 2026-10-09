@@ -48,10 +48,15 @@ function stellar_xdr_version_from_rust_dep_tree {
   echo $LINE | $SED -n  's/.*stellar-xdr \(v\)\{0,1\}\([^ ]*\).*/\2/p'
 }
 
+# The stellar-xdr crate's major version doesn't track the protocol (e.g. the
+# protocol 29 and 30 hosts both use stellar-xdr 28.x, from different sources),
+# so take each host's stellar-xdr from that host's own dependency tree.
 for PROTO in $PROTOS
 do
-  if CARGO_OUTPUT=$(cargo tree --depth 0 -p stellar-xdr@$PROTO 2>&1); then
+  if CARGO_OUTPUT=$(cargo tree -e normal --prefix none -p soroban-env-host@$PROTO 2>&1); then
     RS_STELLAR_XDR_REVISION=$(echo -n "$CARGO_OUTPUT" | stellar_xdr_version_from_rust_dep_tree)
+    # Remember it per protocol for the comparison with core below.
+    printf -v "RS_STELLAR_XDR_REVISION_P${PROTO}" '%s' "$RS_STELLAR_XDR_REVISION"
     if [ ${#RS_STELLAR_XDR_REVISION} -eq 40 ]; then
       # revision is a git hash. rs-stellar-xdr moved the pinned stellar-xdr
       # commit from xdr/curr-version to the top-level xdr-version file in v27,
@@ -76,8 +81,7 @@ do
       fi
     fi
   else
-    echo "The project depends on multiple versions of the Rust rs-stellar-xdr@$PROTO library"
-    echo "Make sure a single version of stellar-xdr@$PROTO is used"
+    echo "Could not determine the rs-stellar-xdr version used by soroban-env-host@$PROTO"
     echo
     echo
     echo
@@ -87,11 +91,14 @@ do
 done
 
 # Now, lets compare the Rust and Go XDR revisions
-# TODO: The sed extraction below won't work for version tags
-GO_XDR_REVISION=$(go list -m -f '{{.Version}}' github.com/stellar/go-stellar-sdk | $SED 's/.*-\(.*\)/\1/')
 
-# revision of https://github.com/stellar/stellar-xdr/ used by the Go code
-STELLAR_XDR_REVISION_FROM_GO=$($CURL https://raw.githubusercontent.com/stellar/go-stellar-sdk/${GO_XDR_REVISION}/xdr/xdr_commit_generated.txt)
+# revision of https://github.com/stellar/stellar-xdr/ used by the Go code, read
+# from the go-stellar-sdk module the build actually uses. This honors a replace
+# directive (e.g. an SDK fork pinned while a protocol change is in review) and
+# works for tagged versions as well as pseudo-versions.
+go mod download github.com/stellar/go-stellar-sdk
+GO_SDK_DIR=$(go list -m -f '{{.Dir}}' github.com/stellar/go-stellar-sdk)
+STELLAR_XDR_REVISION_FROM_GO=$(cat "${GO_SDK_DIR}/xdr/xdr_commit_generated.txt")
 
 if [ "$STELLAR_XDR_REVISION_FROM_GO" != "$STELLAR_XDR_REVISION_FROM_RUST" ]; then
   echo "Go and Rust dependencies are using different revisions of https://github.com/stellar/stellar-xdr"
@@ -135,10 +142,13 @@ while IFS=' ' read -r P CORE_VERSION; do
 
     CORE_HOST_DEP_TREE_CURR=$($CURL https://raw.githubusercontent.com/stellar/stellar-core/${CORE_CONTAINER_REVISION}/src/rust/src/dep-trees/p${P}-expect.txt)
     RS_STELLAR_XDR_REVISION_FROM_CORE=$(echo "$CORE_HOST_DEP_TREE_CURR" | stellar_xdr_version_from_rust_dep_tree)
-    if [ "$RS_STELLAR_XDR_REVISION" != "$RS_STELLAR_XDR_REVISION_FROM_CORE" ]; then
+    # Compare against this repository's host for the same protocol.
+    RS_STELLAR_XDR_REVISION_VAR="RS_STELLAR_XDR_REVISION_P${P}"
+    RS_STELLAR_XDR_REVISION_FOR_P=${!RS_STELLAR_XDR_REVISION_VAR:-$RS_STELLAR_XDR_REVISION}
+    if [ "$RS_STELLAR_XDR_REVISION_FOR_P" != "$RS_STELLAR_XDR_REVISION_FROM_CORE" ]; then
 	    echo "The Core revision used in protocol $P integration tests (${CORE_CONTAINER_REVISION}) uses a different revision of https://github.com/stellar/rs-stellar-xdr"
 	    echo
-	    echo "Current repository's revision $RS_STELLAR_XDR_REVISION"
+	    echo "Current repository's revision $RS_STELLAR_XDR_REVISION_FOR_P"
 	    echo "Core's revision $RS_STELLAR_XDR_REVISION_FROM_CORE"
     fi
 done <<< "$PROTO_VERSION_PAIRS"

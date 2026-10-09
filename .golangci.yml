@@ -39,6 +39,12 @@ linters:
     funlen:
       lines: 100
       statements: 50
+    gomoddirectives:
+      # SPIKE: go.mod replaces go-stellar-sdk with the sisuresh/go fork at the
+      # head of stellar/go-stellar-sdk#6015. Remove this allow-list together
+      # with that replace directive once #6015 merges.
+      replace-allow-list:
+        - github.com/stellar/go-stellar-sdk
     misspell:
       locale: US
     testifylint:

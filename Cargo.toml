@@ -12,25 +12,53 @@ libc = "0.2.147"
 anyhow = "1.0.75"
 serde_json = "1.0"
 
+# Protocol 30 host window. `-prev` simulates protocol-29 ledgers and `-curr`
+# protocol 30. Both are git-pinned to the rs-soroban-env commits stellar-core
+# bundles (or will bundle), so simulation meters like apply. Keep each host's
+# `version` line directly after `package`: scripts/check-dependencies.bash
+# reads the protocol numbers from it.
+#
+# `-prev` is rs-soroban-env v29.0.0 (a721944b), core's src/rust/soroban/p29
+# submodule in both v29.0.0 and master. It is pinned by git, like `-curr`, so
+# it builds with exactly the same dependency tree as core's p29 host.
 [workspace.dependencies.soroban-env-host-prev]
 package = "soroban-env-host"
-version = "=28.0.1"
+version = "=29.0.0"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "a721944b5a4ea830a4bf5c2dbb8dbe8c1e1354c5"
 
+# `-curr` is rs-soroban-env main at 8abed902: CAP-0084 (muxed contract
+# addresses) and CAP-0087 (ML-DSA host functions), both ungated, protocol 30
+# without the `next` feature. It is the p30 host stellar-core #5478 ("Bump to
+# protocol 30") pins. Core master's p30 submodule (fddfd567) predates ML-DSA.
+# TODO: once core #5455/#5478 merge, repin `-curr` (and soroban-simulation-curr
+# and stellar-xdr below) to core's final src/rust/soroban/p30 commit, so
+# simulation keeps matching apply-time metering.
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
-version = "=29.0.0"
+version = "=30.0.0"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "8abed902b850b7c1aebddf131a6521684231bb93"
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
-version = "=28.0.1"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "a721944b5a4ea830a4bf5c2dbb8dbe8c1e1354c5"
 
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
-version = "=29.0.0"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "8abed902b850b7c1aebddf131a6521684231bb93"
 features = ["unstable-next-api"]
 
 [workspace.dependencies.stellar-xdr]
-version = "=28.0.0"
+# Same rs-stellar-xdr commit soroban-env-host-curr pins (28f34cf5, generated
+# from stellar-xdr 4f524bba, the XDR the Go SDK is generated from), so
+# xdr2json and the curr host share one stellar-xdr build and the same XDR.
+# CAP-0084, CAP-0087 and CAP-0088 are all ungated at this commit, so no XDR
+# feature flags are needed.
+git = "https://github.com/stellar/rs-stellar-xdr"
+rev = "28f34cf5a963e3cb13a25456eb9bbda7e0e1ad64"
 # `type_enum` provides the `Type`/`TypeVariant` reflection enums used by
 # xdr2json. It was enabled by default in stellar-xdr v26 but is opt-in since
 # v27.

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Breaking Changes
+* `getEvents` no longer returns the `inSuccessfulContractCall` field, deprecated since protocol 23 ([#1050](https://github.com/stellar/stellar-rpc/pull/1050)).
+
+### Added
+* XDR has been updated to support Protocol 30 (CAP-0084, CAP-0087, CAP-0088) ([#1050](https://github.com/stellar/stellar-rpc/pull/1050)). Ledgers with CAP-0088 millisecond close times are served as before: every close time RPC reports (`ledgerCloseTime`, `latestLedgerCloseTime`, `ledgerClosedAt`, ...) stays in whole seconds, and `closeTimeMs` only appears inside ledger headers and metadata.
+* The preflight hosts have been rotated to soroban-env-host 30.0.0, which adds the CAP-0087 ML-DSA host functions (29.0.0 for the previous protocol), and integration tests now run protocols 29 and 30 ([#1050](https://github.com/stellar/stellar-rpc/pull/1050)).
+
 ## [v29.0.0](https://github.com/stellar/stellar-rpc/compare/v28.0.1...v29.0.0)
 
 ### Added

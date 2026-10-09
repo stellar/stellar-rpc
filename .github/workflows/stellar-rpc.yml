@@ -84,21 +84,28 @@ jobs:
           CGO_ENABLED: 1
           GOARCH: ${{ matrix.go_arch }}
 
-  integration-p28-pkg:
-    name: Integration tests (P28)
-    uses: ./.github/workflows/integration-tests.yml
-    with:
-      protocol_version: '28'
-      core_deb_version: '29.0.0-3589.4eb833373.noble'
-      core_docker_img: 'stellar/stellar-core:29.0.0-3589.4eb833373.noble'
-
   integration-p29-pkg:
     name: Integration tests (P29)
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '29'
+      # stellar-core 29.0.0: its src/rust/soroban/p29 is rs-soroban-env v29.0.0
+      # (a721944b), the commit soroban-env-host-prev pins.
       core_deb_version: '29.0.0-3589.4eb833373.noble'
       core_docker_img: 'stellar/stellar-core:29.0.0-3589.4eb833373.noble'
+
+  integration-p30-pkg:
+    name: Integration tests (P30)
+    uses: ./.github/workflows/integration-tests.yml
+    with:
+      protocol_version: '30'
+      # stellar-core master at ba6a4e6e3, after stellar/stellar-core#5478 made
+      # protocol 30 the current protocol with CAP-0084 and CAP-0087. Its p30
+      # host is rs-soroban-env 8abed902, the same as soroban-env-host-curr.
+      # It requires the 95 contract cost params in the *.p30 upgrade
+      # fixtures. CAP-0088 (#5423) is not in this build yet.
+      core_deb_version: '29.0.1-3637.ba6a4e6e3.noble'
+      core_docker_img: 'stellar/unsafe-stellar-core:29.0.1-3637.ba6a4e6e3.noble'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)

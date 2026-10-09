@@ -212,10 +212,10 @@ func (m inMemoryLedgerEntryGetter) Done() error {
 }
 
 // supportedProtocolVersions are the protocol versions the bundled soroban hosts
-// can simulate: the previous host (prev) handles protocol 28 and the current
-// host (curr) handles protocol 29. Preflight switches between them at runtime
+// can simulate: the previous host (prev) handles protocol 29 and the current
+// host (curr) handles protocol 30. Preflight switches between them at runtime
 // based on the ledger's protocol version, so the tests exercise both paths.
-var supportedProtocolVersions = []uint32{28, 29}
+var supportedProtocolVersions = []uint32{29, 30}
 
 func getPreflightParameters(t testing.TB, protocolVersion uint32) Parameters {
 	ledgerEntryGetter, err := newInMemoryLedgerEntryGetter(mockLedgerEntries, latestSimulateTransactionLedgerSeq)
