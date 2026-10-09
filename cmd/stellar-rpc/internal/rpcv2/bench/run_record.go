@@ -29,6 +29,10 @@ type runRecord struct {
 	FinishedAt    string            `json:"finishedAt,omitempty"`
 	// PeakRSSBytes is VmHWM at the end of the run.
 	PeakRSSBytes uint64 `json:"peakRssBytes,omitempty"`
+	// Settings is runEnv.Settings.
+	Settings map[string]string `json:"settings,omitempty"`
+	// SetupNs is runEnv.SetupTimes in nanoseconds.
+	SetupNs map[string]int64 `json:"setupNs,omitempty"`
 	// Status stays running if the process dies before the run ends.
 	Status string `json:"status"`
 	Error  string `json:"error,omitempty"`
@@ -71,9 +75,16 @@ func newRunRecord(cmd *cobra.Command, flags map[string]string, startedAt time.Ti
 }
 
 // finish records how the run ended.
-func (r *runRecord) finish(finishedAt time.Time, peakRSS uint64, runErr error) {
+func (r *runRecord) finish(finishedAt time.Time, env runEnv, peakRSS uint64, runErr error) {
 	r.FinishedAt = finishedAt.UTC().Format(time.RFC3339)
 	r.PeakRSSBytes = peakRSS
+	r.Settings = env.Settings
+	if len(env.SetupTimes) > 0 {
+		r.SetupNs = make(map[string]int64, len(env.SetupTimes))
+		for name, d := range env.SetupTimes {
+			r.SetupNs[name] = d.Nanoseconds()
+		}
+	}
 	r.Status = runStatusOK
 	r.Error = ""
 	if runErr != nil {
