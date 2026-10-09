@@ -41,6 +41,10 @@ const coldAppDataVersion byte = 0x01
 
 const appDataSize = 1 + 4 // version byte + firstSeq (uint32 BE)
 
+// coldFirstRead covers a cold pack's whole tail: a chunk's index is under
+// 42 KB at any ledger size, and the app data and trailer under 100 bytes.
+const coldFirstRead = 64 << 10
+
 // coldPackDecoder is the process-wide zstd decoder for cold ledger
 // pack records. packfile.RecordDecoder must be concurrent-safe and
 // zstd.Decompressor satisfies that, so a single shared instance
@@ -81,7 +85,10 @@ func OpenColdReader(path string) (*ColdReader, error) {
 		return nil, stores.ErrInvalidConfig
 	}
 	c := &ColdReader{
-		r:    stores.OpenPack(path, packfile.ReaderOptions{RecordDecoder: coldPackDecoder}),
+		r: stores.OpenPack(path, packfile.ReaderOptions{
+			RecordDecoder: coldPackDecoder,
+			FirstRead:     func(int64) int { return coldFirstRead },
+		}),
 		path: path,
 	}
 	c.init = sync.OnceValues(c.loadHeader)
