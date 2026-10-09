@@ -24,9 +24,9 @@ type gauge interface {
 
 type backlogQLimiter struct {
 	limit        uint64
-	pending      uint64
+	pending      atomic.Uint64
 	gauge        gauge
-	limitReached uint64
+	limitReached atomic.Uint64
 	logger       *log.Entry
 }
 
@@ -78,11 +78,11 @@ func (q *BacklogHTTPQLimiter) ServeHTTP(res http.ResponseWriter, req *http.Reque
 		q.httpDownstreamHandler.ServeHTTP(res, req)
 		return
 	}
-	if newPending := atomic.AddUint64(&q.pending, 1); newPending > q.limit {
+	if newPending := q.pending.Add(1); newPending > q.limit {
 		// we've reached our queue limit - let the caller know we're too busy.
-		atomic.AddUint64(&q.pending, ^uint64(0))
+		q.pending.Add(^uint64(0))
 		res.WriteHeader(http.StatusServiceUnavailable)
-		if atomic.CompareAndSwapUint64(&q.limitReached, 0, 1) {
+		if q.limitReached.CompareAndSwap(0, 1) {
 			// if the limit was reached, log a message.
 			if q.logger != nil {
 				q.logger.Infof(
@@ -96,11 +96,11 @@ func (q *BacklogHTTPQLimiter) ServeHTTP(res http.ResponseWriter, req *http.Reque
 		q.gauge.Inc()
 	}
 	defer func() {
-		atomic.AddUint64(&q.pending, ^uint64(0))
+		q.pending.Add(^uint64(0))
 		if q.gauge != nil {
 			q.gauge.Dec()
 		}
-		atomic.StoreUint64(&q.limitReached, 0)
+		q.limitReached.Store(0)
 	}()
 
 	q.httpDownstreamHandler.ServeHTTP(res, req)
@@ -112,10 +112,10 @@ func (q *BacklogJrpcQLimiter) Handle(ctx context.Context, req *jrpc2.Request) (a
 		return q.jrpcDownstreamHandler(ctx, req)
 	}
 
-	if newPending := atomic.AddUint64(&q.pending, 1); newPending > q.limit {
+	if newPending := q.pending.Add(1); newPending > q.limit {
 		// we've reached our queue limit - let the caller know we're too busy.
-		atomic.AddUint64(&q.pending, ^uint64(0))
-		if atomic.CompareAndSwapUint64(&q.limitReached, 0, 1) {
+		q.pending.Add(^uint64(0))
+		if q.limitReached.CompareAndSwap(0, 1) {
 			// if the limit was reached, log a message.
 			if q.logger != nil {
 				q.logger.Infof(
@@ -132,11 +132,11 @@ func (q *BacklogJrpcQLimiter) Handle(ctx context.Context, req *jrpc2.Request) (a
 	}
 
 	defer func() {
-		atomic.AddUint64(&q.pending, ^uint64(0))
+		q.pending.Add(^uint64(0))
 		if q.gauge != nil {
 			q.gauge.Dec()
 		}
-		atomic.StoreUint64(&q.limitReached, 0)
+		q.limitReached.Store(0)
 	}()
 
 	return q.jrpcDownstreamHandler(ctx, req)
