@@ -7,7 +7,7 @@ import (
 )
 
 // LedgerOffsets tracks cumulative event counts per ledger within a
-// chunk for build-then-read paths (cold backfill, DecodeLedgerOffsets
+// chunk for build-then-read paths (cold backfill, decodeLedgerOffsets
 // on the cold-reader side). Single-threaded by contract: callers
 // either build it in one goroutine and hand it off to many readers
 // via a sync-providing handoff (sync.OnceValues,
@@ -35,8 +35,7 @@ func NewLedgerOffsets(startLedger uint32) *LedgerOffsets {
 }
 
 // Append records the number of events in one ledger. The ledger must
-// be the next expected in sequence; it validates because its caller
-// decodes untrusted on-disk bytes. (The hot sibling
+// be the next expected in sequence. (The hot sibling
 // ConcurrentLedgerOffsets.Append is positional and unchecked — its
 // callers own the sequence invariant.)
 //
