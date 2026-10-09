@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## [v29.0.1](https://github.com/stellar/stellar-rpc/compare/v29.0.0...v29.0.1)
+
+### Breaking Changes
+* Preflight simulation now supports Protocol 29 only. Protocol 28 support was removed so source builds can use the corrected Wasmi dependency from soroban-env-host 29.0.1.
+
+### Fixed
+* Source builds now use soroban-env-host and soroban-simulation 29.0.1.
+
 ## [v29.0.0](https://github.com/stellar/stellar-rpc/compare/v28.0.1...v29.0.0)
 
 ### Added

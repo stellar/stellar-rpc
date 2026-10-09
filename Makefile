@@ -16,7 +16,7 @@ REPOSITORY_BRANCH := "$(shell git rev-parse --abbrev-ref HEAD)"
 ifeq ($(shell command -v jq 2>/dev/null),)
     $(error if no jq then no version at compile time)
 endif
-# This function extracts the version of soroban-env-host-prev/curr from Cargo metadata.
+# This function extracts the version of soroban-env-host-curr from Cargo metadata.
 # The version is found in the ".req" field; if specified (i.e. not "*"), leading semantic verisoning characters are stripped.
 # Otherwise, we search for the commit hash in the ".source" field and return that if it exists. It will always follow "rev=".
 # Otherwise (e.g. neither is found), we return "dev".
@@ -29,7 +29,6 @@ $(shell cargo metadata --format-version 1 | \
 			end
 		end)')
 endef
-RS_ENV_VERSION_PREV := "$(call RS_ENV_VERSION,soroban-env-host-prev)"
 RS_ENV_VERSION_CURR := "$(call RS_ENV_VERSION,soroban-env-host-curr)"
 
 BUILD_TIMESTAMP ?= $(shell date '+%Y-%m-%dT%H:%M:%S')
@@ -37,7 +36,6 @@ GOLDFLAGS :=	-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.
 				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.CommitHash=${REPOSITORY_COMMIT_HASH}' \
 				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.BuildTimestamp=${BUILD_TIMESTAMP}' \
 				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.Branch=${REPOSITORY_BRANCH}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionPrev=${RS_ENV_VERSION_PREV}' \
 				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionCurr=${RS_ENV_VERSION_CURR}'
 
 

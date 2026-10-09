@@ -9,19 +9,10 @@ fi
 
 CURL="curl -sL --fail-with-body"
 
-# PROTOS is in ascending order so the last iteration of the PROTOS-based loops
-# will end up with the highest protocol value used for recording any state
-# variables.
-PROTOS=$($SED -n ':pkg; /"soroban-env-host"/ {n; /version/ { s/[^0-9]*\([0-9]\+\).*/\1/ p; b pkg;}}' Cargo.toml | sort -n | tr '\n' ' ')
-if [ -z "$PROTOS" ]; then
-  echo "Cannot find soroban-env-host dependencies in Cargo.toml"
-  exit 1
-fi
-
-for PROTO in $PROTOS
+for PACKAGE in soroban-env-host soroban-simulation soroban-wasmi
 do
-  if ! CARGO_OUTPUT=$(cargo tree -p soroban-env-host@$PROTO 2>&1); then
-    echo "The project depends on multiple versions of the soroban-env-host@$PROTO Rust library, please unify them."
+  if ! CARGO_OUTPUT=$(cargo tree -p "$PACKAGE" 2>&1); then
+    echo "The project depends on multiple versions of the $PACKAGE Rust library, please unify them."
     echo
     echo
     echo "Full error:"
@@ -48,43 +39,40 @@ function stellar_xdr_version_from_rust_dep_tree {
   echo $LINE | $SED -n  's/.*stellar-xdr \(v\)\{0,1\}\([^ ]*\).*/\2/p'
 }
 
-for PROTO in $PROTOS
-do
-  if CARGO_OUTPUT=$(cargo tree --depth 0 -p stellar-xdr@$PROTO 2>&1); then
-    RS_STELLAR_XDR_REVISION=$(echo -n "$CARGO_OUTPUT" | stellar_xdr_version_from_rust_dep_tree)
-    if [ ${#RS_STELLAR_XDR_REVISION} -eq 40 ]; then
-      # revision is a git hash. rs-stellar-xdr moved the pinned stellar-xdr
-      # commit from xdr/curr-version to the top-level xdr-version file in v27,
-      # so read xdr-version first and fall back to xdr/curr-version for older
-      # layouts. The || sits outside the command substitution so a
-      # --fail-with-body 404 body can't be concatenated into the captured
-      # revision; each assignment captures only its own command's stdout.
-      STELLAR_XDR_REVISION_FROM_RUST=$($CURL "https://raw.githubusercontent.com/stellar/rs-stellar-xdr/${RS_STELLAR_XDR_REVISION}/xdr-version" 2>/dev/null) \
-        || STELLAR_XDR_REVISION_FROM_RUST=$($CURL "https://raw.githubusercontent.com/stellar/rs-stellar-xdr/${RS_STELLAR_XDR_REVISION}/xdr/curr-version" 2>/dev/null)
-    else
-      # revision is a crate version
-      CARGO_SRC_BASE_DIR=$(realpath ${CARGO_HOME:-$HOME/.cargo}/registry/src/index*)
-      CRATE_DIR="${CARGO_SRC_BASE_DIR}/stellar-xdr-${RS_STELLAR_XDR_REVISION}"
-      # The XDR definitions are a pinned commit of stellar/stellar-xdr. Up to
-      # stellar-xdr v26 that commit lived in xdr/curr-version; from v27 the xdr
-      # definitions became a git submodule and the commit is recorded in the
-      # top-level xdr-version file instead.
-      if [ -f "${CRATE_DIR}/xdr-version" ]; then
-        STELLAR_XDR_REVISION_FROM_RUST=$(cat "${CRATE_DIR}/xdr-version")
-      else
-        STELLAR_XDR_REVISION_FROM_RUST=$(cat "${CRATE_DIR}/xdr/curr-version")
-      fi
-    fi
+if CARGO_OUTPUT=$(cargo tree --depth 0 -p stellar-xdr 2>&1); then
+  RS_STELLAR_XDR_REVISION=$(echo -n "$CARGO_OUTPUT" | stellar_xdr_version_from_rust_dep_tree)
+  if [ ${#RS_STELLAR_XDR_REVISION} -eq 40 ]; then
+    # revision is a git hash. rs-stellar-xdr moved the pinned stellar-xdr
+    # commit from xdr/curr-version to the top-level xdr-version file in v27,
+    # so read xdr-version first and fall back to xdr/curr-version for older
+    # layouts. The || sits outside the command substitution so a
+    # --fail-with-body 404 body can't be concatenated into the captured
+    # revision; each assignment captures only its own command's stdout.
+    STELLAR_XDR_REVISION_FROM_RUST=$($CURL "https://raw.githubusercontent.com/stellar/rs-stellar-xdr/${RS_STELLAR_XDR_REVISION}/xdr-version" 2>/dev/null) \
+      || STELLAR_XDR_REVISION_FROM_RUST=$($CURL "https://raw.githubusercontent.com/stellar/rs-stellar-xdr/${RS_STELLAR_XDR_REVISION}/xdr/curr-version" 2>/dev/null)
   else
-    echo "The project depends on multiple versions of the Rust rs-stellar-xdr@$PROTO library"
-    echo "Make sure a single version of stellar-xdr@$PROTO is used"
-    echo
-    echo
-    echo
-    echo "Full error:"
-    echo $CARGO_OUTPUT
+    # revision is a crate version
+    CARGO_SRC_BASE_DIR=$(realpath ${CARGO_HOME:-$HOME/.cargo}/registry/src/index*)
+    CRATE_DIR="${CARGO_SRC_BASE_DIR}/stellar-xdr-${RS_STELLAR_XDR_REVISION}"
+    # The XDR definitions are a pinned commit of stellar/stellar-xdr. Up to
+    # stellar-xdr v26 that commit lived in xdr/curr-version; from v27 the xdr
+    # definitions became a git submodule and the commit is recorded in the
+    # top-level xdr-version file instead.
+    if [ -f "${CRATE_DIR}/xdr-version" ]; then
+      STELLAR_XDR_REVISION_FROM_RUST=$(cat "${CRATE_DIR}/xdr-version")
+    else
+      STELLAR_XDR_REVISION_FROM_RUST=$(cat "${CRATE_DIR}/xdr/curr-version")
+    fi
   fi
-done
+else
+  echo "The project depends on multiple versions of the Rust stellar-xdr library"
+  echo "Make sure a single version of stellar-xdr is used"
+  echo
+  echo
+  echo "Full error:"
+  echo $CARGO_OUTPUT
+  exit 1
+fi
 
 # Now, lets compare the Rust and Go XDR revisions
 # TODO: The sed extraction below won't work for version tags
