@@ -90,6 +90,49 @@ func TestQueryPlanPoolAndNotFoundFraction(t *testing.T) {
 	}
 }
 
+func TestQueryCacheControls(t *testing.T) {
+	for _, cmd := range newQueryCommand().Commands() {
+		t.Run(cmd.Name(), func(t *testing.T) {
+			warmup := cmd.Flags().Lookup("warmup")
+			require.NotNil(t, warmup)
+			want := "0"
+			if cmd.Name() == "hot" {
+				want = "20"
+				assert.Nil(t, cmd.Flags().Lookup("evict-page-cache"))
+			} else {
+				eviction := cmd.Flags().Lookup("evict-page-cache")
+				require.NotNil(t, eviction)
+				assert.Equal(t, "true", eviction.DefValue)
+			}
+			assert.Equal(t, want, warmup.DefValue)
+		})
+	}
+	for _, tc := range []struct {
+		warmup int
+		evict  bool
+		want   string
+	}{
+		{0, false, "existing-cache"},
+		{20, false, "warm-run"},
+		{20, true, "warm-run"},
+	} {
+		p := queryPlan{Warmup: tc.warmup, Evict: tc.evict}
+		assert.Equal(t, tc.want, p.cacheScenario())
+	}
+	evicting := queryPlan{Evict: true}
+	if evictSupported {
+		assert.Equal(t, "cold-start", evicting.cacheScenario())
+	} else {
+		assert.Equal(t, "existing-cache", evicting.cacheScenario(), "eviction cannot be requested off Linux")
+	}
+	assert.Equal(t, "off", evictionState(false))
+	want := "unsupported-on-this-platform"
+	if evictSupported {
+		want = "requested"
+	}
+	assert.Equal(t, want, evictionState(true))
+}
+
 // TestPlanBoundsReadSpans: --ledgers-span and --txpage-span accept maxReadSpan
 // and reject maxReadSpan+1.
 func TestPlanBoundsReadSpans(t *testing.T) {

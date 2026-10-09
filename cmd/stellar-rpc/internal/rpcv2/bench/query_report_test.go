@@ -78,6 +78,8 @@ func twoScenarioReport() *queryReport {
 			elapsed:  10 * time.Second,
 			overrun:  2 * time.Second,
 		},
+		pageCacheEvict: 30 * time.Millisecond,
+		evicted:        true,
 	})
 	return &q
 }
@@ -184,7 +186,8 @@ func TestQueryReportPercentileColumns(t *testing.T) {
 	assert.Equal(t, []string{"15000000", "19000000", "20000000", "20000000"}, percentiles(rows[1]))
 }
 
-// TestQueryReportScenarioRows: scenarios.csv has one row per scenario.
+// TestQueryReportScenarioRows: scenarios.csv has one row per scenario, with an
+// eviction time only for a scenario that evicted.
 func TestQueryReportScenarioRows(t *testing.T) {
 	outDir := t.TempDir()
 	_, err := twoScenarioReport().write(outDir)
@@ -200,7 +203,7 @@ func TestQueryReportScenarioRows(t *testing.T) {
 		"warmup_planned": "0", "warmup_dropped": "0", "warmup_failed": "0",
 		"achieved_rps": "10", "completion_rps": "10",
 		"schedule_ns": "200000000", "elapsed_ns": "200000000", "overrun_ns": "0",
-		"process_cpu_ns": "7000000",
+		"process_cpu_ns": "7000000", "page_cache_evict_ns": "",
 	}, rows[0])
 
 	assert.Equal(t, map[string]string{
@@ -209,7 +212,7 @@ func TestQueryReportScenarioRows(t *testing.T) {
 		"warmup_planned": "3", "warmup_dropped": "1", "warmup_failed": "1",
 		"achieved_rps": "0.375", "completion_rps": "0.2",
 		"schedule_ns": "8000000000", "elapsed_ns": "10000000000", "overrun_ns": "2000000000",
-		"process_cpu_ns": "0",
+		"process_cpu_ns": "0", "page_cache_evict_ns": "30000000",
 	}, rows[1])
 }
 

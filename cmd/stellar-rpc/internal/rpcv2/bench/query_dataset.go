@@ -1,7 +1,10 @@
 package bench
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"slices"
 	"time"
@@ -28,8 +31,24 @@ type queryPlan struct {
 	// TxHashPoolSize caps the sampled pool, in [1, maxTxHashPoolSize].
 	TxHashPoolSize int
 
+	// Evict requests OS page-cache eviction before each cold scenario.
+	Evict bool
+
 	// Settings receives the values run.json records under settings.
 	Settings map[string]string
+}
+
+// cacheScenario names the page-cache state the plan's measured iterations start
+// from, for settings.cacheScenario.
+func (p queryPlan) cacheScenario() string {
+	switch {
+	case p.Warmup > 0:
+		return "warm-run"
+	case p.Evict && evictSupported:
+		return "cold-start"
+	default:
+		return "existing-cache"
+	}
 }
 
 // queryDataset is what one bench query run reads: the registry over the files
@@ -48,6 +67,10 @@ type queryDataset struct {
 
 	// FirstLedger and LastLedger bound the ledgers the requests and pools read.
 	FirstLedger, LastLedger uint32
+
+	// EvictPaths are the files a cold scenario requests page-cache eviction for.
+	// Empty for a hot dataset.
+	EvictPaths []string
 }
 
 // view acquires one read view. The caller must Release it.
@@ -78,6 +101,41 @@ func (ds *queryDataset) verifyServes(types []string) error {
 		}
 	}
 	return nil
+}
+
+// evictColdArtifacts requests page-cache eviction of EvictPaths and returns how
+// many files it advised. It skips a missing file and, off Linux, advises none.
+// A cancel stops it before the next file and returns the context error.
+func (ds *queryDataset) evictColdArtifacts(ctx context.Context) (int, error) {
+	if !evictSupported {
+		return 0, nil
+	}
+	evicted := 0
+	for _, path := range ds.EvictPaths {
+		if err := ctx.Err(); err != nil {
+			return evicted, err
+		}
+		if err := evictFile(path); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return evicted, fmt.Errorf("evict from the page cache: %w", err)
+		}
+		evicted++
+	}
+	return evicted, nil
+}
+
+// evictionState is the settings.pageCacheEviction value.
+func evictionState(requested bool) string {
+	switch {
+	case !requested:
+		return "off"
+	case evictSupported:
+		return "requested"
+	default:
+		return "unsupported-on-this-platform"
+	}
 }
 
 // chunkRange returns the ascending chunk IDs in [start, start+num). The caller

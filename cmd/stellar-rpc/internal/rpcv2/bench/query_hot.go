@@ -18,7 +18,7 @@ import (
 
 func newQueryHotCommand() *cobra.Command {
 	var (
-		qf   queryFlags
+		qf   = queryTierFlags(queryTierHot)
 		prof profileFlags
 
 		chunkID       uint32
@@ -55,6 +55,8 @@ func newQueryHotCommand() *cobra.Command {
 				return err
 			}
 			o.Plan.Settings = env.Settings
+			env.Settings["pageCacheEviction"] = evictionState(false)
+			env.Settings["cacheScenario"] = o.Plan.cacheScenario()
 			return runQueryHot(ctx, logger, env, o)
 		}, &qf)
 	fs := cmd.Flags()
