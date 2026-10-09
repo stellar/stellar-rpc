@@ -2,6 +2,7 @@ package methods
 
 import (
 	"context"
+	"errors"
 
 	"github.com/creachadair/jrpc2"
 
@@ -24,7 +25,8 @@ func NewGetVersionInfoHandler(
 		// version once it starts core, which is after handlers are built.
 		captiveCoreVersion := daemon.CoreVersion()
 		protocolVersion, err := getProtocolVersion(ctx, ledgerReader)
-		if err != nil && ctx.Err() == nil { // a canceled request is not a fault
+		// a canceled request is not a fault
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			logger.WithError(err).Error("failed to fetch protocol version")
 		}
 

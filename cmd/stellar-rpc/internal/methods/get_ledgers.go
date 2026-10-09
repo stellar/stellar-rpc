@@ -73,7 +73,7 @@ func (h ledgersHandler) getLedgers(
 		dsRange, err := h.datastoreLedgerReader.GetAvailableLedgerRange(ctx)
 		if err != nil {
 			// log error but continue using local ledger range; a canceled request is not a fault
-			if ctx.Err() == nil {
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				h.logger.WithError(err).Error("failed to get available ledger range from datastore")
 			}
 		} else {

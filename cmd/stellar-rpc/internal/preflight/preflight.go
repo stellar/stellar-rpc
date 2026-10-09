@@ -19,6 +19,7 @@ import "C"
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/cgo"
 	"unsafe"
@@ -56,7 +57,8 @@ func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.ledger_entry_an
 	}
 	entries, _, err := h.ledgerEntryGetter.GetLedgerEntries(h.ctx, []xdr.LedgerKey{ledgerKey})
 	if err != nil {
-		if h.ctx.Err() == nil { // a canceled request is not a fault
+		// a canceled request is not a fault
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			h.logger.WithError(err).Error("SnapshotSourceGet(): GetLedgerEntries() failed")
 		}
 		return C.ledger_entry_and_ttl_t{}
