@@ -56,7 +56,7 @@ type fileSpec struct {
 	rowOrder []string
 }
 
-// fileSpecs is the bench-ingest report schema: one CSV per cold data type with
+// fileSpecs is the `bench ingest` report schema: one CSV per cold data type with
 // one row per cold stage, hot.csv with one row per hotchunk.Phase, and
 // driver.csv. driver.csv lists the cold rows, then the hot rows. A row with no
 // samples is suppressed, so each mode's report has only its own rows.

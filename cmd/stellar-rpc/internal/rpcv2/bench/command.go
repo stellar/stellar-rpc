@@ -19,13 +19,23 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
-// NewCommand returns the `bench-ingest` command tree: `cold` benchmarks the
-// daemon's backfill (backfill.RunBackfill), `hot` benchmarks the daemon's live
-// ingestion loop.
+// NewCommand returns the `bench` root command for benchmarking ingestion and reads.
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "bench-ingest",
-		Short: "Benchmark full-history ingestion",
+		Use:   "bench",
+		Short: "Benchmark ingestion and reads",
+	}
+	cmd.AddCommand(newIngestCommand())
+	return cmd
+}
+
+// newIngestCommand returns the `bench ingest` command tree: `cold` benchmarks
+// the daemon's backfill (backfill.RunBackfill), `hot` benchmarks the daemon's
+// live ingestion loop.
+func newIngestCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ingest",
+		Short: "Benchmark ingestion",
 	}
 	cmd.AddCommand(newColdCommand(), newHotCommand())
 	return cmd
@@ -108,7 +118,7 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 	}
 }
 
-// newBenchCommand creates a bench-ingest subcommand with shared flags,
+// newBenchCommand creates a `bench ingest` subcommand with shared flags,
 // profiling, run metadata, and signal-driven cancellation. validate runs before
 // the command touches --out, so a flag that validate rejects leaves nothing
 // behind; errors found later in the run are recorded in run.json as failed.

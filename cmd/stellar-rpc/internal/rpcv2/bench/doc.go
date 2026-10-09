@@ -1,4 +1,4 @@
-// Package bench benchmarks full-history ingestion: the cold backfill that
+// Package bench benchmarks ingestion: the cold backfill that
 // bulk-materializes past ledgers at startup, and the hot loop that ingests the
 // live stream as it advances.
 //
