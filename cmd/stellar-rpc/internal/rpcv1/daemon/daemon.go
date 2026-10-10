@@ -644,7 +644,9 @@ func (d *Daemon) buildMigrations(ctx context.Context, cfg *config.Config, retent
 
 	feeStatsRange, err := sqlitedb.GetMigrationLedgerRange(ctx, d.db, maxFeeRetentionWindow)
 	if err != nil {
-		return sqlitedb.MultiMigration{}, fmt.Errorf("could not get ledger range for fee stats: %w", err)
+		// BuildMigrations opened a transaction that nothing else rolls back.
+		return sqlitedb.MultiMigration{}, errors.Join(
+			fmt.Errorf("could not get ledger range for fee stats: %w", err), d.db.Rollback())
 	}
 
 	// By treating the fee window *as if* it's a migration, we can make the interface here clean.
@@ -667,11 +669,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 	panicGroup := util.NewRecoverablePanicGroup(d.logger, func(err error) {
 		serverFailed <- fmt.Errorf("HTTP server: %w", err)
 	})
-	d.logger.WithField("addr", d.listener.Addr().String()).Info("starting HTTP server")
-	panicGroup.Go(func() { serve(serverFailed, "soroban JSON RPC server", d.server, d.listener) })
+	var servers sync.WaitGroup
+	start := func(name string, server *http.Server, listener net.Listener) {
+		d.logger.WithField("addr", listener.Addr().String()).Info("starting " + name)
+		servers.Go(func() {
+			panicGroup.Run(func() { serve(serverFailed, name, server, listener) })
+		})
+	}
+	start("soroban JSON RPC server", d.server, d.listener)
 	if d.adminServer != nil {
-		d.logger.WithField("addr", d.adminListener.Addr().String()).Info("starting Admin HTTP server")
-		panicGroup.Go(func() { serve(serverFailed, "soroban admin server", d.adminServer, d.adminListener) })
+		start("soroban admin server", d.adminServer, d.adminListener)
 	}
 
 	var err error
@@ -683,7 +690,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.Close()
 	if err == nil {
 		// select picks at random among ready cases, so a failure that was
-		// pending next to the shutdown request may have lost the draw.
+		// pending next to the shutdown request may have lost the draw. Close
+		// ended every Serve and waited for the ingestion worker, so once the
+		// server goroutines are done every failure is on its channel.
+		servers.Wait()
 		select {
 		case err = <-serverFailed:
 		case err = <-d.ingestService.Failed():

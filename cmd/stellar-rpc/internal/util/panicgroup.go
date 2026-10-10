@@ -43,10 +43,15 @@ func (pg *PanicGroup) Log(log *log.Entry) *PanicGroup {
 
 // Go spins a goroutine with clear upfront definitions for what should be done in the case of an internal panic.
 func (pg *PanicGroup) Go(fn func()) {
-	go func() {
-		defer pg.recoverRoutine(fn)
-		fn()
-	}()
+	go pg.Run(fn)
+}
+
+// Run calls fn on the calling goroutine with the same panic handling as Go.
+// A caller that must do something after the panic was handled, such as
+// marking a WaitGroup done, wraps Run instead of fn.
+func (pg *PanicGroup) Run(fn func()) {
+	defer pg.recoverRoutine(fn)
+	fn()
 }
 
 func (pg *PanicGroup) recoverRoutine(fn func()) {
@@ -59,8 +64,14 @@ func (pg *PanicGroup) recoverRoutine(fn func()) {
 		return
 	}
 	if pg.log != nil {
+		// A recoverable panic has no stderr copy, so its stack must survive
+		// a logger set to level error.
+		logLine := pg.log.Warn
+		if pg.onPanic != nil {
+			logLine = pg.log.Error
+		}
 		for _, line := range cs {
-			pg.log.Warn(line)
+			logLine(line)
 		}
 	}
 	if pg.logPanicsToStdErr {
@@ -80,7 +91,7 @@ func (pg *PanicGroup) recoverRoutine(fn func()) {
 
 func getPanicCallStack(recoverRes any, fn func()) []string {
 	functionName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
-	return CallStack(recoverRes, functionName, "(*PanicGroup).Go", 10)
+	return CallStack(recoverRes, functionName, "(*PanicGroup).Run", 10)
 }
 
 // CallStack returns an array of strings representing the current call stack. The method is

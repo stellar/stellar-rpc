@@ -111,8 +111,16 @@ func (s *Service) Start(cfg Config) {
 	panicGroup := util.NewRecoverablePanicGroup(cfg.Logger, func(err error) {
 		s.failed <- fmt.Errorf("ingestion worker: %w", err)
 	})
-	panicGroup.Go(func() {
+	// wg.Done runs after the panic handler, so Wait returning means the
+	// failure, if any, is already on the channel.
+	go func() {
 		defer s.wg.Done()
+		panicGroup.Run(s.work(ctx, cfg))
+	}()
+}
+
+func (s *Service) work(ctx context.Context, cfg Config) func() {
+	return func() {
 		// Retry running ingestion every second for 5 seconds.
 		constantBackoff := backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Second), maxRetries)
 		// Don't want to keep retrying if the context gets canceled.
@@ -136,7 +144,7 @@ func (s *Service) Start(cfg Config) {
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, loadtest.ErrLoadTestDone) {
 			s.failed <- fmt.Errorf("could not run ingestion: %w", err)
 		}
-	})
+	}
 }
 
 // Failed yields the error that ended ingestion for good: every retry used up,
