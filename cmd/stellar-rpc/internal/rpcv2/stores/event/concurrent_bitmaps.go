@@ -93,15 +93,19 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 //   - RunOptimize, AddRange, RemoveRange, FlipInt
 //   - Add, AddMany, Remove, CheckedAdd, CheckedRemove, AddInt
 //   - SetCopyOnWrite
-//   - single-input roaring.FastAnd / roaring.FastOr (roaring takes a
-//     Clone-the-input shortcut when there is only one input)
+//   - roaring.FastAnd / roaring.FastOr with a single input, which Clone it
 //
 // Safe: any non-mutating read (Contains, GetCardinality, Iterator,
-// ToArray, IsEmpty, Minimum, Maximum) plus roaring.And / FastAnd /
-// FastOr with 2+ inputs.
+// NextValue, PreviousValue, ToArray, IsEmpty, Minimum, Maximum) and
+// passing it to FastAnd beside at least one other input;
+// roaring_contract_test.go pins these against the pinned roaring version.
 //
 // A Get that starts after an AddTo returns sees that AddTo's IDs, and
-// the pointer stays valid for as long as the caller holds it.
+// the pointer stays valid for as long as the caller holds it. The
+// result is a point-in-time image: a sparse term is copied out of the
+// published id list, and a dense term's snapshot is never mutated once
+// published. Neither grows as ingest continues, so a query can hold it
+// for a whole walk.
 func (s *ConcurrentBitmaps) Get(key TermKey) (*roaring.Bitmap, error) {
 	s.rwmu.RLock()
 	p := s.terms[key]
