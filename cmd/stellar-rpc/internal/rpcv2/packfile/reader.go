@@ -88,7 +88,7 @@ type ReaderOptions struct {
 type openResult struct {
 	file    readAtCloser
 	trailer Trailer
-	offsets []int64
+	idx     *index
 	appData []byte
 
 	// Decoded from trailer for internal use (int casts of uint32 trailer fields).
@@ -100,10 +100,10 @@ type openResult struct {
 
 // readRun is one ReadAt in ReadItems and the positions it serves.
 type readRun struct {
-	idxStart    int // index range in the caller's positions slice
-	idxEnd      int
-	firstRecord int // inclusive record range
-	lastRecord  int
+	idxStart int // index range in the caller's positions slice
+	idxEnd   int
+	start    int64 // the records' bytes in the file
+	end      int64
 }
 
 // recordWorkspacePool holds *record workspaces (slice headers, no decoder,
@@ -132,7 +132,7 @@ var recordWorkspacePool = sync.Pool{
 type Reader struct {
 	// Hot fields (touched by every read call) first so they share a cache line.
 	file           readAtCloser
-	offsets        []int64
+	idx            *index
 	totalItems     int
 	itemsPerRecord int
 	concurrency    int
@@ -181,7 +181,7 @@ func Open(path string, opts ReaderOptions) *Reader {
 		}
 		r.file = res.file
 		r.trailer = res.trailer
-		r.offsets = res.offsets
+		r.idx = res.idx
 		r.appData = res.appData
 		r.totalItems = res.totalItems
 		r.itemsPerRecord = res.itemsPerRecord
@@ -213,7 +213,6 @@ func doOpen(path string, firstRead func(int64) int) openResult {
 	return res
 }
 
-//nolint:cyclop // step-by-step open flow; splitting hurts readability
 func openFile(f readAtCloser, fileSize int64, firstRead func(int64) int) openResult {
 	if fileSize < trailerSize {
 		return openResult{err: ErrSize}
@@ -242,13 +241,15 @@ func openFile(f readAtCloser, fileSize int64, firstRead func(int64) int) openRes
 	indexSize := int(trailer.IndexSize)
 	appDataSize := int(trailer.AppDataSize)
 
+	// The Reader keeps the index and app data as views into tail, so tail
+	// must hold only the tail's bytes, not the rest of the first read.
 	tailSize := int64(indexSize) + int64(appDataSize) + int64(trailerSize)
 	indexBase := fileSize - tailSize
 	if indexBase < 0 {
 		return openResult{err: ErrSize}
 	}
 	if tailSize <= first {
-		tail = tail[first-tailSize:]
+		tail = bytes.Clone(tail[first-tailSize:])
 	} else {
 		full := make([]byte, tailSize)
 		copy(full[tailSize-first:], tail)
@@ -257,10 +258,9 @@ func openFile(f readAtCloser, fileSize int64, firstRead func(int64) int) openRes
 		}
 		tail = full
 	}
-	indexBuf := tail[:indexSize]
 	var appData []byte
 	if appDataSize > 0 {
-		appData = bytes.Clone(tail[indexSize : indexSize+appDataSize])
+		appData = tail[indexSize : indexSize+appDataSize]
 	}
 
 	// App data is CRC-covered like the index and the trailer. It has to be:
@@ -272,43 +272,27 @@ func openFile(f readAtCloser, fileSize int64, firstRead func(int64) int) openRes
 			ErrChecksum, trailer.AppDataCRC, computed)}
 	}
 
-	offsets, err := decodeIndex(indexBuf, recordCount, indexSize, indexBase)
-	if err != nil {
-		return openResult{err: err}
-	}
-
-	// Not gated on recordCount: a trailer claiming items but no itemsPerRecord
-	// would otherwise pass Open and index past the offsets slice on first read.
+	// A trailer claiming records or items needs an itemsPerRecord. Checked
+	// before the default below, which would read it as one item per record.
 	if itemsPerRecord <= 0 && (recordCount > 0 || totalItems > 0) {
 		return openResult{err: fmt.Errorf("%w: invalid itemsPerRecord %d in trailer",
 			ErrCorrupt, itemsPerRecord)}
 	}
 
-	// Cross-validate: number of records implied by totalItems must match recordCount.
-	if itemsPerRecord > 0 {
-		expectedRecords := (totalItems + itemsPerRecord - 1) / itemsPerRecord
-		if totalItems == 0 {
-			expectedRecords = 0
-		}
-		if expectedRecords != recordCount {
-			return openResult{err: fmt.Errorf(
-				"%w: trailer says %d items / %d itemsPerRecord = %d records, but packfile has %d records",
-				ErrCorrupt, totalItems, itemsPerRecord, expectedRecords, recordCount)}
-		}
-	}
-
 	// Empty packfiles may legitimately have itemsPerRecord==0 on disk;
 	// default the *internal* int to 1 so modulo math is well-defined. The
 	// Trailer view keeps the on-disk value verbatim.
-	internalItemsPerRecord := itemsPerRecord
-	if internalItemsPerRecord == 0 {
-		internalItemsPerRecord = 1
+	internalItemsPerRecord := max(itemsPerRecord, 1)
+
+	idx, err := parseIndex(tail[:indexSize], recordCount, totalItems, internalItemsPerRecord, indexBase)
+	if err != nil {
+		return openResult{err: err}
 	}
 
 	return openResult{
 		file:           f,
 		trailer:        trailer,
-		offsets:        offsets,
+		idx:            idx,
 		appData:        appData,
 		totalItems:     totalItems,
 		itemsPerRecord: internalItemsPerRecord,
@@ -328,7 +312,8 @@ func (r *Reader) getRecord() *record {
 
 // putRecord returns a workspace to the pool. Owned slices (scratch,
 // payload, sizes, offsets) reset to length zero with their capacities
-// preserved for steady-state zero-alloc reuse.
+// preserved for steady-state zero-alloc reuse. The group table is emptied,
+// since the next borrower may read another pack.
 //
 //nolint:funcorder // paired with getRecord
 func (r *Reader) putRecord(rec *record) {
@@ -338,6 +323,7 @@ func (r *Reader) putRecord(rec *record) {
 	rec.current = nil
 	rec.sizes = rec.sizes[:0]
 	rec.offsets = rec.offsets[:0]
+	rec.tab.n = 0
 	recordWorkspacePool.Put(rec)
 }
 
@@ -390,21 +376,21 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 		return ErrPositionOutOfRange
 	}
 
-	// One IDIV instead of div+mod separately.
-	recordIdx := position / r.itemsPerRecord
-	localIdx := position - recordIdx*r.itemsPerRecord
-
 	rec := r.getRecord()
 	defer r.putRecord(rec)
 
-	buf, err := r.readRecords(rec, recordIdx, recordIdx)
+	recordIdx, s, err := rec.tab.locate(r.idx, position)
 	if err != nil {
 		return err
 	}
-	if err := rec.decode(buf, recordIdx); err != nil {
+	buf, err := r.readRecords(rec, s.start, s.end)
+	if err != nil {
 		return err
 	}
-	return fn(rec.item(localIdx))
+	if err := rec.decode(buf, recordIdx, s.n); err != nil {
+		return err
+	}
+	return fn(rec.item(position - s.first))
 }
 
 // ReadRange returns an iterator over count contiguous items starting at start.
@@ -424,7 +410,7 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 // Yields ErrPositionOutOfRange (one-shot) if start or count is negative or
 // the range falls outside [0, TotalItems).
 //
-//nolint:gocognit // single merged-read loop; splitting hurts readability
+//nolint:gocognit,cyclop // single merged-read loop; splitting hurts readability
 func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
 		if err := r.waitOpen(); err != nil {
@@ -440,32 +426,54 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 			return
 		}
 
-		firstRecord := start / r.itemsPerRecord
-		lastRecord := (start + count - 1) / r.itemsPerRecord
 		end := start + count // one past last item
 
 		rec := r.getRecord()
 		defer r.putRecord(rec)
 
+		firstRecord, _, err := rec.tab.locate(r.idx, start)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		lastRecord, _, err := rec.tab.locate(r.idx, end-1)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
 		for first := firstRecord; first <= lastRecord; {
-			last := first
-			for last < lastRecord && r.offsets[last+2]-r.offsets[first] <= maxRunBytes {
-				last++
+			s, err := rec.tab.record(r.idx, first)
+			if err != nil {
+				yield(nil, err)
+				return
 			}
-			buf, err := r.readRecords(rec, first, last)
+			last, runStart, runEnd := first, s.start, s.end
+			for last < lastRecord {
+				if s, err = rec.tab.record(r.idx, last+1); err != nil {
+					yield(nil, err)
+					return
+				}
+				if s.end-runStart > maxRunBytes {
+					break
+				}
+				last, runEnd = last+1, s.end
+			}
+			buf, err := r.readRecords(rec, runStart, runEnd)
 			if err != nil {
 				yield(nil, err)
 				return
 			}
 			for j := first; j <= last; j++ {
-				lo := r.offsets[j] - r.offsets[first]
-				hi := r.offsets[j+1] - r.offsets[first]
-				if err := rec.decode(buf[lo:hi], j); err != nil {
+				if s, err = rec.tab.record(r.idx, j); err != nil {
 					yield(nil, err)
 					return
 				}
-				recStart := j * r.itemsPerRecord
-				for i := max(start-recStart, 0); i < min(len(rec.sizes), end-recStart); i++ {
+				if err := rec.decode(buf[s.start-runStart:s.end-runStart], j, s.n); err != nil {
+					yield(nil, err)
+					return
+				}
+				for i := max(start-s.first, 0); i < min(s.n, end-s.first); i++ {
 					if !yield(rec.item(i), nil) {
 						return
 					}
@@ -511,22 +519,31 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 		return nil
 	}
 
+	rec := r.getRecord()
+	defer r.putRecord(rec)
+
 	var runs []readRun
 	for i := 0; i < len(positions); {
-		first := positions[i] / r.itemsPerRecord
-		last := first
+		last, s, err := rec.tab.locate(r.idx, positions[i])
+		if err != nil {
+			return err
+		}
+		start := s.start
 		j := i + 1
 		for ; j < len(positions); j++ {
-			rec := positions[j] / r.itemsPerRecord
-			if rec == last {
+			if positions[j] < s.first+s.n {
 				continue
 			}
-			if rec != last+1 || r.offsets[rec+1]-r.offsets[first] > maxRunBytes {
+			next, ns, err := rec.tab.locate(r.idx, positions[j])
+			if err != nil {
+				return err
+			}
+			if next != last+1 || ns.end-start > maxRunBytes {
 				break
 			}
-			last = rec
+			last, s = next, ns
 		}
-		runs = append(runs, readRun{i, j, first, last})
+		runs = append(runs, readRun{i, j, start, s.end})
 		i = j
 	}
 
@@ -538,8 +555,6 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 
 	// Serial fast path: no goroutine spawn, no atomic dispatch, no errgroup.
 	if numWorkers == 1 {
-		rec := r.getRecord()
-		defer r.putRecord(rec)
 		for i := range runs {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -637,8 +652,7 @@ func (r *Reader) Close() error {
 	return r.closeErr
 }
 
-func (r *Reader) readRecords(rec *record, first, last int) ([]byte, error) {
-	start, end := r.offsets[first], r.offsets[last+1]
+func (r *Reader) readRecords(rec *record, start, end int64) ([]byte, error) {
 	size := int(end - start)
 	if cap(rec.scratch) < size {
 		rec.scratch = make([]byte, size)
@@ -646,30 +660,30 @@ func (r *Reader) readRecords(rec *record, first, last int) ([]byte, error) {
 		rec.scratch = rec.scratch[:size]
 	}
 	if _, err := r.file.ReadAt(rec.scratch, start); err != nil {
-		return nil, fmt.Errorf("packfile: read records [%d, %d]: %w", first, last, err)
+		return nil, fmt.Errorf("packfile: read records at bytes [%d, %d): %w", start, end, err)
 	}
 	return rec.scratch, nil
 }
 
 func (r *Reader) processRun(rec *record, positions []int, run readRun, fn func(int, []byte) error) error {
-	buf, err := r.readRecords(rec, run.firstRecord, run.lastRecord)
+	buf, err := r.readRecords(rec, run.start, run.end)
 	if err != nil {
 		return err
 	}
-	readStart := r.offsets[run.firstRecord]
-	prevRec := -1
+	var s recordSpan // the record decoded last; the zero value holds no position
 	for k := run.idxStart; k < run.idxEnd; k++ {
-		recIdx := positions[k] / r.itemsPerRecord
-		localIdx := positions[k] - recIdx*r.itemsPerRecord
-		if recIdx != prevRec {
-			recOff := r.offsets[recIdx] - readStart
-			recEnd := r.offsets[recIdx+1] - readStart
-			if err := rec.decode(buf[recOff:recEnd], recIdx); err != nil {
+		pos := positions[k]
+		if pos >= s.first+s.n {
+			recIdx, ns, err := rec.tab.locate(r.idx, pos)
+			if err != nil {
 				return err
 			}
-			prevRec = recIdx
+			if err := rec.decode(buf[ns.start-run.start:ns.end-run.start], recIdx, ns.n); err != nil {
+				return err
+			}
+			s = ns
 		}
-		if err := fn(k, rec.item(localIdx)); err != nil {
+		if err := fn(k, rec.item(pos-s.first)); err != nil {
 			return err
 		}
 	}
