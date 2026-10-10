@@ -53,6 +53,12 @@ func (d *rpcv1Daemon) start() {
 	d.runningDaemon = startDaemon(i.t, daemonRPCv1, rpcv1StopTimeout, func(ctx context.Context) error {
 		rpcDaemon, err := daemon.New(ctx, rpcCfg, d.log)
 		if err != nil {
+			// A close during startup is a shutdown request, not a failure,
+			// the same way the rpcv1 main treats it.
+			if ctx.Err() != nil {
+				d.log.WithError(err).Info("shutdown requested during startup")
+				return nil
+			}
 			return err
 		}
 		d.daemon = rpcDaemon

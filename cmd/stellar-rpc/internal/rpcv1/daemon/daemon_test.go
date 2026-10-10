@@ -81,3 +81,55 @@ func loopbackListener(t *testing.T) net.Listener {
 	require.NoError(t, err)
 	return l
 }
+
+// runnable is a daemon New built against the unreachable archive of
+// startupConfig. Its ingestion worker fails for good once its retries run
+// out, about five seconds in, unless Run returns first.
+func runnable(t *testing.T) *Daemon {
+	cfg := startupConfig(t)
+	cfg.AdminEndpoint = "127.0.0.1:0"
+	d, err := New(t.Context(), cfg, supportlog.New())
+	require.NoError(t, err)
+	return d
+}
+
+func TestRunReturnsNilWhenContextIsCanceled(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	d := runnable(t)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+	cancel()
+	require.NoError(t, <-done)
+}
+
+func TestRunReturnsTheIngestionFailure(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	d := runnable(t)
+
+	err := d.Run(t.Context())
+	require.ErrorContains(t, err, "could not run ingestion")
+}
+
+func TestRunReturnsTheServerFailure(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	d := runnable(t)
+
+	// Serve on a closed listener fails at once.
+	require.NoError(t, d.listener.Close())
+	err := d.Run(t.Context())
+	require.ErrorContains(t, err, "soroban JSON RPC server encountered fatal error")
+}
+
+func TestRunReturnsAFailurePendingNextToACancel(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	d := runnable(t)
+
+	// Both are ready before Run's first select: the failure must win.
+	require.NoError(t, d.listener.Close())
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := d.Run(ctx)
+	require.ErrorContains(t, err, "soroban JSON RPC server encountered fatal error")
+}
