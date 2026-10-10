@@ -661,15 +661,17 @@ func (d *Daemon) buildMigrations(ctx context.Context, cfg *config.Config, retent
 // Close has run. A failure that is pending at the moment of a shutdown
 // request is still returned.
 func (d *Daemon) Run(ctx context.Context) error {
-	// One slot per server, so a Serve goroutine never blocks on its send.
+	// One slot per server, so a Serve goroutine never blocks on its send. A
+	// goroutine sends once: its Serve error, or the panic that replaced it.
 	serverFailed := make(chan error, 2) //nolint:mnd
-	panicGroup := util.NewUnrecoverablePanicGroup()
-	panicGroupWithLog := panicGroup.Log(d.logger)
+	panicGroup := util.NewRecoverablePanicGroup(d.logger, func(err error) {
+		serverFailed <- fmt.Errorf("HTTP server: %w", err)
+	})
 	d.logger.WithField("addr", d.listener.Addr().String()).Info("starting HTTP server")
-	panicGroupWithLog.Go(func() { serve(serverFailed, "soroban JSON RPC server", d.server, d.listener) })
+	panicGroup.Go(func() { serve(serverFailed, "soroban JSON RPC server", d.server, d.listener) })
 	if d.adminServer != nil {
 		d.logger.WithField("addr", d.adminListener.Addr().String()).Info("starting Admin HTTP server")
-		panicGroupWithLog.Go(func() { serve(serverFailed, "soroban admin server", d.adminServer, d.adminListener) })
+		panicGroup.Go(func() { serve(serverFailed, "soroban admin server", d.adminServer, d.adminListener) })
 	}
 
 	var err error

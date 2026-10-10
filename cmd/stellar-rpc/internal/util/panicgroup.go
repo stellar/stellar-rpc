@@ -15,6 +15,7 @@ type PanicGroup struct {
 	log                *log.Entry
 	logPanicsToStdErr  bool
 	exitProcessOnPanic bool
+	onPanic            func(error)
 }
 
 func NewUnrecoverablePanicGroup() PanicGroup {
@@ -24,11 +25,19 @@ func NewUnrecoverablePanicGroup() PanicGroup {
 	}
 }
 
+// NewRecoverablePanicGroup logs a panic in one of its goroutines with the
+// call stack, then hands it to onPanic as an error. The process keeps running,
+// so the caller can shut everything down in order instead of exiting at once.
+func NewRecoverablePanicGroup(logger *log.Entry, onPanic func(error)) *PanicGroup {
+	return &PanicGroup{log: logger, onPanic: onPanic}
+}
+
 func (pg *PanicGroup) Log(log *log.Entry) *PanicGroup {
 	return &PanicGroup{
 		log:                log,
 		logPanicsToStdErr:  pg.logPanicsToStdErr,
 		exitProcessOnPanic: pg.exitProcessOnPanic,
+		onPanic:            pg.onPanic,
 	}
 }
 
@@ -58,6 +67,10 @@ func (pg *PanicGroup) recoverRoutine(fn func()) {
 		for _, line := range cs {
 			fmt.Fprintln(os.Stderr, line)
 		}
+	}
+	if pg.onPanic != nil {
+		pg.onPanic(fmt.Errorf("panic: %v", recoverRes))
+		return
 	}
 
 	if pg.exitProcessOnPanic {

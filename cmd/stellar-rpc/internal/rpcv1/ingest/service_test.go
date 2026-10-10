@@ -62,6 +62,31 @@ func TestRetryRunningIngestion(t *testing.T) {
 	require.ErrorContains(t, lastErr, "could not get latest ledger sequence")
 }
 
+type panicReadWriter struct{ ErrorReadWriter }
+
+func (rw *panicReadWriter) GetLatestLedgerSequence(_ context.Context) (uint32, error) {
+	panic("ledger reader exploded")
+}
+
+func TestIngestionPanicIsReportedAsFailure(t *testing.T) {
+	config := Config{
+		Logger:  supportlog.New(),
+		DB:      &panicReadWriter{},
+		Timeout: time.Second,
+		Daemon:  host.MakeNoOpDaemon(),
+	}
+	service := NewService(config)
+	service.Start(config)
+	defer service.Close()
+
+	select {
+	case err := <-service.Failed():
+		require.ErrorContains(t, err, "ledger reader exploded")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the panic was not reported on Failed")
+	}
+}
+
 func TestIngestion(t *testing.T) {
 	ctx := t.Context()
 	mockDB, mockLedgerBackend, mockTx := setupMocks()

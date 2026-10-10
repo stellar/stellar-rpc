@@ -95,6 +95,22 @@ func TestPanicGroupLog(t *testing.T) {
 	t.FailNow()
 }
 
+func TestRecoverablePanicGroupReportsThePanic(t *testing.T) {
+	logCounter := makeTestLogCounter()
+	failed := make(chan error, 1)
+	panicGroup := NewRecoverablePanicGroup(logCounter.Entry(), func(err error) { failed <- err })
+	panicGroup.Go(IndirectPanicingFunctionC)
+
+	select {
+	case err := <-failed:
+		require.ErrorContains(t, err, "panic: ")
+		require.ErrorContains(t, err, "nil pointer dereference")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the panic was not reported")
+	}
+	require.GreaterOrEqual(t, logCounter.GetLevel(int(logrus.WarnLevel)), 2, "the call stack was not logged")
+}
+
 func TestPanicGroupStdErr(t *testing.T) {
 	tmpFile, err := os.CreateTemp(t.TempDir(), "TestPanicGroupStdErr")
 	require.NoError(t, err)

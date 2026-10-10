@@ -106,9 +106,12 @@ func newService(cfg Config) *Service {
 func (s *Service) Start(cfg Config) {
 	ctx := s.ctx
 	s.wg.Add(1)
-	panicGroup := util.NewUnrecoverablePanicGroup()
-	panicGroupWithLog := panicGroup.Log(cfg.Logger)
-	panicGroupWithLog.Go(func() {
+	// A panic in the worker is a terminal failure like any other: it is
+	// reported on Failed so the daemon closes captive core before exiting.
+	panicGroup := util.NewRecoverablePanicGroup(cfg.Logger, func(err error) {
+		s.failed <- fmt.Errorf("ingestion worker: %w", err)
+	})
+	panicGroup.Go(func() {
 		defer s.wg.Done()
 		// Retry running ingestion every second for 5 seconds.
 		constantBackoff := backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Second), maxRetries)
@@ -136,9 +139,9 @@ func (s *Service) Start(cfg Config) {
 	})
 }
 
-// Failed yields the error that ended ingestion for good, once every retry was
-// used up. It never yields for a stop the daemon asked for, nor for a load
-// test that ran out of ledgers.
+// Failed yields the error that ended ingestion for good: every retry used up,
+// or a panic in the worker. It never yields for a stop the daemon asked for,
+// nor for a load test that ran out of ledgers.
 func (s *Service) Failed() <-chan error {
 	return s.failed
 }
