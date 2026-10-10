@@ -57,7 +57,7 @@ func (d *rpcv1Daemon) start() {
 			// the same way the rpcv1 main treats it.
 			if ctx.Err() != nil {
 				d.log.WithError(err).Info("shutdown requested during startup")
-				return nil
+				return nil //nolint:nilerr // a canceled startup is a shutdown request, not a failure
 			}
 			return err
 		}
