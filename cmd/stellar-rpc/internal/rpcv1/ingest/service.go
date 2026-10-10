@@ -4,6 +4,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -80,7 +81,11 @@ func newService(cfg Config) *Service {
 		latestLedgerMetric,
 		ledgerStatsMetric)
 
+	ctx, cancel := context.WithCancel(context.Background())
 	service := &Service{
+		ctx:               ctx,
+		done:              cancel,
+		failed:            make(chan error, 1),
 		logger:            cfg.Logger,
 		db:                cfg.DB,
 		feeWindows:        cfg.FeeWindows,
@@ -99,8 +104,7 @@ func newService(cfg Config) *Service {
 }
 
 func (s *Service) Start(cfg Config) {
-	ctx, done := context.WithCancel(context.Background())
-	s.done = done
+	ctx := s.ctx
 	s.wg.Add(1)
 	panicGroup := util.NewUnrecoverablePanicGroup()
 	panicGroupWithLog := panicGroup.Log(cfg.Logger)
@@ -127,9 +131,16 @@ func (s *Service) Start(cfg Config) {
 			contextBackoff,
 			cfg.OnIngestionRetry)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, loadtest.ErrLoadTestDone) {
-			s.logger.WithError(err).Fatal("could not run ingestion")
+			s.failed <- fmt.Errorf("could not run ingestion: %w", err)
 		}
 	})
+}
+
+// Failed yields the error that ended ingestion for good, once every retry was
+// used up. It never yields for a stop the daemon asked for, nor for a load
+// test that ran out of ledgers.
+func (s *Service) Failed() <-chan error {
+	return s.failed
 }
 
 type Metrics struct {
@@ -145,7 +156,11 @@ type Service struct {
 	ledgerBackend     backends.LedgerBackend
 	timeout           time.Duration
 	networkPassPhrase string
+	// ctx is canceled by Stop. It exists from construction so that Stop
+	// works on a service the daemon built but never started.
+	ctx               context.Context //nolint:containedctx // see above
 	done              context.CancelFunc
+	failed            chan error
 	wg                sync.WaitGroup
 	metrics           Metrics
 	latestIngestedSeq uint32

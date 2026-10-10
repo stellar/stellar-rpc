@@ -29,19 +29,14 @@ const (
 )
 
 type rpcv2Daemon struct {
+	*runningDaemon
+
 	test *Test
 	log  *supportlog.Entry
 
 	// The rpcv2 daemon exposes its own captive core's admin HTTP port; rpcv1
 	// runs its captive core without one. This is the extra port rpcv2 needs.
 	captiveCoreHTTPPort uint16
-
-	cancel context.CancelFunc
-	// done carries the daemon's exit error once, for waitForRPC. stopped is
-	// closed at the same moment and is what close waits on, so a stop after
-	// waitForRPC already consumed the error does not wait out the timeout.
-	done    chan error
-	stopped chan struct{}
 }
 
 func (d *rpcv2Daemon) start() {
@@ -77,16 +72,10 @@ func (d *rpcv2Daemon) start() {
 		},
 	}
 
-	// Nothing above can fail once these are set: close waits on stopped, and
-	// only the goroutine below closes it.
-	ctx, cancel := context.WithCancel(context.Background())
-	d.cancel = cancel
-	d.done = make(chan error, 1)
-	d.stopped = make(chan struct{})
-	go func() {
-		d.done <- rpcv2.RunDaemonWithOptions(ctx, configPath, opts)
-		close(d.stopped)
-	}()
+	// Nothing above can fail once this is set: close waits on the run.
+	d.runningDaemon = startDaemon(i.t, daemonRPCv2, rpcv2StopTimeout, func(ctx context.Context) error {
+		return rpcv2.RunDaemonWithOptions(ctx, configPath, opts)
+	})
 
 	// The daemon binds its read listener only after it has caught up with the
 	// history archive, so this wait can be as long as the health wait. A daemon
@@ -138,30 +127,6 @@ func (d *rpcv2Daemon) flags() *pflag.FlagSet {
 		require.NoError(i.t, fs.Set(name, value), "flag %s", name)
 	}
 	return fs
-}
-
-func (d *rpcv2Daemon) close() {
-	if d.cancel == nil {
-		return
-	}
-	d.cancel()
-	select {
-	case <-d.stopped:
-		select {
-		case err := <-d.done:
-			if err != nil {
-				d.test.t.Logf("rpcv2 daemon stopped with: %v", err)
-			}
-		default: // waitForRPC already reported the exit error
-		}
-	case <-time.After(rpcv2StopTimeout):
-		d.test.t.Errorf("rpcv2 daemon did not stop within %s", rpcv2StopTimeout)
-	}
-	d.cancel = nil
-}
-
-func (d *rpcv2Daemon) exited() <-chan error {
-	return d.done
 }
 
 func (d *rpcv2Daemon) logger() *supportlog.Entry {

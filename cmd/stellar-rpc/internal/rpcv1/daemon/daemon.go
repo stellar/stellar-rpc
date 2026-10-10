@@ -7,10 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -63,10 +60,13 @@ type Daemon struct {
 	adminServer         *http.Server
 	closeOnce           sync.Once
 	closeError          error
-	done                chan struct{}
-	metricsRegistry     *prometheus.Registry
-	dataStore           datastore.DataStore
-	dataStoreSchema     datastore.DataStoreSchema
+	// cancelArchive ends every history archive request in flight. Without it,
+	// close would wait for the archive's own retries, which with an unreachable
+	// archive is minutes.
+	cancelArchive   context.CancelFunc
+	metricsRegistry *prometheus.Registry
+	dataStore       datastore.DataStore
+	dataStoreSchema datastore.DataStoreSchema
 }
 
 func (d *Daemon) GetDB() *sqlitedb.DB {
@@ -84,20 +84,17 @@ func (d *Daemon) GetEndpointAddrs() (net.TCPAddr, *net.TCPAddr) {
 	return *addr, adminAddr
 }
 
+// close releases every component the daemon holds. It also runs when New
+// fails part way through, so each step skips a component New did not get to.
 func (d *Daemon) close() {
 	shutdownCtx, shutdownRelease := context.WithTimeout(context.Background(), defaultShutdownGracePeriod)
 	defer shutdownRelease()
 	var closeErrors []error
 
-	if err := d.server.Shutdown(shutdownCtx); err != nil {
-		d.logger.WithError(err).Error("error during Soroban JSON RPC server Shutdown")
-		closeErrors = append(closeErrors, err)
-	}
-	if d.adminServer != nil {
-		if err := d.adminServer.Shutdown(shutdownCtx); err != nil {
-			d.logger.WithError(err).Error("error during Soroban JSON admin server Shutdown")
-			closeErrors = append(closeErrors, err)
-		}
+	closeErrors = append(closeErrors, shutdownServer(shutdownCtx, d.server, d.listener)...)
+	closeErrors = append(closeErrors, shutdownServer(shutdownCtx, d.adminServer, d.adminListener)...)
+	for _, err := range closeErrors {
+		d.logger.WithError(err).Error("error during HTTP server shutdown")
 	}
 
 	// Order matters. The ingestion worker can be parked inside a blocking
@@ -106,29 +103,59 @@ func (d *Daemon) close() {
 	// the worker. Waiting before closing captive core stalls shutdown for as
 	// long as stellar-core takes to exit by itself, which with an unreachable
 	// history archive is minutes.
-	d.ingestService.Stop()
-	if err := d.core.Close(); err != nil {
-		d.logger.WithError(err).Error("error closing captive core")
-		closeErrors = append(closeErrors, err)
+	if d.ingestService != nil {
+		d.ingestService.Stop()
 	}
-	d.ingestService.Wait()
-	d.jsonRPCHandler.Close()
-	if err := d.db.Close(); err != nil {
-		d.logger.WithError(err).Error("Error closing db")
-		closeErrors = append(closeErrors, err)
+	if d.cancelArchive != nil {
+		d.cancelArchive()
 	}
-	d.preflightWorkerPool.Close()
-
+	if d.core != nil {
+		if err := d.core.Close(); err != nil {
+			d.logger.WithError(err).Error("error closing captive core")
+			closeErrors = append(closeErrors, err)
+		}
+	}
+	if d.ingestService != nil {
+		d.ingestService.Wait()
+	}
+	if d.jsonRPCHandler != nil {
+		d.jsonRPCHandler.Close()
+	}
+	if d.db != nil {
+		if err := d.db.Close(); err != nil {
+			d.logger.WithError(err).Error("Error closing db")
+			closeErrors = append(closeErrors, err)
+		}
+	}
+	if d.preflightWorkerPool != nil {
+		d.preflightWorkerPool.Close()
+	}
 	if d.dataStore != nil {
-		err := d.dataStore.Close()
-		if err != nil {
+		if err := d.dataStore.Close(); err != nil {
 			d.logger.WithError(err).Error("error closing datastore")
 			closeErrors = append(closeErrors, err)
 		}
 	}
 
 	d.closeError = errors.Join(closeErrors...)
-	close(d.done)
+}
+
+// shutdownServer drains server and closes listener. Both are nil when New
+// failed before binding them. Shutdown closes the listener itself once Serve
+// has run, so the explicit Close is for a listener that was bound but never
+// served; the error it returns in the served case is ignored.
+func shutdownServer(ctx context.Context, server *http.Server, listener net.Listener) []error {
+	if listener == nil {
+		return nil
+	}
+	var errs []error
+	if err := server.Shutdown(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		errs = append(errs, err)
+	}
+	return errs
 }
 
 func (d *Daemon) Close() error {
@@ -159,7 +186,7 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 	}
 	captiveCoreToml, err := ledgerbackend.NewCaptiveCoreTomlFromFile(cfg.CaptiveCoreConfigPath, captiveCoreTomlParams)
 	if err != nil {
-		logger.WithError(err).Fatal("Invalid captive core toml")
+		return nil, fmt.Errorf("invalid captive core toml: %w", err)
 	}
 
 	captiveConfig := ledgerbackend.CaptiveCoreConfig{
@@ -172,95 +199,139 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 		Toml:                captiveCoreToml,
 		UserAgent:           cfg.ExtendedUserAgent("captivecore"),
 	}
-	return ledgerbackend.NewCaptive(captiveConfig)
+	core, err := ledgerbackend.NewCaptive(captiveConfig)
+	if err != nil {
+		return nil, fmt.Errorf("could not create captive core: %w", err)
+	}
+	return core, nil
 }
 
-func MustNew(cfg *config.Config, logger *supportlog.Entry) *Daemon {
-	logger = setupLogger(cfg, logger)
-	core := mustCreateCaptiveCore(cfg, logger)
-	historyArchive := mustCreateHistoryArchive(cfg, logger)
-	metricsRegistry := prometheus.NewRegistry()
-
-	daemon := &Daemon{
-		logger:          logger,
-		core:            core,
-		db:              mustOpenDatabase(cfg, logger, metricsRegistry),
-		done:            make(chan struct{}),
-		metricsRegistry: metricsRegistry,
-		coreClient: host.NewCoreClientWithMetrics(
-			createStellarCoreClient(cfg), metricsRegistry, host.PrometheusNamespace),
-		coreQueryingClient: createHighperfStellarCoreClient(cfg),
+// New opens every component of the daemon, binds the HTTP listeners and
+// starts ingestion. Run serves the listeners. On failure New closes what it
+// opened before the failure and returns the error.
+//
+// ctx bounds startup: a canceled ctx makes a step such as a backfill stop,
+// and New then fails with an error that wraps ctx.Err(). ctx must stay alive
+// for as long as the daemon runs, since history archive requests made during
+// ingestion also run on it.
+func New(ctx context.Context, cfg *config.Config, logger *supportlog.Entry) (*Daemon, error) {
+	d := &Daemon{
+		logger:          setupLogger(cfg, logger),
+		metricsRegistry: prometheus.NewRegistry(),
 	}
+	if err := d.open(ctx, cfg); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// The SQLite driver reports a canceled query in its own words, so
+			// name the cause for callers that check errors.Is.
+			err = fmt.Errorf("startup interrupted: %w: %w", ctxErr, err)
+		}
+		return nil, errors.Join(err, d.Close())
+	}
+	return d, nil
+}
 
-	feewindows := daemon.mustInitializeStorage(cfg)
+func (d *Daemon) open(ctx context.Context, cfg *config.Config) error {
+	var err error
+	if d.core, err = newCaptiveCore(cfg, d.logger); err != nil {
+		return err
+	}
+	archiveCtx, cancelArchive := context.WithCancel(ctx)
+	d.cancelArchive = cancelArchive
+	historyArchive, err := createHistoryArchive(archiveCtx, cfg, d.logger)
+	if err != nil {
+		return err
+	}
+	if d.db, err = openDatabase(cfg, d.metricsRegistry); err != nil { //nolint:contextcheck // the opener takes no ctx
+		return err
+	}
+	d.coreClient = host.NewCoreClientWithMetrics(createStellarCoreClient(cfg), d.metricsRegistry, host.PrometheusNamespace)
+	d.coreQueryingClient = createHighperfStellarCoreClient(cfg)
 
+	feewindows, err := d.initializeStorage(ctx, cfg)
+	if err != nil {
+		return err
+	}
 	// Create the read-writer once and reuse in ingest service/backfill
-	rw := sqlitedb.NewReadWriter(
-		logger,
-		daemon.db,
-		daemon,
-		cfg.HistoryRetentionWindow,
-		cfg.NetworkPassphrase,
-	)
+	rw := sqlitedb.NewReadWriter(d.logger, d.db, d, cfg.HistoryRetentionWindow, cfg.NetworkPassphrase)
 	if cfg.ServeLedgersFromDatastore {
-		daemon.dataStore, daemon.dataStoreSchema = mustCreateDataStore(cfg, logger)
+		if d.dataStore, d.dataStoreSchema, err = createDataStore(ctx, cfg); err != nil {
+			return err
+		}
 	}
 	var ingestCfg ingest.Config
-	daemon.ingestService, ingestCfg = createIngestService(cfg, logger, daemon, feewindows, historyArchive, rw)
-	if cfg.Backfill {
-		// On a fresh DB, reshape the schema for the bulk-load; FinalizeBulkLoad
-		// restores it below
-		_, err := sqlitedb.NewLedgerReader(daemon.db).GetLedgerRange(context.Background())
-		if errors.Is(err, store.ErrEmptyDB) {
-			if err := sqlitedb.PrepareBulkLoad(context.Background(), daemon.db, logger); err != nil {
-				logger.WithError(err).Fatal("failed to prepare database for backfill bulk-load")
-			}
-		} else if err != nil {
-			logger.WithError(err).Fatal("failed to check database emptiness for backfill")
-		}
+	// Ingestion outlives startup and is stopped by Close, not by ctx.
+	d.ingestService, ingestCfg = createIngestService(cfg, d.logger, d, feewindows, historyArchive, rw)
+	if err := d.backfillAndFinalize(ctx, cfg, feewindows); err != nil {
+		return err
+	}
+	d.preflightWorkerPool = createPreflightWorkerPool(cfg, d.logger, d)
+	d.jsonRPCHandler = createJSONRPCHandler(cfg, d.logger, d, feewindows)
+	// Bind the listeners before ingestion starts: a port already in use is the
+	// common startup mistake, and failing on it must not launch captive core.
+	if err := d.listen(ctx, cfg); err != nil {
+		return err
+	}
+	// Start ingestion only after backfill is complete
+	d.ingestService.Start(ingestCfg) //nolint:contextcheck // see above
+	d.registerMetrics()
+	return nil
+}
 
-		daemon.mustBackfill(cfg, feewindows)
+// backfillAndFinalize runs the configured backfill and restores the canonical
+// schema after a bulk-load, including one interrupted by a crash.
+func (d *Daemon) backfillAndFinalize(ctx context.Context, cfg *config.Config, feewindows *feewindow.FeeWindows) error {
+	if cfg.Backfill {
+		if err := d.prepareBulkLoadIfEmpty(ctx); err != nil {
+			return err
+		}
+		if err := d.backfill(ctx, cfg, feewindows); err != nil {
+			return err
+		}
 	}
 
-	// Restore the canonical schema after a bulk-load, including one interrupted
-	// by a crash. Must finish before ingestService.Start to avoid starving it.
+	// Must finish before ingestService.Start to avoid starving it.
 	finalizeStart := time.Now()
-	if err := sqlitedb.FinalizeBulkLoad(context.Background(), daemon.db, cfg.SQLiteDBPath, logger); err != nil {
-		logger.WithError(err).Fatal("failed to finalize backfill bulk-load")
+	if err := sqlitedb.FinalizeBulkLoad(ctx, d.db, cfg.SQLiteDBPath, d.logger); err != nil {
+		return fmt.Errorf("failed to finalize backfill bulk-load: %w", err)
 	}
 	// The backfill perf-eval runner keys off this line; keep it stable
-	logger.WithField("duration", time.Since(finalizeStart).String()).Info("Bulk-load finalize complete")
+	d.logger.WithField("duration", time.Since(finalizeStart).String()).Info("Bulk-load finalize complete")
 
 	if cfg.Backfill {
 		// Top-up frontfill after finalize so captive core starts nearer the live tip
-		daemon.mustBackfill(cfg, feewindows)
+		return d.backfill(ctx, cfg, feewindows)
 	}
-	// Start ingestion service only after backfill is complete
-	daemon.ingestService.Start(ingestCfg)
-
-	daemon.preflightWorkerPool = createPreflightWorkerPool(cfg, logger, daemon)
-	daemon.jsonRPCHandler = createJSONRPCHandler(cfg, logger, daemon, feewindows)
-
-	daemon.setupHTTPServers(cfg)
-	daemon.registerMetrics()
-
-	return daemon
+	return nil
 }
 
-func mustCreateDataStore(cfg *config.Config, logger *supportlog.Entry) (datastore.DataStore,
-	datastore.DataStoreSchema,
-) {
-	dataStore, err := datastore.NewDataStore(context.Background(), cfg.DataStoreConfig)
+// prepareBulkLoadIfEmpty reshapes the schema of a fresh DB for the bulk-load.
+// FinalizeBulkLoad restores it.
+func (d *Daemon) prepareBulkLoadIfEmpty(ctx context.Context) error {
+	_, err := sqlitedb.NewLedgerReader(d.db).GetLedgerRange(ctx)
+	switch {
+	case errors.Is(err, store.ErrEmptyDB):
+		if err := sqlitedb.PrepareBulkLoad(ctx, d.db, d.logger); err != nil {
+			return fmt.Errorf("failed to prepare database for backfill bulk-load: %w", err)
+		}
+	case err != nil:
+		return fmt.Errorf("failed to check database emptiness for backfill: %w", err)
+	}
+	return nil
+}
+
+func createDataStore(ctx context.Context, cfg *config.Config) (datastore.DataStore, datastore.DataStoreSchema, error) {
+	dataStore, err := datastore.NewDataStore(ctx, cfg.DataStoreConfig)
 	if err != nil {
-		logger.WithError(err).Fatal("failed to initialize datastore")
+		return nil, datastore.DataStoreSchema{}, fmt.Errorf("failed to initialize datastore: %w", err)
 	}
 
-	schema, err := datastore.LoadSchema(context.Background(), dataStore, cfg.DataStoreConfig)
+	schema, err := datastore.LoadSchema(ctx, dataStore, cfg.DataStoreConfig)
 	if err != nil {
-		logger.WithError(err).Fatal("failed to retrieve datastore schema ")
+		return nil, datastore.DataStoreSchema{}, errors.Join(
+			fmt.Errorf("failed to retrieve datastore schema: %w", err), dataStore.Close())
 	}
 
-	return dataStore, schema
+	return dataStore, schema, nil
 }
 
 func setupLogger(cfg *config.Config, logger *supportlog.Entry) *supportlog.Entry {
@@ -275,17 +346,10 @@ func setupLogger(cfg *config.Config, logger *supportlog.Entry) *supportlog.Entry
 	return logger
 }
 
-func mustCreateCaptiveCore(cfg *config.Config, logger *supportlog.Entry) *ledgerbackend.CaptiveStellarCore {
-	core, err := newCaptiveCore(cfg, logger)
-	if err != nil {
-		logger.WithError(err).Fatal("could not create captive core")
-	}
-	return core
-}
-
-func mustCreateHistoryArchive(cfg *config.Config, logger *supportlog.Entry) *historyarchive.ArchiveInterface {
+func createHistoryArchive(ctx context.Context, cfg *config.Config, logger *supportlog.Entry,
+) (historyarchive.ArchiveInterface, error) {
 	if len(cfg.HistoryArchiveURLs) == 0 {
-		logger.Fatal("no history archives URLs were provided")
+		return nil, errors.New("no history archives URLs were provided")
 	}
 
 	historyArchive, err := historyarchive.NewArchivePool(
@@ -295,24 +359,24 @@ func mustCreateHistoryArchive(cfg *config.Config, logger *supportlog.Entry) *his
 			NetworkPassphrase:   cfg.NetworkPassphrase,
 			CheckpointFrequency: cfg.CheckpointFrequency,
 			ConnectOptions: storage.ConnectOptions{
-				Context:   context.Background(),
+				Context:   ctx,
 				UserAgent: cfg.HistoryArchiveUserAgent,
 			},
 		},
 	)
 	if err != nil {
-		logger.WithError(err).Fatal("could not connect to history archive")
+		return nil, fmt.Errorf("could not connect to history archive: %w", err)
 	}
-	return &historyArchive
+	return historyArchive, nil
 }
 
-func mustOpenDatabase(cfg *config.Config, logger *supportlog.Entry, metricsRegistry *prometheus.Registry) *sqlitedb.DB {
+func openDatabase(cfg *config.Config, metricsRegistry *prometheus.Registry) (*sqlitedb.DB, error) {
 	dbConn, err := sqlitedb.OpenSQLiteDBWithPrometheusMetrics(
 		cfg.SQLiteDBPath, host.PrometheusNamespace, "db", metricsRegistry)
 	if err != nil {
-		logger.WithError(err).Fatal("could not open database")
+		return nil, fmt.Errorf("could not open database: %w", err)
 	}
-	return dbConn
+	return dbConn, nil
 }
 
 func createStellarCoreClient(cfg *config.Config) stellarcore.Client {
@@ -330,7 +394,7 @@ func createHighperfStellarCoreClient(cfg *config.Config) host.FastCoreClient {
 }
 
 func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon,
-	feewindows *feewindow.FeeWindows, historyArchive *historyarchive.ArchiveInterface, rw sqlitedb.ReadWriter,
+	feewindows *feewindow.FeeWindows, historyArchive historyarchive.ArchiveInterface, rw sqlitedb.ReadWriter,
 ) (*ingest.Service, ingest.Config) {
 	onIngestionRetry := func(err error, _ time.Duration) {
 		logger.WithError(err).Error("could not run ingestion. Retrying")
@@ -361,7 +425,7 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 		Logger:            logger,
 		DB:                rw,
 		NetworkPassPhrase: cfg.NetworkPassphrase,
-		Archive:           *historyArchive,
+		Archive:           historyArchive,
 		LedgerBackend:     backend,
 		Timeout:           cfg.IngestionTimeout,
 		OnIngestionRetry:  onIngestionRetry,
@@ -407,12 +471,14 @@ func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *
 	return &rpcHandler
 }
 
-func (d *Daemon) setupHTTPServers(cfg *config.Config) {
+// listen binds the JSON-RPC listener and, when configured, the admin listener.
+// Run serves them.
+func (d *Daemon) listen(ctx context.Context, cfg *config.Config) error {
 	var err error
 	var listenConfig net.ListenConfig
-	d.listener, err = listenConfig.Listen(context.Background(), "tcp", cfg.Endpoint)
+	d.listener, err = listenConfig.Listen(ctx, "tcp", cfg.Endpoint)
 	if err != nil {
-		d.logger.WithError(err).WithField("endpoint", cfg.Endpoint).Fatal("cannot listen on endpoint")
+		return fmt.Errorf("cannot listen on endpoint %s: %w", cfg.Endpoint, err)
 	}
 	d.server = &http.Server{
 		Handler:     createHTTPHandler(d.logger, d.jsonRPCHandler),
@@ -420,9 +486,19 @@ func (d *Daemon) setupHTTPServers(cfg *config.Config) {
 		IdleTimeout: jsonrpc.DefaultHTTPIdleTimeout,
 	}
 
-	if cfg.AdminEndpoint != "" {
-		d.setupAdminServer(cfg)
+	if cfg.AdminEndpoint == "" {
+		return nil
 	}
+	d.adminListener, err = listenConfig.Listen(ctx, "tcp", cfg.AdminEndpoint)
+	if err != nil {
+		return fmt.Errorf("cannot listen on admin endpoint %s: %w", cfg.AdminEndpoint, err)
+	}
+	d.adminServer = &http.Server{
+		Handler:     jsonrpc.NewAdminMux(d.logger, d.metricsRegistry),
+		ReadTimeout: jsonrpc.DefaultHTTPReadTimeout,
+		IdleTimeout: jsonrpc.DefaultHTTPIdleTimeout,
+	}
+	return nil
 }
 
 func createHTTPHandler(logger *supportlog.Entry, jsonRPCHandler *rpcv1.Handler) http.Handler {
@@ -431,24 +507,9 @@ func createHTTPHandler(logger *supportlog.Entry, jsonRPCHandler *rpcv1.Handler) 
 	return httpHandler
 }
 
-func (d *Daemon) setupAdminServer(cfg *config.Config) {
-	var err error
-	adminMux := jsonrpc.NewAdminMux(d.logger, d.metricsRegistry)
-	var listenConfig net.ListenConfig
-	d.adminListener, err = listenConfig.Listen(context.Background(), "tcp", cfg.AdminEndpoint)
-	if err != nil {
-		d.logger.WithError(err).WithField("endpoint", cfg.AdminEndpoint).Fatal("cannot listen on admin endpoint")
-	}
-	d.adminServer = &http.Server{
-		Handler:     adminMux,
-		ReadTimeout: jsonrpc.DefaultHTTPReadTimeout,
-		IdleTimeout: jsonrpc.DefaultHTTPIdleTimeout,
-	}
-}
-
-// mustInitializeStorage initializes the storage using what was on the DB
-func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows {
-	readTxMetaCtx, cancelReadTxMeta := context.WithTimeout(context.Background(), cfg.IngestionTimeout)
+// initializeStorage initializes the storage using what was on the DB
+func (d *Daemon) initializeStorage(ctx context.Context, cfg *config.Config) (*feewindow.FeeWindows, error) {
+	readTxMetaCtx, cancelReadTxMeta := context.WithTimeout(ctx, cfg.IngestionTimeout)
 	defer cancelReadTxMeta()
 
 	feeWindows := feewindow.NewFeeWindows(
@@ -461,7 +522,7 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 	// In load-test mode the existing DB is treated as opaque carrier state for
 	// ingestion timing; skip the fee-stat / migration backfill
 	if cfg.IngestLoadTest.Enabled() {
-		return feeWindows
+		return feeWindows, nil
 	}
 
 	// 1. First, identify the ledger range for database migrations based on the
@@ -469,14 +530,17 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 	//    nothing), this represents the entire range of ledger metas we store.
 	retentionRange, err := sqlitedb.GetMigrationLedgerRange(readTxMetaCtx, d.db, cfg.HistoryRetentionWindow)
 	if err != nil {
-		d.logger.WithError(err).Fatal("could not get ledger range for migration")
+		return nil, fmt.Errorf("could not get ledger range for migration: %w", err)
 	}
 
 	// 2. Then, we build migrations for transactions and events, also incorporating the fee windows.
 	//    If there are migrations to do, this has no effect, since migration windows are larger than
 	//    the fee window. In the absence of migrations, though, this means the ingestion
 	//    range is just the fee stat range.
-	dataMigrations := d.buildMigrations(readTxMetaCtx, cfg, retentionRange, feeWindows)
+	dataMigrations, err := d.buildMigrations(readTxMetaCtx, cfg, retentionRange, feeWindows)
+	if err != nil {
+		return nil, err
+	}
 	ledgerSeqRange := dataMigrations.ApplicableRange()
 
 	//
@@ -484,13 +548,17 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 	//
 	var initialSeq, currentSeq uint32
 	reader := sqlitedb.NewLedgerReader(d.db)
+	// buildMigrations opened a DB transaction that Apply and Commit roll back
+	// when they fail. A failure between them has to roll it back here, or the
+	// connection stays in the transaction past db.Close.
 	for l, err := range reader.ScanLedgers(readTxMetaCtx, ledgerSeqRange.First, ledgerSeqRange.Last) {
 		if err != nil {
-			d.logger.WithError(err).Fatal("Could not obtain txmeta cache from the database")
+			return nil, errors.Join(fmt.Errorf("could not obtain txmeta cache from the database: %w", err),
+				d.db.Rollback())
 		}
 		var txMeta xdr.LedgerCloseMeta
 		if err := txMeta.UnmarshalBinary(l.Raw); err != nil {
-			d.logger.WithError(err).Fatal("could not decode ledger ", l.Sequence)
+			return nil, errors.Join(fmt.Errorf("could not decode ledger %d: %w", l.Sequence, err), d.db.Rollback())
 		}
 		currentSeq = txMeta.LedgerSequence()
 		if initialSeq == 0 {
@@ -507,12 +575,12 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 		}
 
 		if err := dataMigrations.Apply(readTxMetaCtx, txMeta); err != nil {
-			d.logger.WithError(err).Fatal("could not apply migration for ledger ", currentSeq)
+			return nil, fmt.Errorf("could not apply migration for ledger %d: %w", currentSeq, err)
 		}
 	}
 
 	if err := dataMigrations.Commit(readTxMetaCtx); err != nil {
-		d.logger.WithError(err).Fatal("Could not commit data migrations")
+		return nil, fmt.Errorf("could not commit data migrations: %w", err)
 	}
 
 	if currentSeq != 0 {
@@ -522,11 +590,12 @@ func (d *Daemon) mustInitializeStorage(cfg *config.Config) *feewindow.FeeWindows
 			Info("Finished initializing in-memory store and applying DB data migrations")
 	}
 
-	return feeWindows
+	return feeWindows, nil
 }
 
-func (d *Daemon) mustBackfill(cfg *config.Config, feeWindows *feewindow.FeeWindows) {
+func (d *Daemon) backfill(ctx context.Context, cfg *config.Config, feeWindows *feewindow.FeeWindows) error {
 	backfillMeta, err := ingest.NewBackfillMeta(
+		ctx,
 		d.logger,
 		d.ingestService,
 		sqlitedb.NewLedgerReader(d.db),
@@ -534,19 +603,20 @@ func (d *Daemon) mustBackfill(cfg *config.Config, feeWindows *feewindow.FeeWindo
 		d.dataStoreSchema,
 	)
 	if err != nil {
-		d.logger.WithError(err).Fatal("failed to create backfill metadata")
+		return fmt.Errorf("failed to create backfill metadata: %w", err)
 	}
-	if err := backfillMeta.RunBackfill(cfg); err != nil {
-		d.logger.WithError(err).Fatal("failed to backfill ledgers")
+	if err := backfillMeta.RunBackfill(ctx, cfg); err != nil {
+		return fmt.Errorf("failed to backfill ledgers: %w", err)
 	}
 
 	// Reset the fee windows so they re-populate from the database
 	feeWindows.Reset()
+	return nil
 }
 
 func (d *Daemon) buildMigrations(ctx context.Context, cfg *config.Config, retentionRange sqlitedb.LedgerSeqRange,
 	feeWindows *feewindow.FeeWindows,
-) sqlitedb.MultiMigration {
+) (sqlitedb.MultiMigration, error) {
 	// There are two windows in play here:
 	//  - the ledger retention window, which describes the range of txmeta
 	//    to keep relative to the latest "ledger tip" of the network
@@ -561,62 +631,74 @@ func (d *Daemon) buildMigrations(ctx context.Context, cfg *config.Config, retent
 		cfg.ClassicFeeStatsLedgerRetentionWindow,
 		cfg.SorobanFeeStatsLedgerRetentionWindow)
 	if maxFeeRetentionWindow > cfg.HistoryRetentionWindow {
-		d.logger.Fatalf(
-			"Fee stat analysis window (%d) cannot exceed history retention window (%d).",
+		return sqlitedb.MultiMigration{}, fmt.Errorf(
+			"fee stat analysis window (%d) cannot exceed history retention window (%d)",
 			maxFeeRetentionWindow, cfg.HistoryRetentionWindow)
 	}
 
 	dataMigrations, err := sqlitedb.BuildMigrations(
 		ctx, d.logger, d.db, cfg.NetworkPassphrase, retentionRange)
 	if err != nil {
-		d.logger.WithError(err).Fatal("could not build migrations")
+		return sqlitedb.MultiMigration{}, fmt.Errorf("could not build migrations: %w", err)
 	}
 
 	feeStatsRange, err := sqlitedb.GetMigrationLedgerRange(ctx, d.db, maxFeeRetentionWindow)
 	if err != nil {
-		d.logger.WithError(err).Fatal("could not get ledger range for fee stats")
+		return sqlitedb.MultiMigration{}, fmt.Errorf("could not get ledger range for fee stats: %w", err)
 	}
 
 	// By treating the fee window *as if* it's a migration, we can make the interface here clean.
 	dataMigrations.Append(feeWindows.AsMigration(feeStatsRange))
-	return dataMigrations
+	return dataMigrations, nil
 }
 
-func (d *Daemon) Run() {
-	d.logger.WithField("addr", d.listener.Addr().String()).Info("starting HTTP server")
-
+// Run serves the JSON-RPC and admin endpoints until ctx is canceled or a
+// component fails for good, then closes the daemon.
+//
+// A canceled ctx is a shutdown request, not a failure: Run returns nil, and
+// an error from Close itself is logged rather than returned. Run returns the
+// first error from the JSON-RPC server, the admin server, or ingestion after
+// Close has run. A failure that is pending at the moment of a shutdown
+// request is still returned.
+func (d *Daemon) Run(ctx context.Context) error {
+	// One slot per server, so a Serve goroutine never blocks on its send.
+	serverFailed := make(chan error, 2) //nolint:mnd
 	panicGroup := util.NewUnrecoverablePanicGroup()
 	panicGroupWithLog := panicGroup.Log(d.logger)
-	panicGroupWithLog.Go(func() {
-		if err := d.server.Serve(d.listener); !errors.Is(err, http.ErrServerClosed) {
-			d.logger.WithError(err).Fatal("soroban JSON RPC server encountered fatal error")
-		}
-	})
-
+	d.logger.WithField("addr", d.listener.Addr().String()).Info("starting HTTP server")
+	panicGroupWithLog.Go(func() { serve(serverFailed, "soroban JSON RPC server", d.server, d.listener) })
 	if d.adminServer != nil {
-		d.logger.
-			WithField("addr", d.adminListener.Addr().String()).
-			Info("starting Admin HTTP server")
-		panicGroupWithLog.Go(func() {
-			if err := d.adminServer.Serve(d.adminListener); !errors.Is(err, http.ErrServerClosed) {
-				d.logger.WithError(err).Error("soroban admin server encountered fatal error")
-			}
-		})
+		d.logger.WithField("addr", d.adminListener.Addr().String()).Info("starting Admin HTTP server")
+		panicGroupWithLog.Go(func() { serve(serverFailed, "soroban admin server", d.adminServer, d.adminListener) })
 	}
 
-	// Shutdown gracefully when we receive an interrupt signal. First
-	// server.Shutdown closes all open listeners, then closes all idle
-	// connections. Finally, it waits a grace period (10s here) for connections
-	// to return to idle and then shut down.
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-
+	var err error
 	select {
-	case <-signals:
-		d.Close()
-	case <-d.done:
+	case <-ctx.Done():
+	case err = <-serverFailed:
+	case err = <-d.ingestService.Failed():
+	}
+	d.Close()
+	if err == nil {
+		// select picks at random among ready cases, so a failure that was
+		// pending next to the shutdown request may have lost the draw.
+		select {
+		case err = <-serverFailed:
+		case err = <-d.ingestService.Failed():
+		default:
+		}
+	}
+	return err
+}
+
+// serve runs server on listener. Shutdown ends Serve with ErrServerClosed,
+// which is not a failure; any other end is sent on failed.
+func serve(failed chan<- error, name string, server *http.Server, listener net.Listener) {
+	err := server.Serve(listener)
+	if errors.Is(err, http.ErrServerClosed) {
 		return
 	}
+	failed <- fmt.Errorf("%s encountered fatal error: %w", name, err)
 }
 
 // Ensure the daemon conforms to the interface

@@ -89,8 +89,9 @@ func startAdminServer(
 		IdleTimeout: jsonrpc.DefaultHTTPIdleTimeout,
 	}
 	go func() {
-		// Log-only on purpose, matching v1: a dead admin server (pprof,
-		// /metrics) must not take down a node that is still serving reads.
+		// Log-only: a dead admin server (pprof, /metrics) does not take down a
+		// node that is still serving reads. rpcv1 exits 1 instead since #1107;
+		// aligning the two is for the single binary (#1108).
 		if serr := server.Serve(listener); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
 			logger.WithError(serr).Error("admin server exited")
 		}

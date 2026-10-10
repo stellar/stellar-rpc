@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -28,7 +32,11 @@ func main() {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
-			daemon.MustNew(&cfg, supportlog.New()).Run()
+			logger := supportlog.New()
+			if err := runDaemon(&cfg, logger); err != nil {
+				reportFailure(&cfg, logger, err)
+				os.Exit(1)
+			}
 		},
 	}
 
@@ -64,4 +72,32 @@ func main() {
 
 		os.Exit(1)
 	}
+}
+
+// runDaemon builds the daemon and serves until SIGINT or SIGTERM. The signal
+// context covers startup too, so a signal during a long backfill stops it,
+// closes what is open, and counts as a shutdown request, not a failure.
+func runDaemon(cfg *config.Config, logger *supportlog.Entry) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	d, err := daemon.New(ctx, cfg, logger)
+	if err != nil {
+		if ctx.Err() != nil {
+			logger.WithError(err).Info("shutdown requested during startup")
+			return nil
+		}
+		return err
+	}
+	return d.Run(ctx)
+}
+
+// reportFailure logs err at level error. The daemon applies the configured
+// log level before anything can fail, and a level above error would hide the
+// only line that says why the process exits, so stderr gets it instead then.
+func reportFailure(cfg *config.Config, logger *supportlog.Entry, err error) {
+	if cfg.LogLevel >= logrus.ErrorLevel {
+		logger.WithError(err).Error("stellar-rpc failed")
+		return
+	}
+	fmt.Fprintln(os.Stderr, "stellar-rpc failed:", err)
 }
