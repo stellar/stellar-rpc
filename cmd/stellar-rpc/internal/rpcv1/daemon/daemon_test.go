@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -104,12 +105,13 @@ func TestRunReturnsNilWhenContextIsCanceled(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
-func TestRunReturnsTheIngestionFailure(t *testing.T) {
+func TestRunReturnsNilWhenContextDeadlineExpires(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 	d := runnable(t)
 
-	err := d.Run(t.Context())
-	require.ErrorContains(t, err, "could not run ingestion")
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	require.NoError(t, d.Run(ctx))
 }
 
 func TestRunReturnsTheServerFailure(t *testing.T) {
@@ -126,10 +128,11 @@ func TestRunReturnsAFailurePendingNextToACancel(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 	d := runnable(t)
 
-	// Both are ready before Run's first select: the failure must win.
-	require.NoError(t, d.listener.Close())
+	// Let ingestion fail for good before Run starts, so the failure and the
+	// cancel are both ready at Run's first select. The failure must win.
+	require.Eventually(t, func() bool { return len(d.ingestService.Failed()) == 1 }, 30*time.Second, 100*time.Millisecond)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	err := d.Run(ctx)
-	require.ErrorContains(t, err, "soroban JSON RPC server encountered fatal error")
+	require.ErrorContains(t, err, "could not run ingestion")
 }

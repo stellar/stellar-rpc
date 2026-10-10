@@ -210,10 +210,8 @@ func newCaptiveCore(cfg *config.Config, logger *supportlog.Entry) (*ledgerbacken
 // starts ingestion. Run serves the listeners. On failure New closes what it
 // opened before the failure and returns the error.
 //
-// ctx bounds startup: a canceled ctx makes a step such as a backfill stop,
-// and New then fails with an error that wraps ctx.Err(). ctx must stay alive
-// for as long as the daemon runs, since history archive requests made during
-// ingestion also run on it.
+// ctx bounds startup only: a canceled ctx makes a step such as a backfill
+// stop, and New then fails with an error that wraps ctx.Err().
 func New(ctx context.Context, cfg *config.Config, logger *supportlog.Entry) (*Daemon, error) {
 	d := &Daemon{
 		logger:          setupLogger(cfg, logger),
@@ -235,9 +233,12 @@ func (d *Daemon) open(ctx context.Context, cfg *config.Config) error {
 	if d.core, err = newCaptiveCore(cfg, d.logger); err != nil {
 		return err
 	}
-	archiveCtx, cancelArchive := context.WithCancel(ctx)
+	// Only ingestion uses the archive, and ingestion is stopped by Close, so
+	// the archive follows Close rather than ctx. A deadline on ctx must not
+	// surface as an ingestion failure during an otherwise clean shutdown.
+	archiveCtx, cancelArchive := context.WithCancel(context.Background())
 	d.cancelArchive = cancelArchive
-	historyArchive, err := createHistoryArchive(archiveCtx, cfg, d.logger)
+	historyArchive, err := createHistoryArchive(archiveCtx, cfg, d.logger) //nolint:contextcheck // see above
 	if err != nil {
 		return err
 	}
