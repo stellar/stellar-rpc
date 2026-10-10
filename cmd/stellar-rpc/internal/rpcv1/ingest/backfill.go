@@ -56,13 +56,14 @@ type fillBounds struct {
 
 // NewBackfillMeta creates a BackfillMeta instance.
 func NewBackfillMeta(
+	ctx context.Context,
 	logger *supportlog.Entry,
 	service *Service,
 	reader sqlitedb.LedgerReader,
 	ds datastore.DataStore,
 	dsSchema datastore.DataStoreSchema,
 ) (BackfillMeta, error) {
-	ctx, cancelInit := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancelInit := context.WithTimeout(ctx, time.Minute)
 	defer cancelInit()
 
 	// Query local DB to determine min and max sequence numbers among the written ledgers
@@ -104,9 +105,7 @@ func NewBackfillMeta(
 // RunBackfill backfills the local database with ledgers from the datastore.
 // It guarantees the backfill of the most recent cfg.HistoryRetentionWindow ledgers.
 // It requires that no sequence number gaps exist in the local DB prior to backfilling.
-func (b *BackfillMeta) RunBackfill(cfg *config.Config) error {
-	ctx := context.Background()
-
+func (b *BackfillMeta) RunBackfill(ctx context.Context, cfg *config.Config) error {
 	// Ensure no pre-existing gaps in local DB
 	if _, _, err := b.verifyDbGapless(ctx, cfg.IngestionTimeout); err != nil {
 		return err

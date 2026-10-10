@@ -1,9 +1,9 @@
 package infrastructure
 
 import (
+	"context"
 	"fmt"
-	"runtime"
-	"sync/atomic"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -13,13 +13,17 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/daemon"
 )
 
+// Close drains the HTTP servers for up to 10 seconds and then waits for
+// captive core to exit, so a stop that takes longer than this is a hang worth
+// failing on.
+const rpcv1StopTimeout = 60 * time.Second
+
 type rpcv1Daemon struct {
+	*runningDaemon
+
 	test   *Test
 	daemon *daemon.Daemon
 	log    *supportlog.Entry
-	done   chan error
-	// building is true while MustNew runs on the test goroutine.
-	building atomic.Bool
 }
 
 func (d *rpcv1Daemon) start() {
@@ -39,12 +43,38 @@ func (d *rpcv1Daemon) start() {
 		cfg.captiveCoreHTTPPort = ports[2]
 		cfg.stellarCoreURL = fmt.Sprintf("http://127.0.0.1:%d", ports[2])
 	}
-	d.daemon = d.create(cfg)
-	d.fillPorts()
-	go d.daemon.Run()
+	rpcCfg := d.config(cfg)
+
+	// The daemon is built on the run goroutine so that its startup, like its
+	// serving, runs on the context close cancels. built is closed once the
+	// daemon exists; a build that fails leaves its error on done for
+	// waitForRPC or close to report.
+	built := make(chan struct{})
+	d.runningDaemon = startDaemon(i.t, daemonRPCv1, rpcv1StopTimeout, func(ctx context.Context) error {
+		rpcDaemon, err := daemon.New(ctx, rpcCfg, d.log)
+		if err != nil {
+			// A close during startup is a shutdown request, not a failure,
+			// the same way the rpcv1 main treats it.
+			if ctx.Err() != nil {
+				d.log.WithError(err).Info("shutdown requested during startup")
+				return nil //nolint:nilerr // a canceled startup is a shutdown request, not a failure
+			}
+			return err
+		}
+		d.daemon = rpcDaemon
+		close(built)
+		return rpcDaemon.Run(ctx)
+	})
+	select {
+	case <-built:
+		d.fillPorts()
+	case <-d.stopped:
+	case <-time.After(rpcHealthyTimeout):
+		i.t.Fatalf("rpcv1 daemon did not finish starting within %s", rpcHealthyTimeout)
+	}
 }
 
-func (d *rpcv1Daemon) create(c rpcConfig) *daemon.Daemon {
+func (d *rpcv1Daemon) config(c rpcConfig) *config.Config {
 	i := d.test
 	var cfg config.Config
 	m := c.toMap()
@@ -65,28 +95,7 @@ func (d *rpcv1Daemon) create(c rpcConfig) *daemon.Daemon {
 
 	d.log = supportlog.New()
 	d.log.SetOutput(newTestLogWriter(i.t, `rpc="daemon" `))
-	// The daemon's Fatal calls land here. During MustNew they come from the
-	// test goroutine, where FailNow is the one correct way to end the test: a
-	// bare Goexit there makes the test runner panic the whole binary. Later
-	// they come from a daemon goroutine, where FailNow is not allowed, so Error
-	// marks the test failed, the channel lets waitForRPC stop at once, and
-	// Goexit ends that goroutine the way Fatal would.
-	d.done = make(chan error, 1)
-	d.log.SetExitFunc(func(code int) {
-		err := fmt.Errorf("rpcv1 daemon exited with code %d", code)
-		select {
-		case d.done <- err:
-		default:
-		}
-		if d.building.Load() {
-			i.t.Fatal(err)
-		}
-		i.t.Error(err)
-		runtime.Goexit()
-	})
-	d.building.Store(true)
-	defer d.building.Store(false)
-	return daemon.MustNew(&cfg, d.log)
+	return &cfg
 }
 
 func (d *rpcv1Daemon) fillPorts() {
@@ -95,17 +104,6 @@ func (d *rpcv1Daemon) fillPorts() {
 	if adminEndpointAddr != nil {
 		d.test.testPorts.RPCAdminPort = uint16(adminEndpointAddr.Port)
 	}
-}
-
-func (d *rpcv1Daemon) close() {
-	// start may have failed before the daemon was built; there is nothing to stop then.
-	if d.daemon != nil {
-		d.daemon.Close()
-	}
-}
-
-func (d *rpcv1Daemon) exited() <-chan error {
-	return d.done
 }
 
 func (d *rpcv1Daemon) logger() *supportlog.Entry {

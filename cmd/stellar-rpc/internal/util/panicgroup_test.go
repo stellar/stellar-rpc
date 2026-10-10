@@ -1,6 +1,7 @@
 package util
 
 import (
+	"io"
 	"os"
 	"sync"
 	"testing"
@@ -33,6 +34,10 @@ func makeTestLogCounter() *TestLogsCounter {
 	}
 	out.entry.AddHook(out)
 	out.entry.SetLevel(logrus.DebugLevel)
+	// The hook counts the lines. Keep them off os.Stderr, which
+	// TestPanicGroupStdErr swaps out while an earlier test's goroutine may
+	// still be logging.
+	out.entry.SetOutput(io.Discard)
 	return out
 }
 
@@ -93,6 +98,22 @@ func TestPanicGroupLog(t *testing.T) {
 		time.Sleep(1 * time.Millisecond)
 	}
 	t.FailNow()
+}
+
+func TestRecoverablePanicGroupReportsThePanic(t *testing.T) {
+	logCounter := makeTestLogCounter()
+	failed := make(chan error, 1)
+	panicGroup := NewRecoverablePanicGroup(logCounter.Entry(), func(err error) { failed <- err })
+	panicGroup.Go(IndirectPanicingFunctionC)
+
+	select {
+	case err := <-failed:
+		require.ErrorContains(t, err, "panic: ")
+		require.ErrorContains(t, err, "nil pointer dereference")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the panic was not reported")
+	}
+	require.GreaterOrEqual(t, logCounter.GetLevel(int(logrus.ErrorLevel)), 2, "the call stack was not logged at error")
 }
 
 func TestPanicGroupStdErr(t *testing.T) {
