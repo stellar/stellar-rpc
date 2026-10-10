@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 
 	"github.com/stellar/streamhash"
 
@@ -94,73 +95,172 @@ const (
 // zstd frames.
 const indexPackChecksum = packfile.ChecksumCRC32C
 
-// IndexRecordFingerprintLen is the byte width of the fingerprint leading every
-// index.pack record: streamhash's fingerprint of the routed key.
+// IndexRecordFingerprintLen is the byte width of a term's index.pack fingerprint.
 const IndexRecordFingerprintLen = 4
 
 // ──────────────────────────────────────────────────────────────────
-// index.pack build stamp.
+// index.pack layout and app data.
 //
-// Embedded in index.pack's app-data slot:
+// Entries are in MPHF slot order. A term whose serialized bitmap is at
+// most indexSplitBytes is one entry: fingerprint[4] ‖ roaring portable
+// bitmap. A larger term is split into C entries, one per slab of the
+// chunk: its ids in that slab with no fingerprint, zero-length where
+// it has none. With r split terms below slot s, slot s's entry, or its
+// slab-0 entry, is at s + r×(C−1).
+//
+// The app data is the build stamp, then what locates the entries:
 //
 //	offset  size  field
-//	0       1     version (0x01)
+//	0       1     version (0x02)
 //	1       2     term schema version (uint16 BE)
 //	3       8     indexed-field bitmask (uint64 BE)
+//	11      4     slab count C (uint32 BE)
+//	15      8×D   one row per split term, ascending by slot:
+//	              slot (uint32 BE) ‖ fingerprint[4]
 //
 // The stamp records which term-derivation scheme and field set the
 // index was built under, making the artifact self-describing: an
 // index missing a term family becomes distinguishable from one that
-// simply matched nothing. Freeze and walk write identical stamps
-// (all three values are compile-time constants), so freeze-vs-walk
-// byte identity is unaffected. Decoding ignores trailing bytes so a
-// future version can extend the blob without moving these fields.
+// simply matched nothing. Freeze and walk write identical app data: the
+// schema and mask are compile-time constants, and whether a term splits
+// depends on its bitmap alone. The blob has an exact length, so any
+// growth is a version bump.
 // ──────────────────────────────────────────────────────────────────
 
 const (
-	indexStampVersion byte = 0x01
+	indexStampVersion byte = 0x02
 	indexStampLen          = 1 + 2 + 8
+	indexAppDataLen        = indexStampLen + 4
+	indexRowLen            = 4 + IndexRecordFingerprintLen
 )
 
-func encodeIndexBuildStamp() []byte {
-	buf := make([]byte, indexStampLen)
-	buf[0] = indexStampVersion
-	binary.BigEndian.PutUint16(buf[1:3], TermSchemaVersion)
-	binary.BigEndian.PutUint64(buf[3:11], IndexedFieldMask())
-	return buf
+// indexSlabShift cuts a split term into slabs of one roaring container. It is
+// fixed by the format, unlike slabShift, which tests shrink.
+const indexSlabShift = 16
+
+// indexSplitBytes is the serialized size past which a term is split.
+const indexSplitBytes = 64 << 10
+
+// indexPackMaxRecordBytes closes index.pack's records. With no item limit,
+// their count, and so the tail Open reads, follows the file size.
+const indexPackMaxRecordBytes = 16 << 10
+
+// indexPackTailBytesPerRecord bounds the tail a record adds, app data and
+// trailer included (3.3 to 3.5 bytes measured).
+const indexPackTailBytesPerRecord = 4
+
+// indexPackFirstRead sizes Open's first read to take in the tail of a pack of full records.
+func indexPackFirstRead(fileSize int64) int {
+	n := max(64<<10, indexPackTailBytesPerRecord*fileSize/indexPackMaxRecordBytes)
+	return int((n + 4095) &^ 4095)
 }
 
-// checkIndexBuildStamp refuses an index.pack whose build stamp names a term
-// schema or field set other than this binary's own.
-func checkIndexBuildStamp(indexPackPath string, r *stores.PackReader) error {
-	ad, err := r.AppData()
-	if err != nil {
-		return fmt.Errorf("events: read build stamp of %s: %w", indexPackPath, err)
+// indexPackWriterOptions has no codec: compressing roaring's encoding again
+// made lookups 3.6× slower.
+func indexPackWriterOptions() packfile.WriterOptions {
+	return packfile.WriterOptions{
+		Format:         indexPackFormat,
+		MaxRecordBytes: indexPackMaxRecordBytes,
+		RecordChecksum: indexPackChecksum,
+		ContentHash:    true,
+		Overwrite:      true,
 	}
-	schema, mask, err := decodeIndexBuildStamp(ad)
-	if err != nil {
-		return fmt.Errorf("events: %s: %w", indexPackPath, err)
+}
+
+// indexLayout is what index.pack's app data says about where entries are.
+type indexLayout struct {
+	slabs uint32 // C
+	rows  []byte // D rows of indexRowLen, ascending by slot
+}
+
+// appendIndexRow appends slot's row; slot must be above every slot in rows.
+func appendIndexRow(rows []byte, slot uint32, fp [IndexRecordFingerprintLen]byte) []byte {
+	rows = binary.BigEndian.AppendUint32(rows, slot)
+	return append(rows, fp[:]...)
+}
+
+// locate returns the position of slot's entry, or of its slab-0 entry when
+// slot is split, and for a split slot the fingerprint its row carries.
+func (l indexLayout) locate(slot uint32) (int, [IndexRecordFingerprintLen]byte, bool) {
+	n := len(l.rows) / indexRowLen
+	below := sort.Search(n, func(i int) bool {
+		return binary.BigEndian.Uint32(l.rows[i*indexRowLen:]) >= slot
+	})
+	pos := int(slot) + below*(int(l.slabs)-1)
+	var fp [IndexRecordFingerprintLen]byte
+	if below == n || binary.BigEndian.Uint32(l.rows[below*indexRowLen:]) != slot {
+		return pos, fp, false
 	}
-	if schema != TermSchemaVersion || mask != IndexedFieldMask() {
+	copy(fp[:], l.rows[below*indexRowLen+4:])
+	return pos, fp, true
+}
+
+// check refuses a layout that does not address the pack it rides in. locate's
+// search relies on the rows being strictly ascending.
+func (l indexLayout) check(path string, keys uint64, count uint32) error {
+	rows := uint64(len(l.rows) / indexRowLen)
+	if rows > 0 && (l.slabs == 0 || l.slabs > 1<<(32-indexSlabShift)) {
+		return fmt.Errorf("%w: events: %s splits %d terms over %d slabs", stores.ErrCorrupt, path, rows, l.slabs)
+	}
+	if want := keys + rows*(uint64(l.slabs)-1); uint64(count) != want {
 		return fmt.Errorf(
-			"events: %s was built under term schema %d with field mask %#x; this binary expects "+
-				"schema %d with mask %#x (rebuilt index required, or a binary matching the artifact)",
-			indexPackPath, schema, mask, TermSchemaVersion, IndexedFieldMask())
+			"%w: events: index pair mismatch at %s: index.pack holds %d entries, but index.hash holds %d keys "+
+				"and the app data splits %d terms over %d slabs (mispaired artifacts)",
+			stores.ErrCorrupt, path, count, keys, rows, l.slabs)
+	}
+	next := uint64(0)
+	for i := range rows {
+		slot := uint64(binary.BigEndian.Uint32(l.rows[i*indexRowLen:]))
+		if slot < next || slot >= keys {
+			return fmt.Errorf("%w: events: %s split row %d names slot %d, want one in [%d, %d)",
+				stores.ErrCorrupt, path, i, slot, next, keys)
+		}
+		next = slot + 1
 	}
 	return nil
 }
 
-// decodeIndexBuildStamp recovers (termSchema, fieldMask) from an index.pack
-// app-data blob, rejecting a short blob or an unknown stamp version. Bytes
-// past the stamp are ignored (future extension room).
-func decodeIndexBuildStamp(data []byte) (uint16, uint64, error) {
+func encodeIndexAppData(l indexLayout) []byte {
+	buf := make([]byte, indexAppDataLen, indexAppDataLen+len(l.rows))
+	buf[0] = indexStampVersion
+	binary.BigEndian.PutUint16(buf[1:3], TermSchemaVersion)
+	binary.BigEndian.PutUint64(buf[3:11], IndexedFieldMask())
+	binary.BigEndian.PutUint32(buf[11:15], l.slabs)
+	return append(buf, l.rows...)
+}
+
+// decodeIndexAppData returns the term schema, field mask and layout in data.
+// The layout's rows alias data.
+func decodeIndexAppData(data []byte) (uint16, uint64, indexLayout, error) {
 	if err := stores.CheckBlobVersion(data, indexStampVersion); err != nil {
-		return 0, 0, fmt.Errorf("events: index.pack build stamp: %w", err)
+		return 0, 0, indexLayout{}, fmt.Errorf("events: index.pack build stamp: %w", err)
 	}
-	if len(data) < indexStampLen {
-		return 0, 0, fmt.Errorf("events: index.pack build stamp is %d bytes, want at least %d", len(data), indexStampLen)
+	if len(data) < indexAppDataLen || (len(data)-indexAppDataLen)%indexRowLen != 0 {
+		return 0, 0, indexLayout{}, fmt.Errorf("%w: events: index.pack app data is %d bytes, want %d and %d per split term",
+			stores.ErrCorrupt, len(data), indexAppDataLen, indexRowLen)
 	}
-	return binary.BigEndian.Uint16(data[1:3]), binary.BigEndian.Uint64(data[3:11]), nil
+	layout := indexLayout{slabs: binary.BigEndian.Uint32(data[11:15]), rows: data[indexAppDataLen:]}
+	return binary.BigEndian.Uint16(data[1:3]), binary.BigEndian.Uint64(data[3:11]), layout, nil
+}
+
+// loadIndexLayout returns index.pack's layout, refusing a stamp that names a
+// term schema or field set other than this binary's own.
+func loadIndexLayout(indexPackPath string, r *stores.PackReader) (indexLayout, error) {
+	ad, err := r.AppData()
+	if err != nil {
+		return indexLayout{}, fmt.Errorf("events: read build stamp of %s: %w", indexPackPath, err)
+	}
+	schema, mask, layout, err := decodeIndexAppData(ad)
+	if err != nil {
+		return indexLayout{}, fmt.Errorf("events: %s: %w", indexPackPath, err)
+	}
+	if schema != TermSchemaVersion || mask != IndexedFieldMask() {
+		return indexLayout{}, fmt.Errorf(
+			"events: %s was built under term schema %d with field mask %#x; this binary expects "+
+				"schema %d with mask %#x (rebuilt index required, or a binary matching the artifact)",
+			indexPackPath, schema, mask, TermSchemaVersion, IndexedFieldMask())
+	}
+	return layout, nil
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -176,21 +276,6 @@ const eventsPackItemsPerRecord = 128
 // to a read. Payloads average about 250 bytes, so records still close at
 // eventsPackItemsPerRecord and the index stores no item counts.
 const eventsPackMaxRecordBytes = 128 << 10
-
-// indexPackItemsPerRecord is the number of bitmaps packed into one
-// index.pack record. Chosen to keep the on-disk offset array small
-// — one offset entry per record, not per bitmap. At ~600K unique
-// terms per production chunk, batch=1 produces a ~2.4 MB resident
-// offset array per ColdReader; batch=128 reduces that to ~19 KB
-// (~130× smaller), and that cost scales linearly with concurrent
-// reader count.
-//
-// Lookup latency is measured in noise between the two settings;
-// per-record I/O reads 128 bitmaps' worth of bytes but only decodes
-// one, and the bitmaps themselves are small enough that the wasted
-// read is dominated by the bitmap deserialization the caller does
-// anyway.
-const indexPackItemsPerRecord = 128
 
 // newEventsPackEncoder constructs a fresh zstd encoder for one
 // packfile writer goroutine. RecordEncoder is not safe for concurrent
@@ -308,15 +393,14 @@ func decodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
 //
 // The MPHF maps each TermKey (16 bytes of xxh3-128 over
 // `field || value`) to a unique slot in [0, N), where N is the
-// number of unique terms in a Chunk. index.pack is laid out as one
-// roaring-bitmap record per slot. The cold reader looks up a
-// TermKey via LookupBatch, reads the bitmap record at that slot, and
-// MUST verify a 4-byte fingerprint stored alongside the bitmap
-// before trusting it: an MPHF returns a slot for every input,
-// including keys never added at build time. False positives are
-// screened by the fingerprint check; the bitmap intersection /
-// post-filter logic downstream handles the residual single-event
-// false-positive rate.
+// number of unique terms in a Chunk. index.pack holds each slot's
+// bitmap, in slot order. The cold reader looks up a TermKey via
+// LookupBatch, reads the slot's bitmap, and MUST verify the 4-byte
+// fingerprint index.pack stores for the slot before trusting it: an
+// MPHF returns a slot for every input, including keys never added
+// at build time. False positives are screened by the fingerprint
+// check; the bitmap intersection / post-filter logic downstream
+// handles the residual single-event false-positive rate.
 //
 // Hash compatibility: streamhash's AddKey/Query do not re-hash the
 // supplied key — they take the first 16 bytes as the routing
@@ -484,15 +568,15 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 }
 
 // Lookup returns the dense slot in [0, N) that key maps to, and the
-// fingerprint that index.pack's record at that slot must carry.
+// fingerprint that index.pack must store for that slot.
 //
 // streamhash returns ErrKeyNotFound for keys its routing-stage check
 // can prove were never in the build set; callers should treat this
 // as a fast no-match and skip the index.pack read. For keys that DO
 // produce a slot, callers MUST still validate the result via the
-// 4-byte fingerprint stored alongside the bitmap at that slot in
-// index.pack — an MPHF can map an unseen key to a valid build-set
-// slot, and only the fingerprint catches that residual collision.
+// 4-byte fingerprint index.pack stores for that slot: an MPHF can
+// map an unseen key to a valid build-set slot, and only the
+// fingerprint catches that residual collision.
 func (m *mphf) Lookup(key TermKey) (uint32, [IndexRecordFingerprintLen]byte, error) {
 	rk := routedKey(m.secret, key)
 	slot, err := slotOf(m.idx.QueryRank(rk[:]))
