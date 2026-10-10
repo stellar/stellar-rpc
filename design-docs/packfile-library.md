@@ -19,7 +19,7 @@ Non-goals:
 
 ## Concepts
 
-On disk, items are grouped into **records**. `ItemsPerRecord` controls how many items go into each record.
+On disk, items are grouped into **records**. `ItemsPerRecord` controls how many items go into each record, and `MaxRecordBytes`, when set, how many raw bytes.
 
 Record bytes are transformed on the way to and from disk by a **caller-supplied codec** — a pair of `RecordEncoder` / `RecordDecoder` implementations the caller plugs into `WriterOptions` and `ReaderOptions`. With a nil codec, records are passthrough (written and read verbatim). The package ships no built-in codec; the `zstd` subpackage provides `*zstd.Compressor` and `*zstd.Decompressor` that satisfy the interfaces directly, and callers are free to provide their own. Integrity is not a codec: a record's checksum is selected by `WriterOptions.RecordChecksum` and recorded in the trailer, so the library applies and verifies it itself.
 
@@ -29,10 +29,11 @@ The file ends with a compact **offset index** that maps each record to its byte 
 
 `ItemsPerRecord` is the key configuration choice because it directly controls the size of the offset index:
 
-- A larger `ItemsPerRecord` (e.g. 128, the default) means fewer records, which means a smaller offset index. With compression enabled, it also gives the compressor more context, improving compression for small items. The cost is that reading one item requires reading and decoding its entire record, extracting the requested item, and discarding the rest.
+- A larger `ItemsPerRecord` (e.g. 128) means fewer records, which means a smaller offset index. With compression enabled, it also gives the compressor more context, improving compression for small items. The cost is that reading one item requires reading and decoding its entire record, extracting the requested item, and discarding the rest.
 - `ItemsPerRecord=1` stores each item as its own record. The offset index is larger (one entry per item), but each read fetches exactly what's needed.
+- `MaxRecordBytes` bounds that cost when a few items are large: a record closes before an item that would take its raw bytes past the limit, and an item larger than the limit is a record by itself. `ItemsPerRecord=0` leaves the byte limit alone to close records.
 
-The offset index has `ceil(totalItems / ItemsPerRecord)` entries, at most 4 bytes each but typically much less: the entries are compressed, so when records are similar in size each entry is closer to 1-2 bytes. Every 128 records also take a 17-byte directory entry. Use `4.2 * ceil(totalItems / ItemsPerRecord)` as a conservative upper bound.
+The offset index has one entry per record, `ceil(totalItems / ItemsPerRecord)` when the byte limit closes none early, at most 4 bytes each but typically much less: the entries are compressed, so when records are similar in size each entry is closer to 1-2 bytes. Every 128 records also take a 17-byte directory entry, and a group of 128 records that includes one the byte limit closed early also stores their item counts, about 1 byte each. Use 4.2 bytes per record as a conservative upper bound, plus 4 per record in groups with counts.
 
 Choose `ItemsPerRecord` so the index fits within your I/O budget — for example, on storage where each I/O reads up to 256 KB, keep the index under 256 KB. You can check the actual index size of a written file via `Trailer().IndexSize`. See [Index Encoding](#index-encoding) for how the offset index is encoded.
 
@@ -46,7 +47,7 @@ Error handling omitted for clarity. All functions return errors.
 
 ```go
 w, _ := packfile.Create("output.pack", packfile.WriterOptions{
-    ItemsPerRecord:   128,                              // items per record (default 128)
+    ItemsPerRecord:   128,                              // most items per record
     Format:           packfile.Format(1),               // caller-assigned codec identifier
     NewRecordEncoder: func() packfile.RecordEncoder {   // per-worker encoder
         return zstd.NewCompressor()
@@ -182,8 +183,15 @@ package packfile
 
 // WriterOptions configures how the packfile is written.
 type WriterOptions struct {
-    // ItemsPerRecord is the number of items per record. 0 defaults to 128.
+    // ItemsPerRecord is the most items a record holds. 0 means no item limit
+    // and is valid only with MaxRecordBytes.
     ItemsPerRecord int
+
+    // MaxRecordBytes, when > 0, caps a record's item bytes before encoding:
+    // an item that would take the record past the cap starts the next
+    // record, so only a record of one item can exceed it. Invalid with
+    // ItemsPerRecord 1.
+    MaxRecordBytes int
 
     // Format is a caller-assigned identifier written to the trailer. Readers
     // dispatch on it to pick the matching decoder + content-hash extract.
@@ -247,9 +255,10 @@ func Create(path string, opts WriterOptions) (*Writer, error)
 // are concatenated into one item. An item may be zero bytes:
 // AppendItem([]byte{}) records an empty item, while AppendItem() (no
 // arguments) is a no-op. Parts are copied; the caller may reuse argument
-// slices after the call returns. Flushes a record when ItemsPerRecord
-// items accumulate. Returns ErrWriterClosed if the writer has been closed,
-// or an error if the concatenated item exceeds math.MaxUint32 bytes.
+// slices after the call returns. Flushes a record before an item that would
+// leave it over MaxRecordBytes, and when ItemsPerRecord items accumulate.
+// Returns ErrWriterClosed if the writer has been closed, or an error if the
+// concatenated item exceeds math.MaxUint32 bytes.
 func (w *Writer) AppendItem(parts ...[]byte) error
 
 // Finish flushes any partial record, writes index + optional app data + trailer,
@@ -390,12 +399,12 @@ Everything below is internal to the library. Callers don't need to know this —
 | Term | Meaning |
 |---|---|
 | **Item** | One opaque byte blob — the unit the caller writes and reads |
-| **Record** | A group of 1 to `ItemsPerRecord` items, stored as one contiguous blob on disk |
+| **Record** | A group of 1 to `ItemsPerRecord` items, within `MaxRecordBytes` raw bytes unless it holds one item, stored as one contiguous blob on disk |
 | **Payload** | The concatenated raw bytes of all items in a record, before the caller's encoder runs |
 | **Item size index** | FOR-encoded byte lengths appended to each multi-item record, so the reader can find individual items within the decoded payload |
 | **Offset index** | The file-level table at the end of the file mapping each record to its byte position on disk |
-| **Index group** | 128 consecutive records, indexed together: one FOR group of their byte sizes and one directory entry |
-| **FOR group** | A batch of integers (up to 128) encoded together using Frame of Reference compression |
+| **Index group** | 128 consecutive records, indexed together: one FOR group of their byte sizes, one of their item counts where needed, and one directory entry |
+| **FOR group** | A batch of integers (up to 128 in the offset index) encoded together using Frame of Reference compression |
 | **W** | Bit width needed to store the largest residual in a FOR group |
 | **min** | The smallest value in a FOR group, subtracted from all values before bit-packing |
 
@@ -432,7 +441,7 @@ FOR Group (ceil(N × W / 8) + 5 bytes):
   [00-XX]  residuals: N packed integers, W bits each
            residual[j] = value[j] - min
 
-  [XX]     W: uint8, bit width needed (bits.Len32 of max residual)
+  [XX]     W: uint8, bit width needed (bits.Len32 of max residual, at least 1)
 
   [XX+1 .. XX+4]  min: uint32 LE, minimum value in this group
 ```
@@ -444,16 +453,18 @@ Width and minimum are always the final 5 bytes. For example, a group where all v
 The offset index maps record numbers to byte positions. Rather than storing absolute offsets (which grow with file size), the index stores **record byte sizes**. These are encoded using FOR in **index groups** of 128 records, followed by a directory with one fixed-size entry per group:
 
 ```
-groups      one FOR group of record sizes per index group, back to back
+groups      per index group, back to back: [FOR group of item counts]? [FOR group of record sizes]
 directory   one 17-byte entry per index group:
               u64 firstByte    file offset of the group's first record
-              u32 end          where the group's FOR group ends within the groups (group 0 starts at 0)
+              u32 end          where the group's bytes end within the groups (group 0 starts at 0)
               u32 firstItem    position of the group's first item
-              u8  flags        no flag is defined yet; a set bit is corrupt
+              u8  flags        bit 0: the group has a count column; other bits are corrupt
 crc32c      u32 over the groups and the directory
 ```
 
 A file with 20KB records uses ~15-bit values whether the file is 500MB or 50GB, because the values are record sizes, not file offsets.
+
+A group's records hold `ItemsPerRecord` items each, except the pack's last, so their item counts follow from the directory. A group in which the byte limit closed a record early, or any group when `ItemsPerRecord` is 0, stores the counts in a second FOR group in front of the sizes and sets the flag. The last group also has counts when the group before it does, so that its own decode checks its first item against the item count. The sizes end the group's bytes and are decoded first, so one `end` per group locates both. A pack of one item per record never has counts.
 
 On open, the reader checks the CRC and the directory and decodes no group. A read decodes the index group of each record it touches into its workspace, which keeps it until a lookup moves to another group. Resolving item `i`:
 
@@ -469,9 +480,9 @@ The FOR group size for the offset index is 128 — a library constant, independe
 
 ### Records
 
-Each record contains up to `ItemsPerRecord` items.
+Each record contains up to `ItemsPerRecord` items (any number when it is 0), and under `MaxRecordBytes` at most that many raw bytes unless it holds one item.
 
-**Multi-item records** (`ItemsPerRecord > 1`): Items are concatenated into a payload. The payload is passed through the caller's `RecordEncoder` (or written verbatim in passthrough mode), then an **item size index** is appended — a single FOR group encoding each item's byte length — followed by a CRC32C. Both are library-managed and written verbatim regardless of the encoder.
+**Multi-item records** (`ItemsPerRecord` other than 1, even when a record holds one item): Items are concatenated into a payload. The payload is passed through the caller's `RecordEncoder` (or written verbatim in passthrough mode), then an **item size index** is appended (a single FOR group encoding each item's byte length), followed by a CRC32C. Both are library-managed and written verbatim regardless of the encoder.
 
 ```
 Multi-item record on-disk layout:
@@ -528,21 +539,23 @@ Record 1: items 2,3
 
 Record 2: item 4 only (partial last record)
   payload = 150 bytes → zstd ≈ 125 bytes
-  on disk: [zstd(payload) ≈ 125 B] ≈ 125 B
-  no item_sizes — single-item record
+  item_sizes = FOR([150]):
+    min=150, residuals=[0], W=1
+    ceil(1×1/8)=1B packed + 1B W + 4B min + 4B CRC = 10 bytes
+  on disk: [zstd(payload) ≈ 125 B][item_sizes (10 B)] ≈ 135 B
 
-Offset index stores record byte sizes: [191, 246, 125], one index group
-  FOR group: min=125, residuals=[66, 121, 0], W=7
+Offset index stores record byte sizes: [191, 246, 135], one index group
+  FOR group: min=135, residuals=[56, 111, 0], W=7
   ceil(3×7/8)=3B packed + 1B W + 4B min = 8 bytes
   + 17B directory entry + 4B CRC = 29 bytes
 
 File layout:
   0       Record 0  (≈ 191 B)
   191     Record 1  (≈ 246 B)
-  437     Record 2  (≈ 125 B)
-  562     Offset index (29 B)
-  591     Trailer (76 B)
-  667     EOF
+  437     Record 2  (≈ 135 B)
+  572     Offset index (29 B)
+  601     Trailer (76 B)
+  677     EOF
 ```
 
 **With `ItemsPerRecord=1`** (5 records, same items):
@@ -584,7 +597,7 @@ record_1_digest = SHA-256([4B len][item_128]...[4B len][item_255])
 finalHash = SHA-256(record_0_digest || record_1_digest || ...)
 ```
 
-The hash is independent of the record encoder — same items in the same order with the same `ItemsPerRecord` always produce the same hash regardless of which `RecordEncoder` is plugged in. Changing `ItemsPerRecord` changes the chunk boundaries and therefore the hash.
+The hash is independent of the record encoder: same items in the same order with the same record limits always produce the same hash regardless of which `RecordEncoder` is plugged in. Changing `ItemsPerRecord` or `MaxRecordBytes` changes the record boundaries and therefore the hash.
 
 **`ContentHashExtract`** lets the caller transform each item before it is fed to the hasher:
 
@@ -627,13 +640,13 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 
 ### Integrity
 
-**Index checksum:** CRC32C of the offset index's groups and directory, verified on open. Open also checks the directory: group ends ascend and fill the groups region, group first bytes ascend from 0 and stay within the records, first items step by `128 × itemsPerRecord`, and no flag is set. These keep each group's records inside the records region without decoding the other groups. A read checks a group when it decodes it: the sizes must sum to the next group's first byte, or to `indexBase` after the last group. A group that fails is `ErrCorrupt` for the reads that touch it.
+**Index checksum:** CRC32C of the offset index's groups and directory, verified on open. Open also checks the directory: group ends ascend and fill the groups region, group first bytes ascend from 0 and stay within the records, and first items start at 0 and give each group's records 1 to `itemsPerRecord` items each, exactly `itemsPerRecord` but for the pack's last record when the group has no counts. Only the count flag may be set, never with one item per record and always with no item limit, and the last group must have it when the group before it does. These keep each group's records inside the records region, and its items inside the item count, without decoding the other groups. A read checks a group when it decodes it: the sizes must sum to the next group's first byte, or to `indexBase` after the last group, and the counts, each 1 to `itemsPerRecord`, to the next group's first item. A group that fails is `ErrCorrupt` for the reads that touch it.
 
 **Trailer checksum:** CRC32C of `trailer[0:72]` protects all structural fields, including `appDataCRC`.
 
 **App data checksum:** CRC32C of the app-data section, stored in the trailer and verified on open, unconditionally. The section is opaque to the library, so nothing here can check it structurally, and a consumer's own decoder cannot tell plausible corruption from real data. An artifact built before this fails to open and gets rebuilt.
 
-**Trailer validation:** On open: flags against `knownFlags`, `itemsPerRecord > 0`, and `totalItems` against the directory, which lets only the pack's last record hold fewer than `itemsPerRecord` items.
+**Trailer validation:** On open: flags against `knownFlags`, and `totalItems` against the directory, which lets a record hold fewer than `itemsPerRecord` items only in a group with counts or as the pack's last record. `itemsPerRecord` 0 means no item limit.
 
 **Record checksum:** Each multi-item record carries a CRC32C in its last four bytes, verified on every record read, before the payload is passed to the decoder. `Verify` checks record CRCs only as a side effect of streaming the items for the content hash, and returns immediately when a file has no content hash; record CRCs are enforced on the read path, not by `Verify`. `WriterOptions.RecordChecksum` selects whether it covers the item size index alone or the whole record including the payload; the trailer records which. See [Records](#records).
 
@@ -643,7 +656,7 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 
 **Last group:** If `recordCount` is not a multiple of 128, the last index group holds the remaining records. Its FOR group encodes only their sizes, and its directory entry is like any other.
 
-**Last record:** If `totalItems` is not a multiple of `ItemsPerRecord`, the last record contains fewer items.
+**Last record:** The pack's last record may hold fewer than `ItemsPerRecord` items, and its group needs no count column for that.
 
 **Zero items:** Valid. No records. Index section is just 4 bytes (CRC32C of empty payload).
 
@@ -661,7 +674,7 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 
 **Index Groups on Demand.** Open decodes no index group and allocates nothing sized by the trailer's counts: a trailer claiming more groups than the directory holds fails one length check. Each read decodes the groups it touches into the workspace's group table, which holds one group at a time.
 
-**ReadItem.** Given `ReadItem(42, fn)` on a file with `ItemsPerRecord=128`:
+**ReadItem.** Given `ReadItem(42, fn)` on a file with `ItemsPerRecord=128` and no counts:
 
 1. A binary search over the directory's `firstItem` finds index group 0; decode that group's record sizes into the workspace
 2. A binary search over the decoded group's first items finds record 0, local position 42; look up its byte range (array access)
@@ -688,5 +701,7 @@ All of steps 2-5 are a single I/O operation. A `*record` workspace is borrowed f
 **Create.** Opens the file directly at `path` with `O_EXCL` (fails if exists, unless `Overwrite` is set). `Finish` writes remaining items, the offset index, app data, trailer, then fsyncs. `Close` without `Finish` removes the incomplete file.
 
 **Parallel Pipeline.** When either a `NewRecordEncoder` or `ContentHash` is set, the writer runs a streaming pipeline: `AppendItem` accumulates items → flush sends records to workers → `max(Concurrency, 1)` workers run the caller's encoder (one fresh `RecordEncoder` per worker via the factory) and compute the chunked SHA-256 digest in parallel → writer goroutine reorders by record ordinal and writes sequentially. With neither an encoder nor a content hash, records are written directly from the main goroutine and `Concurrency` is ignored.
+
+**Record Cut.** `AppendItem` closes the current record before an item that would take its raw bytes past `MaxRecordBytes`, and once it holds `ItemsPerRecord` items. The limit counts item bytes before the encoder; a zero-length item adds nothing, and an item larger than the limit is a record by itself. The writer keeps each record's item count, 4 bytes per record, for the index's count columns.
 
 **BytesPerSync.** Optional background writeback via `sync_file_range(SYNC_FILE_RANGE_WRITE)` on Linux (no-op elsewhere). Spreads I/O so the final fsync has less to flush.
