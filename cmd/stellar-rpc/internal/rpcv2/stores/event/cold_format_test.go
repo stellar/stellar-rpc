@@ -242,6 +242,26 @@ func TestLookup_UnseenKeyBehavior(t *testing.T) {
 	assert.Positive(t, collidedSlot, "some unseen keys collide into the slot space — that's why fingerprints exist")
 }
 
+// LookupBatch answers every key, present or not, as Lookup does, in its own
+// slot.
+func TestLookupBatch_MatchesLookup(t *testing.T) {
+	const n = 256
+	m, err := buildMPHF(context.Background(), buildIndex(t, n), filepath.Join(t.TempDir(), "index.hash"), testIndexSecret)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = m.Close() })
+
+	keys := make([]TermKey, 0, 2*n)
+	for i := range n {
+		keys = append(keys, keyFor(i), ComputeTermKey(fmt.Appendf(nil, "never-added-%d", i), FieldTopic0))
+	}
+	hits := m.LookupBatch(keys)
+	require.Len(t, hits, len(keys))
+	for i, hit := range hits {
+		slot, fp, err := m.Lookup(keys[i])
+		assert.Equal(t, slotLookup{slot: slot, fp: fp, err: err}, hit, "key %d", i)
+	}
+}
+
 func TestBuild_EmptyIndexSucceeds(t *testing.T) {
 	// Zero terms builds a valid empty index rather than erroring.
 	empty := NewBitmaps()
