@@ -94,25 +94,24 @@ func runnable(t *testing.T) *Daemon {
 	return d
 }
 
-func TestRunReturnsNilWhenContextIsDone(t *testing.T) {
-	for name, doneCtx := range map[string]func(t *testing.T) context.Context{
-		"canceled before Run": func(t *testing.T) context.Context {
-			ctx, cancel := context.WithCancel(t.Context())
-			cancel()
-			return ctx
-		},
-		"deadline expires while serving": func(t *testing.T) context.Context {
-			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-			t.Cleanup(cancel)
-			return ctx
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
-			d := runnable(t)
-			require.NoError(t, d.Run(doneCtx(t)))
-		})
-	}
+func TestRunReturnsNilWhenContextIsCanceled(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	d := runnable(t)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+	cancel()
+	require.NoError(t, <-done)
+}
+
+func TestRunReturnsNilWhenContextDeadlineExpires(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	d := runnable(t)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	require.NoError(t, d.Run(ctx))
 }
 
 func TestRunReturnsTheServerFailure(t *testing.T) {

@@ -2,6 +2,7 @@ package util
 
 import (
 	"fmt"
+	"os"
 	"reflect"
 	"runtime"
 	"runtime/debug"
@@ -10,30 +11,33 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 )
 
-// PanicGroup recovers a panic in a function it runs, logs the call stack at
-// level error, and hands the panic to onPanic as an error. The process keeps
-// running, so the caller can shut everything down in order instead of exiting
-// at once.
 type PanicGroup struct {
-	log     *log.Entry
-	onPanic func(error)
+	log                *log.Entry
+	logPanicsToStdErr  bool
+	exitProcessOnPanic bool
 }
 
-func NewPanicGroup(logger *log.Entry, onPanic func(error)) *PanicGroup {
-	return &PanicGroup{log: logger, onPanic: onPanic}
+func NewUnrecoverablePanicGroup() PanicGroup {
+	return PanicGroup{
+		logPanicsToStdErr:  true,
+		exitProcessOnPanic: true,
+	}
 }
 
-// Go runs fn on a new goroutine with the same panic handling as Run.
+func (pg *PanicGroup) Log(log *log.Entry) *PanicGroup {
+	return &PanicGroup{
+		log:                log,
+		logPanicsToStdErr:  pg.logPanicsToStdErr,
+		exitProcessOnPanic: pg.exitProcessOnPanic,
+	}
+}
+
+// Go spins a goroutine with clear upfront definitions for what should be done in the case of an internal panic.
 func (pg *PanicGroup) Go(fn func()) {
-	go pg.Run(fn)
-}
-
-// Run calls fn on the calling goroutine and handles a panic in it. A caller
-// that must do something after the panic was handled, such as marking a
-// WaitGroup done, wraps Run instead of fn.
-func (pg *PanicGroup) Run(fn func()) {
-	defer pg.recoverRoutine(fn)
-	fn()
+	go func() {
+		defer pg.recoverRoutine(fn)
+		fn()
+	}()
 }
 
 func (pg *PanicGroup) recoverRoutine(fn func()) {
@@ -41,19 +45,29 @@ func (pg *PanicGroup) recoverRoutine(fn func()) {
 	if recoverRes == nil {
 		return
 	}
+	cs := getPanicCallStack(recoverRes, fn)
+	if len(cs) == 0 {
+		return
+	}
 	if pg.log != nil {
-		for _, line := range getPanicCallStack(recoverRes, fn) {
-			pg.log.Error(line)
+		for _, line := range cs {
+			pg.log.Warn(line)
 		}
 	}
-	if pg.onPanic != nil {
-		pg.onPanic(fmt.Errorf("panic: %v", recoverRes))
+	if pg.logPanicsToStdErr {
+		for _, line := range cs {
+			fmt.Fprintln(os.Stderr, line)
+		}
+	}
+
+	if pg.exitProcessOnPanic {
+		os.Exit(1)
 	}
 }
 
 func getPanicCallStack(recoverRes any, fn func()) []string {
 	functionName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
-	return CallStack(recoverRes, functionName, "(*PanicGroup).Run", 10)
+	return CallStack(recoverRes, functionName, "(*PanicGroup).Go", 10)
 }
 
 // CallStack returns an array of strings representing the current call stack. The method is

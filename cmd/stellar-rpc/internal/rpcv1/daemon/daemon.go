@@ -58,13 +58,11 @@ type Daemon struct {
 	server              *http.Server
 	adminListener       net.Listener
 	adminServer         *http.Server
-	// cancelArchive ends every history archive request in flight. Without it,
-	// close would wait for the archive's own retries, which with an unreachable
-	// archive is minutes.
-	cancelArchive   context.CancelFunc
-	metricsRegistry *prometheus.Registry
-	dataStore       datastore.DataStore
-	dataStoreSchema datastore.DataStoreSchema
+	closeOnce           sync.Once
+	closeError          error
+	metricsRegistry     *prometheus.Registry
+	dataStore           datastore.DataStore
+	dataStoreSchema     datastore.DataStoreSchema
 }
 
 func (d *Daemon) GetDB() *sqlitedb.DB {
@@ -82,11 +80,9 @@ func (d *Daemon) GetEndpointAddrs() (net.TCPAddr, *net.TCPAddr) {
 	return *addr, adminAddr
 }
 
-// close releases every component the daemon holds and returns the errors it
-// met, each of them logged. It also runs when New fails part way through, so
-// each step skips a component New did not get to. New and Run are its only
-// callers, and only one of them runs on a given daemon.
-func (d *Daemon) close() error {
+// close releases every component the daemon holds. It also runs when New
+// fails part way through, so each step skips a component New did not get to.
+func (d *Daemon) close() {
 	shutdownCtx, shutdownRelease := context.WithTimeout(context.Background(), defaultShutdownGracePeriod)
 	defer shutdownRelease()
 	var closeErrors []error
@@ -105,9 +101,6 @@ func (d *Daemon) close() error {
 	// history archive is minutes.
 	if d.ingestService != nil {
 		d.ingestService.Stop()
-	}
-	if d.cancelArchive != nil {
-		d.cancelArchive()
 	}
 	if d.core != nil {
 		if err := d.core.Close(); err != nil {
@@ -137,7 +130,7 @@ func (d *Daemon) close() error {
 		}
 	}
 
-	return errors.Join(closeErrors...)
+	d.closeError = errors.Join(closeErrors...)
 }
 
 // shutdownServer drains server and closes listener. Both are nil when New
@@ -156,6 +149,11 @@ func shutdownServer(ctx context.Context, server *http.Server, listener net.Liste
 		errs = append(errs, err)
 	}
 	return errs
+}
+
+func (d *Daemon) Close() error {
+	d.closeOnce.Do(d.close)
+	return d.closeError
 }
 
 // newCaptiveCore creates a new captive core backend instance and returns it.
@@ -218,7 +216,7 @@ func New(ctx context.Context, cfg *config.Config, logger *supportlog.Entry) (*Da
 			// name the cause for callers that check errors.Is.
 			err = fmt.Errorf("startup interrupted: %w: %w", ctxErr, err)
 		}
-		return nil, errors.Join(err, d.close()) //nolint:contextcheck // close runs on its own timeout; ctx may be canceled
+		return nil, errors.Join(err, d.Close())
 	}
 	return d, nil
 }
@@ -228,12 +226,10 @@ func (d *Daemon) open(ctx context.Context, cfg *config.Config) error {
 	if d.core, err = newCaptiveCore(cfg, d.logger); err != nil {
 		return err
 	}
-	// Only ingestion uses the archive, and ingestion is stopped by close, so
-	// the archive follows close rather than ctx. A deadline on ctx must not
-	// surface as an ingestion failure during an otherwise clean shutdown.
-	archiveCtx, cancelArchive := context.WithCancel(context.Background())
-	d.cancelArchive = cancelArchive
-	historyArchive, err := createHistoryArchive(archiveCtx, cfg, d.logger) //nolint:contextcheck // see above
+	// Only ingestion uses the archive, and ingestion is stopped by Close, so
+	// the archive must not follow ctx: a deadline on ctx would surface as an
+	// ingestion failure during an otherwise clean shutdown.
+	historyArchive, err := createHistoryArchive(context.Background(), cfg, d.logger) //nolint:contextcheck // see above
 	if err != nil {
 		return err
 	}
@@ -255,7 +251,7 @@ func (d *Daemon) open(ctx context.Context, cfg *config.Config) error {
 		}
 	}
 	var ingestCfg ingest.Config
-	// Ingestion outlives startup and is stopped by close, not by ctx.
+	// Ingestion outlives startup and is stopped by Close, not by ctx.
 	d.ingestService, ingestCfg = createIngestService(cfg, d.logger, d, feewindows, historyArchive, rw)
 	if err := d.backfillAndFinalize(ctx, cfg, feewindows); err != nil {
 		return err
@@ -544,17 +540,13 @@ func (d *Daemon) initializeStorage(ctx context.Context, cfg *config.Config) (*fe
 	//
 	var initialSeq, currentSeq uint32
 	reader := sqlitedb.NewLedgerReader(d.db)
-	// buildMigrations opened a DB transaction that Apply and Commit roll back
-	// when they fail. A failure between them has to roll it back here, or the
-	// connection stays in the transaction past db.Close.
 	for l, err := range reader.ScanLedgers(readTxMetaCtx, ledgerSeqRange.First, ledgerSeqRange.Last) {
 		if err != nil {
-			return nil, errors.Join(fmt.Errorf("could not obtain txmeta cache from the database: %w", err),
-				d.db.Rollback())
+			return nil, fmt.Errorf("could not obtain txmeta cache from the database: %w", err)
 		}
 		var txMeta xdr.LedgerCloseMeta
 		if err := txMeta.UnmarshalBinary(l.Raw); err != nil {
-			return nil, errors.Join(fmt.Errorf("could not decode ledger %d: %w", l.Sequence, err), d.db.Rollback())
+			return nil, fmt.Errorf("could not decode ledger %d: %w", l.Sequence, err)
 		}
 		currentSeq = txMeta.LedgerSequence()
 		if initialSeq == 0 {
@@ -640,9 +632,7 @@ func (d *Daemon) buildMigrations(ctx context.Context, cfg *config.Config, retent
 
 	feeStatsRange, err := sqlitedb.GetMigrationLedgerRange(ctx, d.db, maxFeeRetentionWindow)
 	if err != nil {
-		// BuildMigrations opened a transaction that nothing else rolls back.
-		return sqlitedb.MultiMigration{}, errors.Join(
-			fmt.Errorf("could not get ledger range for fee stats: %w", err), d.db.Rollback())
+		return sqlitedb.MultiMigration{}, fmt.Errorf("could not get ledger range for fee stats: %w", err)
 	}
 
 	// By treating the fee window *as if* it's a migration, we can make the interface here clean.
@@ -654,22 +644,22 @@ func (d *Daemon) buildMigrations(ctx context.Context, cfg *config.Config, retent
 // component fails for good, then closes the daemon.
 //
 // A canceled ctx is a shutdown request, not a failure: Run returns nil, and
-// an error met while closing is logged rather than returned. Run returns the
+// an error from Close itself is logged rather than returned. Run returns the
 // first error from the JSON-RPC server, the admin server, or ingestion after
-// the daemon has closed. A failure that is pending at the moment of a
-// shutdown request is still returned.
+// Close has run. A failure that is pending at the moment of a shutdown
+// request is still returned.
 func (d *Daemon) Run(ctx context.Context) error {
-	// One slot per server, so a Serve goroutine never blocks on its send. A
-	// goroutine sends once: its Serve error, or the panic that replaced it.
+	// One slot per server, so a Serve goroutine never blocks on its send.
 	serverFailed := make(chan error, 2) //nolint:mnd
-	panicGroup := util.NewPanicGroup(d.logger, func(err error) {
-		serverFailed <- fmt.Errorf("HTTP server: %w", err)
-	})
+	panicGroup := util.NewUnrecoverablePanicGroup()
+	panicGroupWithLog := panicGroup.Log(d.logger)
 	var servers sync.WaitGroup
 	start := func(name string, server *http.Server, listener net.Listener) {
 		d.logger.WithField("addr", listener.Addr().String()).Info("starting " + name)
-		servers.Go(func() {
-			panicGroup.Run(func() { serve(serverFailed, name, server, listener) })
+		servers.Add(1)
+		panicGroupWithLog.Go(func() {
+			defer servers.Done()
+			serve(serverFailed, name, server, listener)
 		})
 	}
 	start("soroban JSON RPC server", d.server, d.listener)
@@ -683,15 +673,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	case err = <-serverFailed:
 	case err = <-d.ingestService.Failed():
 	}
-	// Every close error is logged inside close; Run reports the failure that
-	// ended serving. close runs on its own timeout because ctx may be canceled.
-	_ = d.close() //nolint:contextcheck // see above
-	// close ended every Serve and waited for the ingestion worker, so once the
+	d.Close()
+	// Close ended every Serve and waited for the ingestion worker, so once the
 	// server goroutines are done every failure is on its channel.
 	servers.Wait()
 	if err == nil {
-		// select picks at random among ready cases, so a failure that was
-		// pending next to the shutdown request may have lost the draw.
+		// select picks at random among ready cases, so it may have picked
+		// ctx.Done over a failure that was already pending.
 		select {
 		case err = <-serverFailed:
 		case err = <-d.ingestService.Failed():

@@ -13,7 +13,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/daemon"
 )
 
-// The daemon's close drains the HTTP servers for up to 10 seconds and then waits for
+// Close drains the HTTP servers for up to 10 seconds and then waits for
 // captive core to exit, so a stop that takes longer than this is a hang worth
 // failing on.
 const rpcv1StopTimeout = 60 * time.Second
