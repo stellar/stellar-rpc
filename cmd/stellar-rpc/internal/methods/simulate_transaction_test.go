@@ -292,7 +292,7 @@ func TestSimulateTransactionReturnsErrorWhenLatestLedgerMetaFails(t *testing.T) 
 }
 
 // TestSimulateTransactionReturnsErrorWhenLatestLedgerMetaNotFound verifies the !ok
-// path inside getLatestLedgerPreflightInfo: when GetLedger returns (_, false, nil),
+// path inside getLatestLedgerPreflightInfo: when WithLedgerRaw finds no ledger,
 // meaning the ledger meta is absent (e.g. trimmed from the retention window right
 // after GetLatestLedgerSequence returned), the handler must surface a descriptive
 // error and still echo back the latest ledger sequence.
@@ -414,7 +414,7 @@ func TestSimulateTransactionPassesFieldsFromV2LedgerMetaToPreflight(t *testing.T
 }
 
 // TestSimulateTransactionReturnsErrorForUnknownLedgerMetaVersion verifies the
-// default branch inside getLatestLedgerPreflightInfo: a LedgerCloseMeta whose
+// version check inside getLatestLedgerPreflightInfo: a LedgerCloseMeta whose
 // version is neither 1 nor 2 must produce a descriptive error and echo back the
 // latest ledger sequence.
 func TestSimulateTransactionReturnsErrorForUnknownLedgerMetaVersion(t *testing.T) {
@@ -422,7 +422,7 @@ func TestSimulateTransactionReturnsErrorForUnknownLedgerMetaVersion(t *testing.T
 	ledgerReader := &MockLedgerReader{}
 	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{}, xdr.DecodeOptions{})
 
-	// V0 is encodable but predates the versions the handler reads, so it reaches the default branch.
+	// V0 is encodable but predates the versions the handler reads, so it fails the version check.
 	unknownVersionMeta := xdr.LedgerCloseMeta{V: 0, V0: &xdr.LedgerCloseMetaV0{}}
 
 	ledgerReader.
