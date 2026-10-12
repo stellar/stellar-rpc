@@ -21,6 +21,8 @@ type latestEntry[T any] struct {
 func (m *latestMemo[T]) get(seq uint32, compute func() (T, error)) (T, error) {
 	if e := m.entry.Load(); e != nil && e.seq == seq {
 		return e.val, nil
+	} else if e != nil && seq < e.seq {
+		return compute() // older read view: never stored, so don't queue behind newer misses
 	}
 
 	m.mu.Lock()
