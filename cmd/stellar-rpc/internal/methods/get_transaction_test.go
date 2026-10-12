@@ -14,7 +14,8 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
@@ -23,8 +24,8 @@ func TestGetTransaction(t *testing.T) {
 	var (
 		ctx          = context.TODO()
 		log          = log.DefaultLogger
-		store        = db.NewMockTransactionStore("passphrase")
-		ledgerReader = db.NewMockLedgerReader(store)
+		store        = sqlitedb.NewMockTransactionStore("passphrase")
+		ledgerReader = sqlitedb.NewMockLedgerReader(store)
 	)
 	log.SetLevel(logrus.DebugLevel)
 
@@ -234,19 +235,10 @@ func txHash(acctSeq uint32) xdr.Hash {
 }
 
 func txEnvelope(acctSeq uint32) xdr.TransactionEnvelope {
-	envelope, err := xdr.NewTransactionEnvelope(xdr.EnvelopeTypeEnvelopeTypeTx, xdr.TransactionV1Envelope{
-		Tx: xdr.Transaction{
-			Fee:           1,
-			SeqNum:        xdr.SequenceNumber(acctSeq),
-			SourceAccount: xdr.MustMuxedAddress("MA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVAAAAAAAAAAAAAJLK"),
-			Ext: xdr.TransactionExt{
-				V:           1,
-				SorobanData: &xdr.SorobanTransactionData{},
-			},
-		},
-	})
-	if err != nil {
-		panic(err)
+	envelope := classicTxEnvelope(acctSeq)
+	envelope.V1.Tx.Ext = xdr.TransactionExt{
+		V:           1,
+		SorobanData: &xdr.SorobanTransactionData{},
 	}
 	return envelope
 }
@@ -267,22 +259,28 @@ func transactionResult(successful bool) xdr.TransactionResult {
 }
 
 func txMeta(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
-	envelope := txEnvelope(acctSeq)
-
-	txProcessing := []xdr.TransactionResultMetaV1{
-		{
-			TxApplyProcessing: xdr.TransactionMeta{
-				V:          3,
-				Operations: &[]xdr.OperationMeta{},
-				V3:         &xdr.TransactionMetaV3{},
-			},
-			Result: xdr.TransactionResultPair{
-				TransactionHash: txHash(acctSeq),
-				Result:          transactionResult(successful),
-			},
+	processing := xdr.TransactionResultMetaV1{
+		TxApplyProcessing: xdr.TransactionMeta{
+			V:          3,
+			Operations: &[]xdr.OperationMeta{},
+			// Soroban envelope with NO SorobanMeta: a Soroban tx charged
+			// but never executed (real on protocol 20-22 history). Pins
+			// the [[]] contractEventsXdr arity the view path must serve.
+			V3: &xdr.TransactionMetaV3{},
+		},
+		Result: xdr.TransactionResultPair{
+			TransactionHash: txHash(acctSeq),
+			Result:          transactionResult(successful),
 		},
 	}
+	return singleTxLedger(acctSeq+100, txEnvelope(acctSeq), processing)
+}
 
+// singleTxLedger assembles a one-transaction ledger from an envelope and its
+// apply-processing pair.
+func singleTxLedger(
+	ledgerSeq uint32, envelope xdr.TransactionEnvelope, processing xdr.TransactionResultMetaV1,
+) xdr.LedgerCloseMeta {
 	components := []xdr.TxSetComponent{
 		{
 			Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
@@ -300,12 +298,12 @@ func txMeta(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Header: xdr.LedgerHeader{
 					ScpValue: xdr.StellarValue{
-						CloseTime: xdr.TimePoint(ledgerCloseTime(acctSeq + 100)),
+						CloseTime: xdr.TimePoint(ledgerCloseTime(ledgerSeq)),
 					},
-					LedgerSeq: xdr.Uint32(acctSeq + 100),
+					LedgerSeq: xdr.Uint32(ledgerSeq),
 				},
 			},
-			TxProcessing: txProcessing,
+			TxProcessing: []xdr.TransactionResultMetaV1{processing},
 			TxSet: xdr.GeneralizedTransactionSet{
 				V: 1,
 				V1TxSet: &xdr.TransactionSetV1{
@@ -320,6 +318,90 @@ func txMeta(acctSeq uint32, successful bool) xdr.LedgerCloseMeta {
 			},
 		},
 	}
+}
+
+// classicTxEnvelope is txEnvelope without SorobanTransactionData — the
+// pre-Soroban shape that accompanies a legacy meta.
+func classicTxEnvelope(acctSeq uint32) xdr.TransactionEnvelope {
+	envelope, err := xdr.NewTransactionEnvelope(xdr.EnvelopeTypeEnvelopeTypeTx, xdr.TransactionV1Envelope{
+		Tx: xdr.Transaction{
+			Fee:           1,
+			SeqNum:        xdr.SequenceNumber(acctSeq),
+			SourceAccount: xdr.MustMuxedAddress("MA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVAAAAAAAAAAAAAJLK"),
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return envelope
+}
+
+// txMetaV0 is a one-transaction ledger whose TxApplyProcessing is legacy
+// TransactionMeta V0, as on early pubnet history.
+func txMetaV0(acctSeq uint32) (xdr.LedgerCloseMeta, xdr.Hash) {
+	envelope := classicTxEnvelope(acctSeq)
+	hash, err := network.HashTransactionInEnvelope(envelope, NetworkPassphrase)
+	if err != nil {
+		panic(err)
+	}
+	processing := xdr.TransactionResultMetaV1{
+		TxApplyProcessing: xdr.TransactionMeta{V: 0, Operations: &[]xdr.OperationMeta{}},
+		Result: xdr.TransactionResultPair{
+			TransactionHash: hash,
+			Result:          transactionResult(true),
+		},
+	}
+	return singleTxLedger(acctSeq+100, envelope, processing), hash
+}
+
+// TestTransactionsWithLegacyV0Meta pins an intentional divergence from the
+// deleted decode-path extraction: TransactionMeta V0 (early pubnet history) is
+// served as an event-free transaction, where GetTransactionEvents errored.
+func TestTransactionsWithLegacyV0Meta(t *testing.T) {
+	testDB := NewTestDB(t)
+	lcm, hash := txMetaV0(1) // ledger 101
+	write, err := sqlitedb.NewReadWriter(
+		log.DefaultLogger, testDB, host.MakeNoOpDaemon(), 100, NetworkPassphrase,
+	).NewTx(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, write.LedgerWriter().InsertLedger(lcm))
+	require.NoError(t, write.TransactionWriter().InsertTransactions(lcm))
+	require.NoError(t, write.Commit(lcm, nil))
+
+	eventFree := protocol.Events{ContractEventsXDR: [][]string{}, TransactionEventsXDR: []string{}}
+	expectedMetaXDR, err := xdr.MarshalBase64(lcm.V2.TxProcessing[0].TxApplyProcessing)
+	require.NoError(t, err)
+
+	requireServedEmpty := func(status, metaXDR string, diagnosticEventsXDR []string, events protocol.Events) {
+		require.Equal(t, protocol.TransactionStatusSuccess, status)
+		require.Equal(t, expectedMetaXDR, metaXDR)
+		require.Equal(t, []string{}, diagnosticEventsXDR)
+		require.Equal(t, eventFree, events)
+	}
+
+	t.Run("getTransaction", func(t *testing.T) {
+		reader := sqlitedb.NewTransactionReader(log.DefaultLogger, testDB, NetworkPassphrase)
+		tx, err := GetTransaction(t.Context(), log.DefaultLogger, reader,
+			sqlitedb.NewLedgerReader(testDB),
+			protocol.GetTransactionRequest{Hash: hex.EncodeToString(hash[:])})
+		require.NoError(t, err)
+		requireServedEmpty(tx.Status, tx.ResultMetaXDR, tx.DiagnosticEventsXDR, tx.Events)
+	})
+
+	t.Run("getTransactions", func(t *testing.T) {
+		handler := transactionsRPCHandler{
+			ledgerReader:      sqlitedb.NewLedgerReader(testDB),
+			maxLimit:          100,
+			defaultLimit:      10,
+			networkPassphrase: NetworkPassphrase,
+		}
+		response, err := handler.getTransactionsByLedgerSequence(t.Context(),
+			protocol.GetTransactionsRequest{StartLedger: 101})
+		require.NoError(t, err)
+		require.Len(t, response.Transactions, 1)
+		got := response.Transactions[0]
+		requireServedEmpty(got.Status, got.ResultMetaXDR, got.DiagnosticEventsXDR, got.Events)
+	})
 }
 
 func txMetaWithEvents(acctSeq uint32, successful bool) (xdr.LedgerCloseMeta, xdr.ContractEvent) {
@@ -405,8 +487,8 @@ func emptyTxMeta(acctSeq uint32) xdr.LedgerCloseMeta {
 }
 
 func TestGetTransaction_JSONFormat(t *testing.T) {
-	mockDBReader := db.NewMockTransactionStore(NetworkPassphrase)
-	mockLedgerReader := db.NewMockLedgerReader(mockDBReader)
+	mockDBReader := sqlitedb.NewMockTransactionStore(NetworkPassphrase)
+	mockLedgerReader := sqlitedb.NewMockLedgerReader(mockDBReader)
 	var lookupHash string
 	var lookupEnv xdr.TransactionEnvelope
 	for i := 1; i <= 3; i++ {
@@ -435,7 +517,7 @@ func TestGetTransaction_JSONFormat(t *testing.T) {
 	jsBytes, err := json.Marshal(txResp)
 	require.NoError(t, err)
 
-	var tx map[string]interface{}
+	var tx map[string]any
 	require.NoError(t, json.Unmarshal(jsBytes, &tx))
 
 	require.Nilf(t, tx["envelopeXdr"], "field: 'envelopeXdr'")
@@ -450,14 +532,14 @@ func TestGetTransaction_JSONFormat(t *testing.T) {
 	envJs, err := xdr2json.ConvertInterface(lookupEnv)
 	require.NoError(t, err)
 
-	var envelope map[string]interface{}
+	var envelope map[string]any
 	require.NoError(t, json.Unmarshal(envJs, &envelope))
 	require.Equal(t, envelope, tx["envelopeJson"])
 }
 
 func BenchmarkJSONTransactions(b *testing.B) {
-	mockDBReader := db.NewMockTransactionStore(NetworkPassphrase)
-	mockLedgerReader := db.NewMockLedgerReader(mockDBReader)
+	mockDBReader := sqlitedb.NewMockTransactionStore(NetworkPassphrase)
+	mockLedgerReader := sqlitedb.NewMockLedgerReader(mockDBReader)
 
 	var lookupHash string
 	var lookupEnv xdr.TransactionEnvelope

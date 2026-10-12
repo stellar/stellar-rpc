@@ -8,8 +8,6 @@ import (
 	"runtime/debug"
 	"strings"
 
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/stellar/go-stellar-sdk/support/log"
 )
 
@@ -17,7 +15,6 @@ type PanicGroup struct {
 	log                *log.Entry
 	logPanicsToStdErr  bool
 	exitProcessOnPanic bool
-	panicsCounter      prometheus.Counter
 }
 
 func NewUnrecoverablePanicGroup() PanicGroup {
@@ -27,28 +24,11 @@ func NewUnrecoverablePanicGroup() PanicGroup {
 	}
 }
 
-func NewRecoverablePanicGroup() PanicGroup {
-	return PanicGroup{
-		logPanicsToStdErr:  true,
-		exitProcessOnPanic: false,
-	}
-}
-
 func (pg *PanicGroup) Log(log *log.Entry) *PanicGroup {
 	return &PanicGroup{
 		log:                log,
 		logPanicsToStdErr:  pg.logPanicsToStdErr,
 		exitProcessOnPanic: pg.exitProcessOnPanic,
-		panicsCounter:      pg.panicsCounter,
-	}
-}
-
-func (pg *PanicGroup) Counter(counter prometheus.Counter) *PanicGroup {
-	return &PanicGroup{
-		log:                pg.log,
-		logPanicsToStdErr:  pg.logPanicsToStdErr,
-		exitProcessOnPanic: pg.exitProcessOnPanic,
-		panicsCounter:      counter,
 	}
 }
 
@@ -80,9 +60,6 @@ func (pg *PanicGroup) recoverRoutine(fn func()) {
 		}
 	}
 
-	if pg.panicsCounter != nil {
-		pg.panicsCounter.Inc()
-	}
 	if pg.exitProcessOnPanic {
 		os.Exit(1)
 	}

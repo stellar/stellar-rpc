@@ -4,32 +4,35 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
+// getProtocolVersion reads the latest ledger's protocol version off its raw header; no full LCM decode.
 func getProtocolVersion(
 	ctx context.Context,
-	ledgerReader db.LedgerReader,
+	ledgerReader store.LedgerReader,
 ) (uint32, error) {
 	latestLedger, err := ledgerReader.GetLatestLedgerSequence(ctx)
 	if err != nil {
 		return 0, err
 	}
 
-	// obtain bucket size
-	closeMeta, ok, err := ledgerReader.GetLedger(ctx, latestLedger)
+	var protocolVersion uint32
+	found, err := store.WithLedgerRaw(ctx, ledgerReader, latestLedger, func(raw []byte) error {
+		header, err := xdr.LedgerCloseMetaView(raw).LedgerHeader()
+		if err != nil {
+			return err
+		}
+		protocolVersion, err = xdr.Try(func() uint32 { return header.MustHeader().MustLedgerVersion().MustValue() })
+		return err
+	})
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("latest ledger (%d) header: %w", latestLedger, err)
 	}
-	if !ok {
+	if !found {
 		return 0, fmt.Errorf("missing meta for latest ledger (%d)", latestLedger)
 	}
-	switch closeMeta.V {
-	case 1:
-		return uint32(closeMeta.V1.LedgerHeader.Header.LedgerVersion), nil
-	case 2:
-		return uint32(closeMeta.V2.LedgerHeader.Header.LedgerVersion), nil
-	default:
-		return 0, fmt.Errorf("latest ledger (%d) meta has unexpected version (%d)", latestLedger, closeMeta.V)
-	}
+	return protocolVersion, nil
 }

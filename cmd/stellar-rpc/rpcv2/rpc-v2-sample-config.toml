@@ -1,0 +1,259 @@
+# =============================================================================
+# stellar-rpc-v2 sample configuration
+# =============================================================================
+#
+#   stellar-rpc-v2 --config rpc-v2.toml
+#   stellar-rpc-v2 --config rpc-v2.toml --print-runtime-config
+#
+# The second form prints the resolved configuration (this file, then flags,
+# then defaults) and exits.
+#
+# Unknown keys are a startup error.
+#
+# Every key can also be set with a flag named after its TOML path, such as
+# --service.methods.getLedgers.queue_limit=500. There are no environment
+# variables. A flag overrides this file, but a more specific setting always
+# wins: --service.methods.queue_limit does not override a queue_limit set in a
+# method's own table. A map flag such as
+# --backfill.datastore.params=region=us-east-1 sets one entry, and a list flag
+# replaces the whole list.
+#
+# Durations are strings such as "10s" or "500ms". A bare integer is read as
+# nanoseconds, and durations under 1ms are rejected.
+#
+# Values shown are the defaults unless a comment says otherwise.
+
+# -----------------------------------------------------------------------------
+# [storage]: where the daemon's data lives
+# -----------------------------------------------------------------------------
+[storage]
+# Required. The stores below and captive core's working directory default to
+# directories under it.
+default_data_dir = "/var/stellar/rpc-v2"
+# Per-store paths, for putting stores on different disks. Relative paths
+# resolve against the working directory, and two stores cannot share a path.
+# events and events_index move independently. The indexes are small and read
+# randomly, so putting events_index on fast local disk speeds up filtered
+# event queries over wide ranges.
+#catalog = ""        # {default_data_dir}/catalog/rocksdb  (catalog RocksDB)
+#ledgers = ""        # {default_data_dir}/ledgers          (ledger packs)
+#events = ""         # {default_data_dir}/events/data      (event packs)
+#events_index = ""   # {default_data_dir}/events/index     (event indexes)
+#txhash_raw = ""     # {default_data_dir}/txhash/raw       (unindexed tx hashes)
+#txhash_index = ""   # {default_data_dir}/txhash/index     (txhash indexes)
+#hot = ""            # {default_data_dir}/hot              (recent chunks)
+
+# -----------------------------------------------------------------------------
+# [retention]: how much history this daemon keeps
+# -----------------------------------------------------------------------------
+[retention]
+# The earliest ledger this daemon will store: "genesis", "now" (the start of
+# the chunk holding the network tip at first start), or the first ledger of a
+# chunk as a quoted number. Chunks are 10,000 ledgers starting at ledger 2, so
+# the numbers are "2", "10002", "20002" and so on. The value is fixed at first
+# start, and changing it later fails startup until the data directory is
+# wiped ("now" never fails a restart; it keeps the fixed value). Set it here
+# rather than with a flag, so every restart sees the same value.
+earliest_ledger = "genesis"
+# Keep the most recent N complete chunks; 0 keeps everything. With both keys
+# set, the later of the two starting points wins.
+retention_chunks = 0
+
+# -----------------------------------------------------------------------------
+# [service]: JSON-RPC serving
+# -----------------------------------------------------------------------------
+[service]
+# Address the JSON-RPC server listens on.
+endpoint = "localhost:8000"
+# pprof and Prometheus metrics over plain HTTP. Empty disables it. Never expose
+# it to the internet.
+admin_endpoint = ""
+# Server-wide limits, applied to every request in addition to the per-method
+# limits below.
+max_concurrent_requests = 5000              # in-flight requests, all methods
+max_request_execution_duration = "25s"      # longer requests fail with HTTP 504
+request_execution_warning_threshold = "5s"  # longer requests log a warning
+
+# Sizes, in ledgers, of the two getFeeStats windows. Each must be 1 to 1000.
+[service.fee_stats]
+classic_fee_window_ledgers = 10
+soroban_inclusion_fee_window_ledgers = 50
+
+# Per-method limits. Every method's table has:
+#   queue_limit             Maximum outstanding requests for the method.
+#   max_execution_duration  Per-request time budget. A request that runs past
+#                           it fails with -32001.
+# The two keys directly under [service.methods] set a default for every
+# method. A method's own value wins over that default, which wins over the
+# built-in default shown in each method's table.
+[service.methods]
+#queue_limit = 200               # unset by default
+#max_execution_duration = "8s"   # unset by default
+
+[service.methods.getHealth]
+#queue_limit = 1000
+#max_execution_duration = "5s"
+# Report unhealthy when the latest ledger closed longer ago than this.
+#max_healthy_ledger_latency = "30s"
+
+[service.methods.getNetwork]
+#queue_limit = 1000
+#max_execution_duration = "5s"
+# Friendbot URL returned by getNetwork. Unset by default, which omits it.
+#friendbot_url = "https://friendbot.example.org"
+
+[service.methods.getVersionInfo]
+#queue_limit = 1000
+#max_execution_duration = "5s"
+
+[service.methods.getLatestLedger]
+#queue_limit = 1000
+#max_execution_duration = "5s"
+
+[service.methods.getTransaction]
+#queue_limit = 1000
+#max_execution_duration = "5s"
+
+# The four paginated methods also have:
+#   max_items_per_response      Largest page a client may request.
+#   default_items_per_response  Page size when the request sets no limit.
+[service.methods.getTransactions]
+#queue_limit = 1000
+#max_execution_duration = "5s"
+#max_items_per_response = 200
+#default_items_per_response = 50
+
+# Lower than v1's 200 and 50 because each item is a whole ledger's metadata.
+[service.methods.getLedgers]
+#queue_limit = 1000
+#max_execution_duration = "10s"
+#max_items_per_response = 20
+#default_items_per_response = 5
+
+[service.methods.getEvents]
+#queue_limit = 1000
+#max_execution_duration = "10s"
+#max_items_per_response = 10000
+#default_items_per_response = 100
+
+# queryEvents is new in v2, and its max_items_per_response cannot exceed 1000.
+# term_budget caps the index terms one request may use: each distinct contract
+# ID, event type, or topic value in a given position counts once. Requests
+# over it fail with invalid_params.
+[service.methods.queryEvents]
+#queue_limit = 1000
+#max_execution_duration = "10s"
+#max_items_per_response = 1000
+#default_items_per_response = 100
+#term_budget = 15
+
+[service.methods.getFeeStats]
+#queue_limit = 100
+#max_execution_duration = "5s"
+
+# These three depend on captive core, reached through the ports in [ingestion].
+[service.methods.sendTransaction]
+#queue_limit = 500
+#max_execution_duration = "15s"
+
+[service.methods.simulateTransaction]
+#queue_limit = 100
+#max_execution_duration = "15s"
+
+[service.methods.getLedgerEntries]
+#queue_limit = 1000
+#max_execution_duration = "5s"
+
+# The simulateTransaction worker pool.
+[service.preflight]
+# Concurrent preflights, and how many more may wait for a worker before new
+# requests are rejected. Both default to the CPU count.
+#worker_count = 8
+#worker_queue_size = 8
+# Detailed diagnostics in preflight errors. The default is true, but they are
+# expensive to produce, so this sample turns them off.
+enable_debug = false
+
+# -----------------------------------------------------------------------------
+# [backfill]: downloading history into local storage
+# -----------------------------------------------------------------------------
+[backfill]
+# Chunks backfilled in parallel. Default: GOMAXPROCS.
+#workers = 8
+# Retries for a failed chunk before the daemon stops; 0 means none.
+max_retries = 3
+
+# An example lake for backfill to download history from. type is "GCS", "S3"
+# or "Filesystem". Without this block (the default) or with type = "",
+# backfill replays history through captive core from
+# [ingestion].history_archive_urls, which is much slower. When the lake has a
+# manifest (.config.json), startup checks that it is for the same network as
+# the captive-core file.
+[backfill.datastore]
+type = "GCS"
+
+# GCS and S3 need destination_bucket_path. S3 also needs region and accepts
+# endpoint_url. Filesystem needs destination_path.
+[backfill.datastore.params]
+destination_bucket_path = "my-bucket/path/to/ledgers"
+
+# The lake's file layout. Unset by default, which reads it from the lake's
+# manifest. A lake without a manifest needs both keys.
+[backfill.datastore.schema]
+#ledgers_per_file = 1
+#files_per_partition = 64000
+
+# Download tuning for the lake. The buffer and download settings apply per
+# chunk, so totals scale with [backfill].workers.
+[backfill.bsb]
+# Prefetch budget in bytes. This is what bounds memory.
+#buffer_bytes = 33_554_432  # 32 MiB
+# Concurrent downloads. At most buffer_size.
+#num_workers = 25
+# Prefetch depth in lake files (not ledgers).
+#buffer_size = 5000
+# Retries for one file download (0 means none), and the wait between them.
+# [backfill].max_retries is separate: it retries a whole chunk.
+max_retries = 3
+retry_wait = "5s"
+
+# -----------------------------------------------------------------------------
+# [ingestion]: live ingestion through captive stellar-core
+# -----------------------------------------------------------------------------
+[ingestion]
+# Required. The captive-core config file. It must set NETWORK_PASSPHRASE and
+# a quorum set. The daemon takes the network passphrase from this file; v2 has
+# no network or network_passphrase key.
+captive_core_config = "/etc/stellar/captive-core.toml"
+# Required. History archive URLs, also the backfill source when there is no
+# lake.
+history_archive_urls = ["https://history.stellar.org/prd/core-live/core_live_001"]
+# Default: stellar-core on PATH.
+#stellar_core_binary_path = "/usr/local/bin/stellar-core"
+# Captive core's working directory. Default: {default_data_dir}/captive-core.
+#captive_core_storage_path = ""
+# Captive core's two HTTP servers. sendTransaction submits through the admin
+# port, and getLedgerEntries and simulateTransaction read ledger entries
+# through the query port. The ports must be free and different. These keys
+# override HTTP_PORT, HTTP_QUERY_PORT, QUERY_THREAD_POOL_SIZE and
+# QUERY_SNAPSHOT_LEDGERS in the captive-core file, with a warning.
+core_http_port = 11626
+core_http_query_port = 11628
+# Where sendTransaction submits. Default: http://localhost:{core_http_port}.
+# Set it only when core's admin server is on another host.
+#core_url = "http://localhost:11626"
+# Timeout for each request to either server.
+core_request_timeout = "2s"
+# Query server threads (default: the CPU count), and how many recent ledgers
+# it keeps snapshots of.
+#core_http_query_thread_pool_size = 8
+core_http_query_snapshot_ledgers = 4
+
+# -----------------------------------------------------------------------------
+# [logging]
+# -----------------------------------------------------------------------------
+[logging]
+# "debug", "info", "warn" or "error".
+level = "info"
+# "text" or "json".
+format = "text"
