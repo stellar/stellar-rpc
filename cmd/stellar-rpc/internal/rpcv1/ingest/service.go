@@ -108,7 +108,7 @@ func (s *Service) Start(cfg Config) {
 	s.wg.Add(1)
 	// A panic in the worker is a terminal failure like any other: it is
 	// reported on Failed so the daemon closes captive core before exiting.
-	panicGroup := util.NewRecoverablePanicGroup(cfg.Logger, func(err error) {
+	panicGroup := util.NewPanicGroup(cfg.Logger, func(err error) {
 		s.failed <- fmt.Errorf("ingestion worker: %w", err)
 	})
 	// wg.Done runs after the panic handler, so Wait returning means the

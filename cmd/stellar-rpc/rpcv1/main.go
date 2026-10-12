@@ -83,7 +83,7 @@ func runDaemon(cfg *config.Config, logger *supportlog.Entry) error {
 	d, err := daemon.New(ctx, cfg, logger)
 	if err != nil {
 		if ctx.Err() != nil {
-			logger.WithError(err).Info("shutdown requested during startup")
+			logger.WithError(err).Warn("shutdown requested during startup")
 			return nil
 		}
 		return err

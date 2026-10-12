@@ -2,7 +2,6 @@ package util
 
 import (
 	"io"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -34,9 +33,7 @@ func makeTestLogCounter() *TestLogsCounter {
 	}
 	out.entry.AddHook(out)
 	out.entry.SetLevel(logrus.DebugLevel)
-	// The hook counts the lines. Keep them off os.Stderr, which
-	// TestPanicGroupStdErr swaps out while an earlier test's goroutine may
-	// still be logging.
+	// The hook counts the lines; keep them out of the test output.
 	out.entry.SetOutput(io.Discard)
 	return out
 }
@@ -91,8 +88,7 @@ func TestPanicGroupLog(t *testing.T) {
 	// wait until we get all the log entries.
 	waitStarted := time.Now()
 	for time.Since(waitStarted) < 5*time.Second {
-		warningCount := logCounter.GetLevel(3)
-		if warningCount >= 9 {
+		if logCounter.GetLevel(int(logrus.ErrorLevel)) >= 9 {
 			return
 		}
 		time.Sleep(1 * time.Millisecond)
@@ -100,10 +96,10 @@ func TestPanicGroupLog(t *testing.T) {
 	t.FailNow()
 }
 
-func TestRecoverablePanicGroupReportsThePanic(t *testing.T) {
+func TestPanicGroupReportsThePanic(t *testing.T) {
 	logCounter := makeTestLogCounter()
 	failed := make(chan error, 1)
-	panicGroup := NewRecoverablePanicGroup(logCounter.Entry(), func(err error) { failed <- err })
+	panicGroup := NewPanicGroup(logCounter.Entry(), func(err error) { failed <- err })
 	panicGroup.Go(IndirectPanicingFunctionC)
 
 	select {
@@ -114,32 +110,4 @@ func TestRecoverablePanicGroupReportsThePanic(t *testing.T) {
 		t.Fatal("the panic was not reported")
 	}
 	require.GreaterOrEqual(t, logCounter.GetLevel(int(logrus.ErrorLevel)), 2, "the call stack was not logged at error")
-}
-
-func TestPanicGroupStdErr(t *testing.T) {
-	tmpFile, err := os.CreateTemp(t.TempDir(), "TestPanicGroupStdErr")
-	require.NoError(t, err)
-	defaultStdErr := os.Stderr
-	os.Stderr = tmpFile
-	defer func() {
-		os.Stderr = defaultStdErr
-		tmpFile.Close()
-		os.Remove(tmpFile.Name())
-	}()
-
-	panicGroup := PanicGroup{
-		logPanicsToStdErr: true,
-	}
-	panicGroup.Go(IndirectPanicingFunctionC)
-	// wait until we get all the log entries.
-	waitStarted := time.Now()
-	for time.Since(waitStarted) < 5*time.Second {
-		outErrBytes, err := os.ReadFile(tmpFile.Name())
-		require.NoError(t, err)
-		if len(outErrBytes) >= 100 {
-			return
-		}
-		time.Sleep(1 * time.Millisecond)
-	}
-	t.FailNow()
 }

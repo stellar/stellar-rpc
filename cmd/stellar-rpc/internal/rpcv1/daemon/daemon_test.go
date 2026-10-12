@@ -94,34 +94,50 @@ func runnable(t *testing.T) *Daemon {
 	return d
 }
 
-func TestRunReturnsNilWhenContextIsCanceled(t *testing.T) {
-	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
-	d := runnable(t)
-
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- d.Run(ctx) }()
-	cancel()
-	require.NoError(t, <-done)
-}
-
-func TestRunReturnsNilWhenContextDeadlineExpires(t *testing.T) {
-	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
-	d := runnable(t)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-	require.NoError(t, d.Run(ctx))
+func TestRunReturnsNilWhenContextIsDone(t *testing.T) {
+	for name, doneCtx := range map[string]func(t *testing.T) context.Context{
+		"canceled before Run": func(t *testing.T) context.Context {
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			return ctx
+		},
+		"deadline expires while serving": func(t *testing.T) context.Context {
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			t.Cleanup(cancel)
+			return ctx
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+			d := runnable(t)
+			require.NoError(t, d.Run(doneCtx(t)))
+		})
+	}
 }
 
 func TestRunReturnsTheServerFailure(t *testing.T) {
-	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
-	d := runnable(t)
+	for name, tc := range map[string]struct {
+		listener func(d *Daemon) net.Listener
+		want     string
+	}{
+		"JSON-RPC server": {
+			listener: func(d *Daemon) net.Listener { return d.listener },
+			want:     "soroban JSON RPC server encountered fatal error",
+		},
+		"admin server": {
+			listener: func(d *Daemon) net.Listener { return d.adminListener },
+			want:     "soroban admin server encountered fatal error",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+			d := runnable(t)
 
-	// Serve on a closed listener fails at once.
-	require.NoError(t, d.listener.Close())
-	err := d.Run(t.Context())
-	require.ErrorContains(t, err, "soroban JSON RPC server encountered fatal error")
+			// Serve on a closed listener fails at once.
+			require.NoError(t, tc.listener(d).Close())
+			require.ErrorContains(t, d.Run(t.Context()), tc.want)
+		})
+	}
 }
 
 func TestRunReturnsAFailurePendingNextToACancel(t *testing.T) {

@@ -13,7 +13,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/daemon"
 )
 
-// Close drains the HTTP servers for up to 10 seconds and then waits for
+// The daemon's close drains the HTTP servers for up to 10 seconds and then waits for
 // captive core to exit, so a stop that takes longer than this is a hang worth
 // failing on.
 const rpcv1StopTimeout = 60 * time.Second
@@ -56,7 +56,7 @@ func (d *rpcv1Daemon) start() {
 			// A close during startup is a shutdown request, not a failure,
 			// the same way the rpcv1 main treats it.
 			if ctx.Err() != nil {
-				d.log.WithError(err).Info("shutdown requested during startup")
+				d.log.WithError(err).Warn("shutdown requested during startup")
 				return nil //nolint:nilerr // a canceled startup is a shutdown request, not a failure
 			}
 			return err

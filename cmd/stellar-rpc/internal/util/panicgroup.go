@@ -2,7 +2,6 @@ package util
 
 import (
 	"fmt"
-	"os"
 	"reflect"
 	"runtime"
 	"runtime/debug"
@@ -11,44 +10,27 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 )
 
+// PanicGroup recovers a panic in a function it runs, logs the call stack at
+// level error, and hands the panic to onPanic as an error. The process keeps
+// running, so the caller can shut everything down in order instead of exiting
+// at once.
 type PanicGroup struct {
-	log                *log.Entry
-	logPanicsToStdErr  bool
-	exitProcessOnPanic bool
-	onPanic            func(error)
+	log     *log.Entry
+	onPanic func(error)
 }
 
-func NewUnrecoverablePanicGroup() PanicGroup {
-	return PanicGroup{
-		logPanicsToStdErr:  true,
-		exitProcessOnPanic: true,
-	}
-}
-
-// NewRecoverablePanicGroup logs a panic in one of its goroutines with the
-// call stack, then hands it to onPanic as an error. The process keeps running,
-// so the caller can shut everything down in order instead of exiting at once.
-func NewRecoverablePanicGroup(logger *log.Entry, onPanic func(error)) *PanicGroup {
+func NewPanicGroup(logger *log.Entry, onPanic func(error)) *PanicGroup {
 	return &PanicGroup{log: logger, onPanic: onPanic}
 }
 
-func (pg *PanicGroup) Log(log *log.Entry) *PanicGroup {
-	return &PanicGroup{
-		log:                log,
-		logPanicsToStdErr:  pg.logPanicsToStdErr,
-		exitProcessOnPanic: pg.exitProcessOnPanic,
-		onPanic:            pg.onPanic,
-	}
-}
-
-// Go spins a goroutine with clear upfront definitions for what should be done in the case of an internal panic.
+// Go runs fn on a new goroutine with the same panic handling as Run.
 func (pg *PanicGroup) Go(fn func()) {
 	go pg.Run(fn)
 }
 
-// Run calls fn on the calling goroutine with the same panic handling as Go.
-// A caller that must do something after the panic was handled, such as
-// marking a WaitGroup done, wraps Run instead of fn.
+// Run calls fn on the calling goroutine and handles a panic in it. A caller
+// that must do something after the panic was handled, such as marking a
+// WaitGroup done, wraps Run instead of fn.
 func (pg *PanicGroup) Run(fn func()) {
 	defer pg.recoverRoutine(fn)
 	fn()
@@ -59,33 +41,13 @@ func (pg *PanicGroup) recoverRoutine(fn func()) {
 	if recoverRes == nil {
 		return
 	}
-	cs := getPanicCallStack(recoverRes, fn)
-	if len(cs) == 0 {
-		return
-	}
 	if pg.log != nil {
-		// A recoverable panic has no stderr copy, so its stack must survive
-		// a logger set to level error.
-		logLine := pg.log.Warn
-		if pg.onPanic != nil {
-			logLine = pg.log.Error
-		}
-		for _, line := range cs {
-			logLine(line)
-		}
-	}
-	if pg.logPanicsToStdErr {
-		for _, line := range cs {
-			fmt.Fprintln(os.Stderr, line)
+		for _, line := range getPanicCallStack(recoverRes, fn) {
+			pg.log.Error(line)
 		}
 	}
 	if pg.onPanic != nil {
 		pg.onPanic(fmt.Errorf("panic: %v", recoverRes))
-		return
-	}
-
-	if pg.exitProcessOnPanic {
-		os.Exit(1)
 	}
 }
 

@@ -58,8 +58,6 @@ type Daemon struct {
 	server              *http.Server
 	adminListener       net.Listener
 	adminServer         *http.Server
-	closeOnce           sync.Once
-	closeError          error
 	// cancelArchive ends every history archive request in flight. Without it,
 	// close would wait for the archive's own retries, which with an unreachable
 	// archive is minutes.
@@ -84,9 +82,11 @@ func (d *Daemon) GetEndpointAddrs() (net.TCPAddr, *net.TCPAddr) {
 	return *addr, adminAddr
 }
 
-// close releases every component the daemon holds. It also runs when New
-// fails part way through, so each step skips a component New did not get to.
-func (d *Daemon) close() {
+// close releases every component the daemon holds and returns the errors it
+// met, each of them logged. It also runs when New fails part way through, so
+// each step skips a component New did not get to. New and Run are its only
+// callers, and only one of them runs on a given daemon.
+func (d *Daemon) close() error {
 	shutdownCtx, shutdownRelease := context.WithTimeout(context.Background(), defaultShutdownGracePeriod)
 	defer shutdownRelease()
 	var closeErrors []error
@@ -137,7 +137,7 @@ func (d *Daemon) close() {
 		}
 	}
 
-	d.closeError = errors.Join(closeErrors...)
+	return errors.Join(closeErrors...)
 }
 
 // shutdownServer drains server and closes listener. Both are nil when New
@@ -156,11 +156,6 @@ func shutdownServer(ctx context.Context, server *http.Server, listener net.Liste
 		errs = append(errs, err)
 	}
 	return errs
-}
-
-func (d *Daemon) Close() error {
-	d.closeOnce.Do(d.close)
-	return d.closeError
 }
 
 // newCaptiveCore creates a new captive core backend instance and returns it.
@@ -223,7 +218,7 @@ func New(ctx context.Context, cfg *config.Config, logger *supportlog.Entry) (*Da
 			// name the cause for callers that check errors.Is.
 			err = fmt.Errorf("startup interrupted: %w: %w", ctxErr, err)
 		}
-		return nil, errors.Join(err, d.Close())
+		return nil, errors.Join(err, d.close()) //nolint:contextcheck // close runs on its own timeout; ctx may be canceled
 	}
 	return d, nil
 }
@@ -233,8 +228,8 @@ func (d *Daemon) open(ctx context.Context, cfg *config.Config) error {
 	if d.core, err = newCaptiveCore(cfg, d.logger); err != nil {
 		return err
 	}
-	// Only ingestion uses the archive, and ingestion is stopped by Close, so
-	// the archive follows Close rather than ctx. A deadline on ctx must not
+	// Only ingestion uses the archive, and ingestion is stopped by close, so
+	// the archive follows close rather than ctx. A deadline on ctx must not
 	// surface as an ingestion failure during an otherwise clean shutdown.
 	archiveCtx, cancelArchive := context.WithCancel(context.Background())
 	d.cancelArchive = cancelArchive
@@ -260,7 +255,7 @@ func (d *Daemon) open(ctx context.Context, cfg *config.Config) error {
 		}
 	}
 	var ingestCfg ingest.Config
-	// Ingestion outlives startup and is stopped by Close, not by ctx.
+	// Ingestion outlives startup and is stopped by close, not by ctx.
 	d.ingestService, ingestCfg = createIngestService(cfg, d.logger, d, feewindows, historyArchive, rw)
 	if err := d.backfillAndFinalize(ctx, cfg, feewindows); err != nil {
 		return err
@@ -659,15 +654,15 @@ func (d *Daemon) buildMigrations(ctx context.Context, cfg *config.Config, retent
 // component fails for good, then closes the daemon.
 //
 // A canceled ctx is a shutdown request, not a failure: Run returns nil, and
-// an error from Close itself is logged rather than returned. Run returns the
+// an error met while closing is logged rather than returned. Run returns the
 // first error from the JSON-RPC server, the admin server, or ingestion after
-// Close has run. A failure that is pending at the moment of a shutdown
-// request is still returned.
+// the daemon has closed. A failure that is pending at the moment of a
+// shutdown request is still returned.
 func (d *Daemon) Run(ctx context.Context) error {
 	// One slot per server, so a Serve goroutine never blocks on its send. A
 	// goroutine sends once: its Serve error, or the panic that replaced it.
 	serverFailed := make(chan error, 2) //nolint:mnd
-	panicGroup := util.NewRecoverablePanicGroup(d.logger, func(err error) {
+	panicGroup := util.NewPanicGroup(d.logger, func(err error) {
 		serverFailed <- fmt.Errorf("HTTP server: %w", err)
 	})
 	var servers sync.WaitGroup
@@ -688,13 +683,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 	case err = <-serverFailed:
 	case err = <-d.ingestService.Failed():
 	}
-	d.Close()
+	// Every close error is logged inside close; Run reports the failure that
+	// ended serving. close runs on its own timeout because ctx may be canceled.
+	_ = d.close() //nolint:contextcheck // see above
+	// close ended every Serve and waited for the ingestion worker, so once the
+	// server goroutines are done every failure is on its channel.
+	servers.Wait()
 	if err == nil {
 		// select picks at random among ready cases, so a failure that was
-		// pending next to the shutdown request may have lost the draw. Close
-		// ended every Serve and waited for the ingestion worker, so once the
-		// server goroutines are done every failure is on its channel.
-		servers.Wait()
+		// pending next to the shutdown request may have lost the draw.
 		select {
 		case err = <-serverFailed:
 		case err = <-d.ingestService.Failed():

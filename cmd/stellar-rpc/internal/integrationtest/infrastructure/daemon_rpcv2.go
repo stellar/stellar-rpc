@@ -72,7 +72,6 @@ func (d *rpcv2Daemon) start() {
 		},
 	}
 
-	// Nothing above can fail once this is set: close waits on the run.
 	d.runningDaemon = startDaemon(i.t, daemonRPCv2, rpcv2StopTimeout, func(ctx context.Context) error {
 		return rpcv2.RunDaemonWithOptions(ctx, configPath, opts)
 	})

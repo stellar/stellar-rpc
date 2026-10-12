@@ -29,7 +29,7 @@ type rpcDaemon interface {
 	// close stops the daemon and blocks until it has stopped.
 	close()
 	// exited yields the error the daemon stopped with, if it stopped on its
-	// own. A nil channel means the daemon reports exits some other way.
+	// own. It is nil before start.
 	exited() <-chan error
 	// logger is the logger the harness injected into the daemon.
 	logger() *supportlog.Entry
