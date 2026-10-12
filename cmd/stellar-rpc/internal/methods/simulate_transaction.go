@@ -285,6 +285,7 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 	coreClient host.FastCoreClient, getter PreflightGetter,
 	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {
+	var preflightInfos latestMemo[latestLedgerPreflightInfo]
 	return NewHandler(func(ctx context.Context, request protocol.SimulateTransactionRequest,
 	) protocol.SimulateTransactionResponse {
 		if err := protocol.IsValidFormat(request.Format); err != nil {
@@ -350,7 +351,9 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 			}
 		}
 
-		ledgerInfo, err := getLatestLedgerPreflightInfo(ctx, ledgerReader, latestLedger)
+		ledgerInfo, err := preflightInfos.get(latestLedger, func() (latestLedgerPreflightInfo, error) {
+			return getLatestLedgerPreflightInfo(ctx, ledgerReader, latestLedger)
+		})
 		if err != nil {
 			return protocol.SimulateTransactionResponse{
 				Error:        err.Error(),
@@ -488,7 +491,36 @@ func getLatestLedgerPreflightInfo(
 ) (latestLedgerPreflightInfo, error) {
 	// Obtain every preflight ledger field from the same meta so sequence and
 	// close time cannot come from different ingestion snapshots.
-	closeMeta, ok, err := store.GetLedger(ctx, ledgerReader, latestLedger)
+	var info latestLedgerPreflightInfo
+	ok, err := store.WithLedgerRaw(ctx, ledgerReader, latestLedger, func(raw []byte) error {
+		meta := xdr.LedgerCloseMetaView(raw)
+		version, err := meta.V()
+		if err != nil {
+			return err
+		}
+		if version != 1 && version != 2 {
+			return fmt.Errorf("latest ledger (%d) meta has unexpected version (%d)", latestLedger, version)
+		}
+		// read the three fields off the view; no full LCM decode
+		info, err = xdr.Try(func() latestLedgerPreflightInfo {
+			var headerEntry xdr.LedgerHeaderHistoryEntryView
+			var sorobanState xdr.Uint64View
+			if version == 1 {
+				v1 := meta.MustV1()
+				headerEntry, sorobanState = v1.MustLedgerHeader(), v1.MustTotalByteSizeOfLiveSorobanState()
+			} else {
+				v2 := meta.MustV2()
+				headerEntry, sorobanState = v2.MustLedgerHeader(), v2.MustTotalByteSizeOfLiveSorobanState()
+			}
+			header := headerEntry.MustHeader()
+			return latestLedgerPreflightInfo{
+				bucketListSize:  sorobanState.MustValue(),
+				protocolVersion: header.MustLedgerVersion().MustValue(),
+				closeTime:       header.MustScpValue().MustCloseTime().MustValue(),
+			}
+		})
+		return err
+	})
 	if err != nil {
 		return latestLedgerPreflightInfo{}, err
 	}
@@ -497,21 +529,5 @@ func getLatestLedgerPreflightInfo(
 			"missing meta for latest ledger (%d)", latestLedger,
 		)
 	}
-	switch closeMeta.V {
-	case 1:
-		return latestLedgerPreflightInfo{
-			bucketListSize:  uint64(closeMeta.V1.TotalByteSizeOfLiveSorobanState),
-			protocolVersion: uint32(closeMeta.V1.LedgerHeader.Header.LedgerVersion),
-			closeTime:       uint64(closeMeta.V1.LedgerHeader.Header.ScpValue.CloseTime),
-		}, nil
-	case 2:
-		return latestLedgerPreflightInfo{
-			bucketListSize:  uint64(closeMeta.V2.TotalByteSizeOfLiveSorobanState),
-			protocolVersion: uint32(closeMeta.V2.LedgerHeader.Header.LedgerVersion),
-			closeTime:       uint64(closeMeta.V2.LedgerHeader.Header.ScpValue.CloseTime),
-		}, nil
-	default:
-		return latestLedgerPreflightInfo{}, fmt.Errorf("latest ledger (%d) meta has unexpected version (%d)",
-			latestLedger, closeMeta.V)
-	}
+	return info, nil
 }
