@@ -501,8 +501,7 @@ func getLatestLedgerPreflightInfo(
 		if version != 1 && version != 2 {
 			return fmt.Errorf("latest ledger (%d) meta has unexpected version (%d)", latestLedger, version)
 		}
-		// read the three fields off the view; no full LCM decode
-		info, err = xdr.Try(func() latestLedgerPreflightInfo {
+		info, err = xdr.Try(func() latestLedgerPreflightInfo { // read fields off the view without decoding
 			var headerEntry xdr.LedgerHeaderHistoryEntryView
 			var sorobanState xdr.Uint64View
 			if version == 1 {

@@ -19,21 +19,21 @@ func newProtocolVersionCache(ledgerReader store.LedgerReader) *protocolVersionCa
 	return &protocolVersionCache{ledgerReader: ledgerReader}
 }
 
-// get returns the latest ledger's protocol version, reading its header only when the ledger advances.
+// get returns the latest ledger's protocol version.
 func (c *protocolVersionCache) get(ctx context.Context) (uint32, error) {
 	latestLedger, err := c.ledgerReader.GetLatestLedgerSequence(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return c.version.get(latestLedger, func() (uint32, error) {
+	return c.version.get(latestLedger, func() (uint32, error) { // read header only when ledger advances
 		return readProtocolVersion(ctx, c.ledgerReader, latestLedger)
 	})
 }
 
-// readProtocolVersion reads ledger seq's protocol version off its raw header; no full LCM decode.
-func readProtocolVersion(ctx context.Context, s store.LedgerScanner, seq uint32) (uint32, error) {
+// readProtocolVersion reads ledger seq's protocol version off its raw header.
+func readProtocolVersion(ctx context.Context, s store.LedgerScanner, latestLedger uint32) (uint32, error) {
 	var protocolVersion uint32
-	found, err := store.WithLedgerRaw(ctx, s, seq, func(raw []byte) error {
+	found, err := store.WithLedgerRaw(ctx, s, latestLedger, func(raw []byte) error {
 		header, err := xdr.LedgerCloseMetaView(raw).LedgerHeader()
 		if err != nil {
 			return err
@@ -42,10 +42,10 @@ func readProtocolVersion(ctx context.Context, s store.LedgerScanner, seq uint32)
 		return err
 	})
 	if err != nil {
-		return 0, fmt.Errorf("latest ledger (%d) header: %w", seq, err)
+		return 0, fmt.Errorf("latest ledger (%d) header: %w", latestLedger, err)
 	}
 	if !found {
-		return 0, fmt.Errorf("missing meta for latest ledger (%d)", seq)
+		return 0, fmt.Errorf("missing meta for latest ledger (%d)", latestLedger)
 	}
 	return protocolVersion, nil
 }
