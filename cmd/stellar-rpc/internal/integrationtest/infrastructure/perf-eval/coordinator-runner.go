@@ -139,7 +139,7 @@ func renderBody(hist []runRecord) string {
 	fmt.Fprintf(&b, "<!-- perf-eval-history: %s -->\n", encodeHistory(hist))
 	b.WriteString(renderRun(hist[0]))
 	for _, r := range hist[1:] {
-		fmt.Fprintf(&b, "\n<details>\n<summary>Performance Evaluation Test #%d</summary>\n\n", r.Num)
+		fmt.Fprintf(&b, "\n<details>\n<summary>Performance Evaluation Test #&#8203;%d</summary>\n\n", r.Num)
 		b.WriteString(strings.Trim(renderRun(r), "\n"))
 		b.WriteString("\n</details>\n")
 	}
@@ -148,7 +148,8 @@ func renderBody(hist []runRecord) string {
 
 func renderRun(r runRecord) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "## 🧪 Performance Evaluation Test #%d\n\n", r.Num)
+	// The zero-width space entity keeps GitHub from autolinking "#N" to issue N.
+	fmt.Fprintf(&b, "## 🧪 Performance Evaluation Test #&#8203;%d\n\n", r.Num)
 	fmt.Fprintf(&b, "**Commit:** `%s` (`%s`)\n", r.TargetSHA[:min(12, len(r.TargetSHA))], r.TargetRef)
 	fmt.Fprintf(&b, "**Run:** %s\n", r.RunURL)
 	for _, l := range r.Legs {
