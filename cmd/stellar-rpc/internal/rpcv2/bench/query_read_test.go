@@ -47,8 +47,9 @@ func requestItems(ds *queryDataset, p queryPlan, newReq newRequest, lo, hi uint3
 	return timing.items, err
 }
 
-// A one-ledger request reads through the point read, and a ledgers request
-// that reads fewer ledgers than its range holds fails.
+// A one-ledger ledgers request, and any request past the latest ledger, reads
+// through the point read. A ledgers request that reads fewer ledgers than its
+// range holds fails.
 func TestQueryRequestReads(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
 	plan := queryPlan{TxPageLimit: defaultTxPageLimit, Passphrase: network.PublicNetworkPassphrase}

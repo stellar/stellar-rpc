@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"math"
 	"math/rand/v2"
 	"path/filepath"
 	"sync/atomic"
@@ -115,6 +116,38 @@ func TestTxPageStopsAtFullPage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, timing.items)
 	assert.Equal(t, int32(1), ctx.calls.Load(), "the scan reads only the ledger that fills the page")
+}
+
+// A txpage request whose page does not fill stops after --txpage-span ledgers,
+// although its scan range runs to the latest ledger.
+func TestTxPageStopsAfterSpan(t *testing.T) {
+	hotRoot := ingestHotChunk(t)
+	plan := queryPlan{TxPageSpan: 3, TxPageLimit: 1000, Passphrase: network.PublicNetworkPassphrase}
+	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
+		HotRoot: hotRoot, Chunk: 0, SampleLedgers: 3, Plan: plan,
+	})
+	require.NoError(t, err)
+	defer release()
+	require.Greater(t, ds.registry.LatestLedger(), ds.LastLedger)
+
+	ctx := &errCounter{}
+	timing, err := txPageRequest(ds, plan)(ctx, rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
+	require.NoError(t, err)
+	assert.Equal(t, 1, timing.items)
+	assert.Equal(t, int32(3), ctx.calls.Load(), "the scan reads --txpage-span ledgers")
+}
+
+// txPageScanEnd covers one chunk's span of ledgers from lo, cut at latest.
+func TestTxPageScanEnd(t *testing.T) {
+	const lo = uint32(100)
+	assert.Equal(t, lo, txPageScanEnd(lo, lo))
+	assert.Equal(t, lo+1, txPageScanEnd(lo+1, lo))
+	assert.Equal(t, lo+5, txPageScanEnd(lo, lo+5))
+	assert.Equal(t, lo+chunk.LedgersPerChunk-1, txPageScanEnd(lo, lo+chunk.LedgersPerChunk-1))
+	assert.Equal(t, lo+chunk.LedgersPerChunk-1, txPageScanEnd(lo, lo+chunk.LedgersPerChunk))
+	assert.Equal(t, lo+chunk.LedgersPerChunk-1, txPageScanEnd(lo, math.MaxUint32))
+	high := uint32(math.MaxUint32 - 5)
+	assert.Equal(t, uint32(math.MaxUint32), txPageScanEnd(high, math.MaxUint32))
 }
 
 // --sample-ledgers at or above the ingested span keeps every committed ledger.

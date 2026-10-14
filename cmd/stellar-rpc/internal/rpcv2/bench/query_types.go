@@ -7,6 +7,8 @@ import (
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
 // newQueryRequest builds one query type's request. Each request takes its own
@@ -52,14 +54,17 @@ func ledgersRequest(ds *queryDataset, p queryPlan) queryRequest {
 	}
 }
 
-// txPageRequest measures getTransactions' read: read --txpage-span ledgers and
-// materialize each one's transactions, envelopes included, up to
-// --txpage-limit. The read ends at the ledger that fills the page.
+// txPageRequest measures getTransactions' read. Like the daemon, it scans from a
+// random start to txPageScanEnd and materializes each ledger's transactions,
+// envelopes included. The read ends at the ledger that fills the page
+// (--txpage-limit) or after --txpage-span ledgers, whichever comes first.
 func txPageRequest(ds *queryDataset, p queryPlan) queryRequest {
 	return func(ctx context.Context, rng *rand.Rand) (requestTiming, error) {
-		lo, hi := ds.pickRange(rng, p.TxPageSpan)
+		lo := ds.pickStart(rng, p.TxPageSpan)
+		hi := txPageScanEnd(lo, ds.registry.LatestLedger())
 		return timed(func() (int, error) {
 			txs := 0
+			var read uint32
 			err := ds.readLedgers(ctx, lo, hi, func(seq uint32, raw []byte) (bool, error) {
 				// Every byte field of a view aliases the borrowed ledger bytes, so
 				// no view outlives this call.
@@ -69,7 +74,8 @@ func txPageRequest(ds *queryDataset, p queryPlan) queryRequest {
 					return false, fmt.Errorf("materialize transactions of ledger %d: %w", seq, err)
 				}
 				txs += len(views)
-				return txs < p.TxPageLimit, nil
+				read++
+				return txs < p.TxPageLimit && read < p.TxPageSpan, nil
 			})
 			if err != nil {
 				return 0, err
@@ -77,6 +83,20 @@ func txPageRequest(ds *queryDataset, p queryPlan) queryRequest {
 			return txs, nil
 		})
 	}
+}
+
+// txPageScanEnd returns the last ledger of getTransactions' scan from lo: one
+// chunk's span of ledgers, cut at latest. ScanLedgers opens the first two chunks
+// of its range before it yields, so the range, not only the ledgers read, sets
+// what a request costs. A start at or past latest gives lo: a one-ledger read.
+func txPageScanEnd(lo, latest uint32) uint32 {
+	switch {
+	case lo >= latest:
+		return lo
+	case latest-lo >= chunk.LedgersPerChunk:
+		return lo + chunk.LedgersPerChunk - 1
+	}
+	return latest
 }
 
 // pickStart returns a random first ledger for a span-long read inside the
