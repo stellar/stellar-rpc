@@ -48,9 +48,8 @@ function stellar_xdr_version_from_rust_dep_tree {
   echo $LINE | $SED -n  's/.*stellar-xdr \(v\)\{0,1\}\([^ ]*\).*/\2/p'
 }
 
-# The stellar-xdr crate's major version doesn't track the protocol (e.g. the
-# protocol 29 and 30 hosts both use stellar-xdr 28.x, from different sources),
-# so take each host's stellar-xdr from that host's own dependency tree.
+# Take each host's stellar-xdr from its own dependency tree: the crate's major
+# version doesn't track the protocol.
 for PROTO in $PROTOS
 do
   if CARGO_OUTPUT=$(cargo tree -e normal --prefix none -p soroban-env-host@$PROTO 2>&1); then
@@ -93,9 +92,7 @@ done
 # Now, lets compare the Rust and Go XDR revisions
 
 # revision of https://github.com/stellar/stellar-xdr/ used by the Go code, read
-# from the go-stellar-sdk module the build actually uses. This honors a replace
-# directive (e.g. an SDK fork pinned while a protocol change is in review) and
-# works for tagged versions as well as pseudo-versions.
+# from the go-stellar-sdk module the build uses
 go mod download github.com/stellar/go-stellar-sdk
 GO_SDK_DIR=$(go list -m -f '{{.Dir}}' github.com/stellar/go-stellar-sdk)
 STELLAR_XDR_REVISION_FROM_GO=$(cat "${GO_SDK_DIR}/xdr/xdr_commit_generated.txt")

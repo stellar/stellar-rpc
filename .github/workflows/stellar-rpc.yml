@@ -89,8 +89,6 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '29'
-      # stellar-core 29.0.0: its src/rust/soroban/p29 is rs-soroban-env v29.0.0
-      # (a721944b), the commit soroban-env-host-prev pins.
       core_deb_version: '29.0.0-3589.4eb833373.noble'
       core_docker_img: 'stellar/stellar-core:29.0.0-3589.4eb833373.noble'
 
@@ -99,13 +97,7 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '30'
-      # The stellar-core 30.0.0 release candidate (0e49751aa), where protocol 30
-      # is the current protocol with CAP-0084 and CAP-0087
-      # (stellar/stellar-core#5478) and CAP-0088 (#5423). Its p30 host is
-      # rs-soroban-env 6e6c4a87, which differs from soroban-env-host-curr's
-      # 8abed902 in release metadata and in taking stellar-xdr 30.0.0 and
-      # soroban-wasmi from crates.io. It requires the 95 contract cost params in
-      # the *.p30 upgrade fixtures.
+      # stellar-core 30.0.0 release candidate.
       core_deb_version: '30.0.0-3642.0e49751aa.noble'
       core_docker_img: 'stellar/unsafe-stellar-core:30.0.0-3642.0e49751aa.noble'
 
