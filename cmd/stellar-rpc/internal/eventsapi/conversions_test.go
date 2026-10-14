@@ -14,9 +14,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/eventquery"
 )
 
 // testOldest is the retention floor the scope conversions run against.
@@ -60,40 +58,40 @@ func TestEventScopeBounds(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		req  protocol.QueryEventsRequest
-		want query.EventScope
+		want eventquery.EventScope
 	}{
 		{
 			name: "ascending without max follows the tip",
 			req:  protocol.QueryEventsRequest{MinLedger: 100, Order: protocol.OrderAscending},
-			want: query.EventScope{MinLedger: 100, Dir: query.Ascending},
+			want: eventquery.EventScope{MinLedger: 100, Dir: eventquery.Ascending},
 		},
 		{
 			name: "absent order is ascending",
 			req:  protocol.QueryEventsRequest{MinLedger: 100},
-			want: query.EventScope{MinLedger: 100, Dir: query.Ascending},
+			want: eventquery.EventScope{MinLedger: 100, Dir: eventquery.Ascending},
 		},
 		{
 			name: "ascending with max pins both edges",
 			req:  protocol.QueryEventsRequest{MinLedger: 100, MaxLedger: 200},
-			want: query.EventScope{MinLedger: 100, MaxLedger: maxPtr(200), Dir: query.Ascending},
+			want: eventquery.EventScope{MinLedger: 100, MaxLedger: maxPtr(200), Dir: eventquery.Ascending},
 		},
 		{
 			name: "descending without max pins the latest ledger",
 			req:  protocol.QueryEventsRequest{MinLedger: 100, Order: protocol.OrderDescending},
-			want: query.EventScope{MinLedger: 100, MaxLedger: maxPtr(latest), Dir: query.Descending},
+			want: eventquery.EventScope{MinLedger: 100, MaxLedger: maxPtr(latest), Dir: eventquery.Descending},
 		},
 		{
 			name: "descending without min starts at genesis",
 			req:  protocol.QueryEventsRequest{MaxLedger: 200, Order: protocol.OrderDescending},
-			want: query.EventScope{
-				MinLedger: chunk.FirstLedgerSeq, MaxLedger: maxPtr(200), Dir: query.Descending,
+			want: eventquery.EventScope{
+				MinLedger: eventquery.FirstLedgerSeq, MaxLedger: maxPtr(200), Dir: eventquery.Descending,
 			},
 		},
 		{
 			name: "descending with neither bound spans genesis to latest",
 			req:  protocol.QueryEventsRequest{Order: protocol.OrderDescending},
-			want: query.EventScope{
-				MinLedger: chunk.FirstLedgerSeq, MaxLedger: maxPtr(latest), Dir: query.Descending,
+			want: eventquery.EventScope{
+				MinLedger: eventquery.FirstLedgerSeq, MaxLedger: maxPtr(latest), Dir: eventquery.Descending,
 			},
 		},
 	} {
@@ -116,7 +114,7 @@ func TestEventScopeDescendingMinAboveLatest(t *testing.T) {
 	require.NoError(t, req.Valid(protocol.QueryEventsDefaultMaxFilters))
 
 	_, err := eventScope(&req, testOldest, 5000)
-	var outOfRange *query.RangeError
+	var outOfRange *eventquery.RangeError
 	require.ErrorAs(t, err, &outOfRange)
 	assert.Equal(t, uint32(5001), outOfRange.Requested)
 	assert.Equal(t, uint32(5000), outOfRange.Latest)
@@ -136,7 +134,7 @@ func TestEventScopeBelowGenesisMaxIsNotRaised(t *testing.T) {
 
 	scope, err := eventScope(&req, testOldest, 5000)
 	require.NoError(t, err)
-	assert.Equal(t, uint32(chunk.FirstLedgerSeq), scope.MinLedger)
+	assert.Equal(t, uint32(eventquery.FirstLedgerSeq), scope.MinLedger)
 	require.NotNil(t, scope.MaxLedger)
 	assert.Equal(t, uint32(1), *scope.MaxLedger)
 }
@@ -147,9 +145,9 @@ func TestEventScopeDescendingOnANodeBelowGenesis(t *testing.T) {
 	require.NoError(t, req.Valid(protocol.QueryEventsDefaultMaxFilters))
 
 	_, err := eventScope(&req, testOldest, 1)
-	var outOfRange *query.RangeError
+	var outOfRange *eventquery.RangeError
 	require.ErrorAs(t, err, &outOfRange)
-	assert.Equal(t, uint32(chunk.FirstLedgerSeq), outOfRange.Requested)
+	assert.Equal(t, uint32(eventquery.FirstLedgerSeq), outOfRange.Requested)
 }
 
 // An explicit max above the tip is legal: the scan waits for those ledgers.
@@ -182,11 +180,11 @@ func TestEventScopeFilters(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, scope.Filters, 2)
 
-	assert.Equal(t, event.Filter{
+	assert.Equal(t, eventquery.Filter{
 		EventType: eventTypePtr(xdr.ContractEventTypeContract),
 		Topics:    [protocol.MaxTopicCount][]byte{transfer, nil, nil, nil},
 	}, scope.Filters[0])
-	assert.Equal(t, event.Filter{
+	assert.Equal(t, eventquery.Filter{
 		ContractID: testContractRaw(0xAB),
 		Topics:     [protocol.MaxTopicCount][]byte{nil, mint, nil, nil},
 	}, scope.Filters[1])
@@ -218,22 +216,22 @@ func TestEventFilterFields(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		in   protocol.QueryEventsFilter
-		want event.Filter
+		want eventquery.Filter
 	}{
 		{
 			name: "contract id decodes to the raw hash",
 			in:   protocol.QueryEventsFilter{ContractID: testContractStrkey(t, 0x01)},
-			want: event.Filter{ContractID: testContractRaw(0x01)},
+			want: eventquery.Filter{ContractID: testContractRaw(0x01)},
 		},
 		{
 			name: "contract event type",
 			in:   protocol.QueryEventsFilter{EventType: protocol.EventTypeContract},
-			want: event.Filter{EventType: eventTypePtr(xdr.ContractEventTypeContract)},
+			want: eventquery.Filter{EventType: eventTypePtr(xdr.ContractEventTypeContract)},
 		},
 		{
 			name: "system event type",
 			in:   protocol.QueryEventsFilter{EventType: protocol.EventTypeSystem},
-			want: event.Filter{EventType: eventTypePtr(xdr.ContractEventTypeSystem)},
+			want: eventquery.Filter{EventType: eventTypePtr(xdr.ContractEventTypeSystem)},
 		},
 		{
 			name: "topics keep their positions",
@@ -241,7 +239,7 @@ func TestEventFilterFields(t *testing.T) {
 				Topic0: requestTopic(t, transfer),
 				Topic2: requestTopic(t, mint),
 			},
-			want: event.Filter{
+			want: eventquery.Filter{
 				Topics: [protocol.MaxTopicCount][]byte{transfer, nil, mint, nil},
 			},
 		},
@@ -251,7 +249,7 @@ func TestEventFilterFields(t *testing.T) {
 				Topic0: json.RawMessage("null"),
 				Topic1: requestTopic(t, transfer),
 			},
-			want: event.Filter{
+			want: eventquery.Filter{
 				Topics: [protocol.MaxTopicCount][]byte{nil, transfer, nil, nil},
 			},
 		},
@@ -262,7 +260,7 @@ func TestEventFilterFields(t *testing.T) {
 				EventType:  protocol.EventTypeContract,
 				Topic0:     requestTopic(t, transfer),
 			},
-			want: event.Filter{
+			want: eventquery.Filter{
 				ContractID: testContractRaw(0x02),
 				EventType:  eventTypePtr(xdr.ContractEventTypeContract),
 				Topics:     [protocol.MaxTopicCount][]byte{transfer, nil, nil, nil},
@@ -274,7 +272,7 @@ func TestEventFilterFields(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 			// queryEvents filters carry no arity, so the count stays the wildcard.
-			assert.Equal(t, event.TopicCountFilter{}, got.TopicCount)
+			assert.Equal(t, eventquery.TopicCountFilter{}, got.TopicCount)
 		})
 	}
 }
@@ -293,7 +291,7 @@ func TestEventFilterJSONFormat(t *testing.T) {
 		in := protocol.QueryEventsFilter{ContractID: testContractStrkey(t, 0x03)}
 		got, err := eventFilter(&in, protocol.FormatJSON)
 		require.NoError(t, err)
-		assert.Equal(t, event.Filter{ContractID: testContractRaw(0x03)}, got)
+		assert.Equal(t, eventquery.Filter{ContractID: testContractRaw(0x03)}, got)
 	})
 }
 
@@ -327,7 +325,7 @@ func TestEventFilterErrors(t *testing.T) {
 	}
 }
 
-func testPayload(t *testing.T, contractID *xdr.ContractId) (event.Payload, xdr.ScVal, xdr.ScVal) {
+func testPayload(t *testing.T, contractID *xdr.ContractId) (eventquery.Payload, xdr.ScVal, xdr.ScVal) {
 	t.Helper()
 	topic0, _ := symbolScVal(t, "transfer")
 	topic1, _ := symbolScVal(t, "mint")
@@ -344,7 +342,7 @@ func testPayload(t *testing.T, contractID *xdr.ContractId) (event.Payload, xdr.S
 	raw, err := ev.MarshalBinary()
 	require.NoError(t, err)
 
-	return event.Payload{
+	return eventquery.Payload{
 		TxHash:             xdr.Hash(testContractRaw(0xCD)),
 		LedgerSequence:     1000,
 		TxIdx:              3,
@@ -359,7 +357,7 @@ func TestEventInfoBase64(t *testing.T) {
 	contractID := xdr.ContractId(testContractRaw(0xAB))
 	payload, topic0, data := testPayload(t, &contractID)
 
-	info, err := eventInfo(&payload, protocol.FormatBase64)
+	info, err := EventInfo(&payload, protocol.FormatBase64)
 	require.NoError(t, err)
 
 	assert.Equal(t, protocol.EventTypeContract, info.EventType)
@@ -389,7 +387,7 @@ func TestEventInfoJSON(t *testing.T) {
 	contractID := xdr.ContractId(testContractRaw(0xAB))
 	payload, _, _ := testPayload(t, &contractID)
 
-	info, err := eventInfo(&payload, protocol.FormatJSON)
+	info, err := EventInfo(&payload, protocol.FormatJSON)
 	require.NoError(t, err)
 
 	require.Len(t, info.TopicJSON, 2)
@@ -406,15 +404,15 @@ func TestEventInfoJSON(t *testing.T) {
 func TestEventInfoWithoutContract(t *testing.T) {
 	payload, _, _ := testPayload(t, nil)
 
-	info, err := eventInfo(&payload, protocol.FormatBase64)
+	info, err := EventInfo(&payload, protocol.FormatBase64)
 	require.NoError(t, err)
 	assert.Empty(t, info.ContractID)
 }
 
 func TestEventInfoCorrupt(t *testing.T) {
 	t.Run("unparseable event bytes", func(t *testing.T) {
-		payload := event.Payload{ContractEventBytes: []byte{0xFF, 0xFF}}
-		_, err := eventInfo(&payload, protocol.FormatBase64)
+		payload := eventquery.Payload{ContractEventBytes: []byte{0xFF, 0xFF}}
+		_, err := EventInfo(&payload, protocol.FormatBase64)
 		require.Error(t, err)
 	})
 
@@ -423,11 +421,11 @@ func TestEventInfoCorrupt(t *testing.T) {
 	t.Run("a ledger sequence past the response field", func(t *testing.T) {
 		payload, _, _ := testPayload(t, nil)
 		payload.LedgerSequence = math.MaxInt32 + 1
-		_, err := eventInfo(&payload, protocol.FormatBase64)
+		_, err := EventInfo(&payload, protocol.FormatBase64)
 		require.ErrorContains(t, err, "exceeds supported range")
 
 		payload.LedgerSequence = math.MaxInt32
-		info, err := eventInfo(&payload, protocol.FormatBase64)
+		info, err := EventInfo(&payload, protocol.FormatBase64)
 		require.NoError(t, err, "the boundary itself still fits")
 		assert.Equal(t, int32(math.MaxInt32), info.Ledger)
 	})
@@ -447,8 +445,8 @@ func TestEventInfoCorrupt(t *testing.T) {
 		raw, err := ev.MarshalBinary()
 		require.NoError(t, err)
 
-		payload := event.Payload{ContractEventBytes: raw}
-		_, err = eventInfo(&payload, protocol.FormatBase64)
+		payload := eventquery.Payload{ContractEventBytes: raw}
+		_, err = EventInfo(&payload, protocol.FormatBase64)
 		require.ErrorContains(t, err, "stored event has type")
 	})
 
@@ -458,10 +456,10 @@ func TestEventInfoCorrupt(t *testing.T) {
 }
 
 func TestResponseScanStatus(t *testing.T) {
-	assert.Equal(t, protocol.ScanStatusHasMore, responseScanStatus(query.ScanHasMore))
-	assert.Equal(t, protocol.ScanStatusComplete, responseScanStatus(query.ScanComplete))
-	assert.Equal(t, protocol.ScanStatusWaitingForLedgers, responseScanStatus(query.ScanWaitingForLedgers))
-	assert.Equal(t, protocol.ScanStatusOldestReached, responseScanStatus(query.ScanOldestReached))
+	assert.Equal(t, protocol.ScanStatusHasMore, responseScanStatus(eventquery.ScanHasMore))
+	assert.Equal(t, protocol.ScanStatusComplete, responseScanStatus(eventquery.ScanComplete))
+	assert.Equal(t, protocol.ScanStatusWaitingForLedgers, responseScanStatus(eventquery.ScanWaitingForLedgers))
+	assert.Equal(t, protocol.ScanStatusOldestReached, responseScanStatus(eventquery.ScanOldestReached))
 }
 
 // Ingest stores contract and system events only, so a diagnostic event

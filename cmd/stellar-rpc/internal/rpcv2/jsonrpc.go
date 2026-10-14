@@ -10,6 +10,7 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	api "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/eventsapi"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
@@ -56,7 +57,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			TransactionReader: p.transactionReader,
 			FeeStats:          p.feeWindows,
 
-			GetEventsHandler: eventsapi.NewV1Handler(eventsapi.Limits{
+			GetEventsHandler: eventsapi.NewV1Handler(api.Limits{
 				MaxLimit:     deref(m.GetEvents.MaxItemsPerResponse),
 				DefaultLimit: deref(m.GetEvents.DefaultItemsPerResponse),
 			}, p.logger),
@@ -77,8 +78,8 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		})
 	specs = append(specs, jsonrpc.HandlerSpec{
 		MethodName: protocol.QueryEventsMethodName,
-		Handler: eventsapi.NewQueryEventsHandler(eventsapi.QueryEventsLimits{
-			Limits: eventsapi.Limits{
+		Handler: api.NewQueryEventsHandler(eventsapi.ViewQuerier{}, api.QueryEventsLimits{
+			Limits: api.Limits{
 				MaxLimit:     deref(m.QueryEvents.MaxItemsPerResponse),
 				DefaultLimit: deref(m.QueryEvents.DefaultItemsPerResponse),
 			},

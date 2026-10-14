@@ -1,4 +1,4 @@
-package query
+package eventquery
 
 import (
 	"bytes"
@@ -15,8 +15,6 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
 func testContract(b byte) []byte { return bytes.Repeat([]byte{b}, contractIDLen) }
@@ -102,7 +100,7 @@ func TestCursorRoundTripFilters(t *testing.T) {
 			env: EventCursor{
 				Scope: EventScope{
 					MinLedger: 50, MaxLedger: maxPtr(900), Dir: Descending,
-					Filters: []event.Filter{{ContractID: testContract(0xC1)}},
+					Filters: []Filter{{ContractID: testContract(0xC1)}},
 				},
 				Position:      &EventPosition{Ledger: 700, Tx: 12, Op: 0, Event: 5, LedgerOrdinal: 9},
 				ScannedLedger: 700,
@@ -113,7 +111,7 @@ func TestCursorRoundTripFilters(t *testing.T) {
 			env: EventCursor{
 				Scope: EventScope{
 					MinLedger: 1, MaxLedger: maxPtr(10), Dir: Descending,
-					Filters: []event.Filter{{
+					Filters: []Filter{{
 						Topics: [protocol.MaxTopicCount][]byte{testTopic(0xA0), nil, testTopic(0xA2), nil},
 					}},
 				},
@@ -125,13 +123,13 @@ func TestCursorRoundTripFilters(t *testing.T) {
 			env: EventCursor{
 				Scope: EventScope{
 					MinLedger: 20002, MaxLedger: maxPtr(30001), Dir: Ascending,
-					Filters: []event.Filter{{
+					Filters: []Filter{{
 						ContractID: testContract(0xC2),
 						Topics: [protocol.MaxTopicCount][]byte{
 							testTopic(1), testTopic(2), testTopic(3), testTopic(4),
 						},
 						EventType:  eventTypePtr(xdr.ContractEventTypeContract),
-						TopicCount: event.TopicCountFilter{Count: protocol.MaxTopicCount},
+						TopicCount: TopicCountFilter{Count: protocol.MaxTopicCount},
 					}},
 				},
 				Position:      &EventPosition{Ledger: 25000, Tx: 1, Op: 1, Event: 0, LedgerOrdinal: 0},
@@ -143,10 +141,10 @@ func TestCursorRoundTripFilters(t *testing.T) {
 			env: EventCursor{
 				Scope: EventScope{
 					MinLedger: 3, MaxLedger: maxPtr(9), Dir: Descending,
-					Filters: []event.Filter{
+					Filters: []Filter{
 						{EventType: eventTypePtr(xdr.ContractEventTypeSystem)},
-						{TopicCount: event.TopicCountFilter{Count: 0, Exact: true}},
-						{TopicCount: event.TopicCountFilter{Count: 2, Exact: true}},
+						{TopicCount: TopicCountFilter{Count: 0, Exact: true}},
+						{TopicCount: TopicCountFilter{Count: 2, Exact: true}},
 					},
 				},
 				ScannedLedger: 7,
@@ -157,7 +155,7 @@ func TestCursorRoundTripFilters(t *testing.T) {
 			env: EventCursor{
 				Scope: EventScope{
 					MinLedger: 5, MaxLedger: maxPtr(6), Dir: Descending,
-					Filters: []event.Filter{
+					Filters: []Filter{
 						{ContractID: testContract(0xC3)},
 						{Topics: [protocol.MaxTopicCount][]byte{nil, testTopic(0xB1), nil, nil}},
 						{},
@@ -217,7 +215,7 @@ func TestCursorGoldenV1(t *testing.T) {
 			env: EventCursor{
 				Scope: EventScope{
 					MinLedger: 1, MaxLedger: maxPtr(2), Dir: Descending,
-					Filters: []event.Filter{{
+					Filters: []Filter{{
 						ContractID: testContract(0xC5),
 						Topics:     [protocol.MaxTopicCount][]byte{nil, testTopic(0xB2), nil, nil},
 					}},
@@ -243,10 +241,10 @@ func TestCursorGoldenV1(t *testing.T) {
 			env: EventCursor{
 				Scope: EventScope{
 					MinLedger: 9, MaxLedger: maxPtr(10), Dir: Ascending,
-					Filters: []event.Filter{{
+					Filters: []Filter{{
 						ContractID: testContract(0xC6),
 						EventType:  eventTypePtr(xdr.ContractEventTypeSystem),
-						TopicCount: event.TopicCountFilter{Count: 2, Exact: true},
+						TopicCount: TopicCountFilter{Count: 2, Exact: true},
 					}},
 				},
 				ScannedLedger: 9,
@@ -339,14 +337,14 @@ func TestCursorMalformedInputs(t *testing.T) {
 		},
 		{
 			"filter count over cap",
-			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(maxCursorFilters+1))),
+			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(MaxCursorFilters+1))),
 		},
 		{
 			// Valid empty filters follow the over-cap count: only the cap
 			// check rejects this before allocation.
 			"filter count over cap with filter bytes present",
-			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(maxCursorFilters+1),
-				bytes.Repeat([]byte{0x00}, maxCursorFilters+1))),
+			tokV1(cat([]byte{0x00}, be32(1), be32(0), be16(MaxCursorFilters+1),
+				bytes.Repeat([]byte{0x00}, MaxCursorFilters+1))),
 		},
 		{
 			"filter count without filter bytes",
@@ -403,7 +401,7 @@ func TestCursorEncodeDeterministic(t *testing.T) {
 	env := EventCursor{
 		Scope: EventScope{
 			MinLedger: 1, MaxLedger: maxPtr(1000), Dir: Descending,
-			Filters: []event.Filter{{
+			Filters: []Filter{{
 				ContractID: testContract(0xC4),
 				Topics:     [protocol.MaxTopicCount][]byte{testTopic(1), nil, testTopic(3), nil},
 			}},
@@ -443,7 +441,7 @@ func TestCursorEncodeRejects(t *testing.T) {
 			env: EventCursor{
 				Scope: EventScope{
 					MinLedger: 1, Dir: Ascending,
-					Filters: []event.Filter{{ContractID: bytes.Repeat([]byte{1}, 31)}},
+					Filters: []Filter{{ContractID: bytes.Repeat([]byte{1}, 31)}},
 				},
 			},
 		},
@@ -452,7 +450,7 @@ func TestCursorEncodeRejects(t *testing.T) {
 			env: EventCursor{
 				Scope: EventScope{
 					MinLedger: 1, Dir: Ascending,
-					Filters: make([]event.Filter, maxCursorFilters+1),
+					Filters: make([]Filter, MaxCursorFilters+1),
 				},
 			},
 		},
@@ -463,7 +461,7 @@ func TestCursorEncodeRejects(t *testing.T) {
 			env: EventCursor{
 				Scope: EventScope{
 					MinLedger: 1, Dir: Ascending,
-					Filters: []event.Filter{{
+					Filters: []Filter{{
 						Topics: [protocol.MaxTopicCount][]byte{bytes.Repeat([]byte{7}, maxCursorBytes)},
 					}},
 				},
@@ -483,14 +481,14 @@ func TestCursorEncodeRejects(t *testing.T) {
 // The logged worst-case size (256 full filters) records the frozen format's
 // practical maximum. No size is asserted; the envelope must round-trip.
 func TestCursorSizeWorstCase(t *testing.T) {
-	filters := make([]event.Filter, maxCursorFilters)
+	filters := make([]Filter, MaxCursorFilters)
 	for i := range filters {
 		filters[i].ContractID = bytes.Repeat([]byte{byte(i)}, contractIDLen)
 		for j := range filters[i].Topics {
 			filters[i].Topics[j] = bytes.Repeat([]byte{byte(i + j)}, 64)
 		}
 		filters[i].EventType = eventTypePtr(xdr.ContractEventTypeContract)
-		filters[i].TopicCount = event.TopicCountFilter{Count: protocol.MaxTopicCount, Exact: true}
+		filters[i].TopicCount = TopicCountFilter{Count: protocol.MaxTopicCount, Exact: true}
 	}
 	env := EventCursor{
 		Scope: EventScope{
@@ -510,13 +508,13 @@ func TestCursorSizeWorstCase(t *testing.T) {
 	require.Equal(t, &env, got)
 }
 
-// Trips when event.Filter grows a field the codec does not map, which would
+// Trips when Filter grows a field the codec does not map, which would
 // silently drop that constraint from minted cursors. Adding a field? Every
 // fflags bit is assigned, so map it under a version bump, extend the golden
 // vectors, and update the count.
 func TestCursorCodecCoversFilter(t *testing.T) {
-	require.Equal(t, 4, reflect.TypeFor[event.Filter]().NumField(),
-		"event.Filter has fields the cursor body does not carry")
+	require.Equal(t, 4, reflect.TypeFor[Filter]().NumField(),
+		"Filter has fields the cursor body does not carry")
 }
 
 // Zero-length non-nil values encode as absent, byte-identically to nil. The
@@ -525,7 +523,7 @@ func TestCursorEmptyValuesEncodeAsAbsent(t *testing.T) {
 	withEmpty := EventCursor{
 		Scope: EventScope{
 			MinLedger: 1, MaxLedger: maxPtr(2), Dir: Ascending,
-			Filters: []event.Filter{{
+			Filters: []Filter{{
 				ContractID: []byte{},
 				Topics:     [protocol.MaxTopicCount][]byte{{}, {}, {}, {}},
 			}},
@@ -534,7 +532,7 @@ func TestCursorEmptyValuesEncodeAsAbsent(t *testing.T) {
 	withNil := EventCursor{
 		Scope: EventScope{
 			MinLedger: 1, MaxLedger: maxPtr(2), Dir: Ascending,
-			Filters: []event.Filter{{}},
+			Filters: []Filter{{}},
 		},
 	}
 	encEmpty, err := withEmpty.Encode()
@@ -551,7 +549,7 @@ func FuzzDecodeEventCursor(f *testing.F) {
 	valid := EventCursor{
 		Scope: EventScope{
 			MinLedger: 1, MaxLedger: maxPtr(2), Dir: Ascending,
-			Filters: []event.Filter{{ContractID: testContract(0xC0)}},
+			Filters: []Filter{{ContractID: testContract(0xC0)}},
 		},
 		Position:      &EventPosition{Ledger: 1, Tx: 2, Op: 3, Event: 4, LedgerOrdinal: 5},
 		ScannedLedger: 1,

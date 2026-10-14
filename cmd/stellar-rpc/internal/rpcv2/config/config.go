@@ -13,6 +13,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/eventsapi"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 )
@@ -457,7 +458,7 @@ const (
 
 	// DefaultQueryEventsTermBudget is the getEvents v2 proposal's default
 	// (github.com/orgs/stellar/discussions/1872).
-	DefaultQueryEventsTermBudget uint = 15
+	DefaultQueryEventsTermBudget = eventsapi.DefaultTermBudget
 
 	// DefaultGetEventsV1MaxItemsPerResponse is v1's own page cap, matching
 	// the existing service's max-events-limit. The 1,000 above is the v2

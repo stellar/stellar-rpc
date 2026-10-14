@@ -16,6 +16,7 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	api "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/eventsapi"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
@@ -26,9 +27,9 @@ import (
 
 const testChunk = chunk.ID(5)
 
-func testLimits() QueryEventsLimits {
-	return QueryEventsLimits{
-		Limits: Limits{
+func testLimits() api.QueryEventsLimits {
+	return api.QueryEventsLimits{
+		Limits: api.Limits{
 			MaxLimit:     protocol.QueryEventsMaxLimit,
 			DefaultLimit: 100,
 		},
@@ -97,7 +98,7 @@ func requireErrorData(t *testing.T, err error, wantReason string, into any) {
 func TestQueryEvents_AscendingPagesToTheTip(t *testing.T) {
 	ctx, first := seedView(t)
 
-	page1, err := queryEvents(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+	page1, err := api.QueryEvents(ctx, ViewQuerier{}, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 		MinLedger: first,
 		Limit:     new(uint(2)),
 	})
@@ -108,7 +109,7 @@ func TestQueryEvents_AscendingPagesToTheTip(t *testing.T) {
 	assert.Equal(t, first, uint32(page1.Events[0].Ledger))
 	assert.Equal(t, first, uint32(page1.Events[1].Ledger))
 
-	page2, err := queryEvents(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+	page2, err := api.QueryEvents(ctx, ViewQuerier{}, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 		Cursor: page1.Cursor,
 	})
 	require.NoError(t, err)
@@ -125,7 +126,7 @@ func TestQueryEvents_ScannedLedgerOnAPageThatCoveredNothing(t *testing.T) {
 	t.Run("ascending", func(t *testing.T) {
 		ctx, first := seedView(t)
 		one := uint(1)
-		resp, err := queryEvents(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		resp, err := api.QueryEvents(ctx, ViewQuerier{}, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 			MinLedger: first,
 			Limit:     &one,
 		})
@@ -137,7 +138,7 @@ func TestQueryEvents_ScannedLedgerOnAPageThatCoveredNothing(t *testing.T) {
 	t.Run("descending", func(t *testing.T) {
 		ctx, first := seedView(t)
 		one := uint(1)
-		resp, err := queryEvents(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		resp, err := api.QueryEvents(ctx, ViewQuerier{}, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 			MinLedger: first,
 			MaxLedger: first,
 			Order:     protocol.OrderDescending,
@@ -158,7 +159,7 @@ func TestQueryEvents_RangeBelowGenesisIsAnEmptyCompletePage(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx, _ := seedView(t)
-			resp, err := queryEvents(ctx, testLimits(), rpcv2test.SilentLogger(), &req)
+			resp, err := api.QueryEvents(ctx, ViewQuerier{}, testLimits(), rpcv2test.SilentLogger(), &req)
 			require.NoError(t, err)
 			assert.Empty(t, resp.Events)
 			assert.Equal(t, protocol.ScanStatusComplete, resp.ScanStatus)
@@ -171,7 +172,7 @@ func TestQueryEvents_RangeBelowGenesisIsAnEmptyCompletePage(t *testing.T) {
 func TestQueryEvents_ClosedRangeCompletesWithoutCursor(t *testing.T) {
 	ctx, first := seedView(t)
 
-	resp, err := queryEvents(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+	resp, err := api.QueryEvents(ctx, ViewQuerier{}, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 		MinLedger: first,
 		MaxLedger: first + 2,
 	})
@@ -188,7 +189,7 @@ func TestQueryEvents_ClosedRangeCompletesWithoutCursor(t *testing.T) {
 func TestQueryEvents_MinLedgerBelowGenesisFollowsTheFloorRules(t *testing.T) {
 	t.Run("ascending is out of range", func(t *testing.T) {
 		ctx, first := seedView(t)
-		_, err := queryEvents(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		_, err := api.QueryEvents(ctx, ViewQuerier{}, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 			MinLedger: 1,
 			MaxLedger: first + 2,
 		})
@@ -202,7 +203,7 @@ func TestQueryEvents_MinLedgerBelowGenesisFollowsTheFloorRules(t *testing.T) {
 
 	t.Run("descending reaches the oldest served ledger", func(t *testing.T) {
 		ctx, first := seedView(t)
-		resp, err := queryEvents(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		resp, err := api.QueryEvents(ctx, ViewQuerier{}, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 			MinLedger: 1,
 			MaxLedger: first + 2,
 			Order:     protocol.OrderDescending,
@@ -216,16 +217,18 @@ func TestQueryEvents_MinLedgerBelowGenesisFollowsTheFloorRules(t *testing.T) {
 func TestQueryEvents_TermBudgetRejectsBothRequestShapes(t *testing.T) {
 	// Three distinct topic values, so three distinct index terms.
 	filters := make([]protocol.QueryEventsFilter, 0, 3)
+	engineFilters := make([]event.Filter, 0, 3)
 	for _, label := range []string{"a0", "a1", "b0"} {
 		_, raw := symbolScVal(t, label)
 		filters = append(filters, protocol.QueryEventsFilter{Topic0: requestTopic(t, raw)})
+		engineFilters = append(engineFilters, event.Filter{Topics: [protocol.MaxTopicCount][]byte{raw}})
 	}
 	limits := testLimits()
 	limits.TermBudget = 2
 
 	t.Run("range request", func(t *testing.T) {
 		ctx, first := seedView(t)
-		_, err := queryEvents(ctx, limits, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		_, err := api.QueryEvents(ctx, ViewQuerier{}, limits, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 			MinLedger: first,
 			Filters:   filters,
 		})
@@ -240,7 +243,7 @@ func TestQueryEvents_TermBudgetRejectsBothRequestShapes(t *testing.T) {
 	// not skip it.
 	t.Run("range below genesis", func(t *testing.T) {
 		ctx, _ := seedView(t)
-		_, err := queryEvents(ctx, limits, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		_, err := api.QueryEvents(ctx, ViewQuerier{}, limits, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 			MaxLedger: 1,
 			Order:     protocol.OrderDescending,
 			Filters:   filters,
@@ -253,15 +256,12 @@ func TestQueryEvents_TermBudgetRejectsBothRequestShapes(t *testing.T) {
 
 	t.Run("cursor request", func(t *testing.T) {
 		ctx, first := seedView(t)
-		scope, err := eventScope(&protocol.QueryEventsRequest{
-			MinLedger: first,
-			Filters:   filters,
-		}, testOldest, first+2)
-		require.NoError(t, err)
+		scope := query.EventScope{MinLedger: first, Filters: engineFilters}
 		token, err := (&query.EventCursor{Scope: scope}).Encode()
 		require.NoError(t, err)
 
-		_, err = queryEvents(ctx, limits, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{Cursor: token})
+		_, err = api.QueryEvents(ctx, ViewQuerier{}, limits, rpcv2test.SilentLogger(),
+			&protocol.QueryEventsRequest{Cursor: token})
 		require.Error(t, err)
 		var data protocol.InvalidParamsErrorData
 		requireErrorData(t, err, protocol.ErrorReasonInvalidParams, &data)
@@ -292,7 +292,8 @@ func TestQueryEvents_CursorWithV2ForbiddenFilterIsMalformed(t *testing.T) {
 			}}).Encode()
 			require.NoError(t, err, "the codec mints these for the v1 adapter")
 
-			_, err = queryEvents(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{Cursor: token})
+			_, err = api.QueryEvents(ctx, ViewQuerier{}, testLimits(), rpcv2test.SilentLogger(),
+				&protocol.QueryEventsRequest{Cursor: token})
 			require.Error(t, err)
 			requireErrorData(t, err, protocol.ErrorReasonCursorMalformed, nil)
 		})
@@ -302,7 +303,7 @@ func TestQueryEvents_CursorWithV2ForbiddenFilterIsMalformed(t *testing.T) {
 func TestQueryEvents_MalformedCursorReportsTheServedRange(t *testing.T) {
 	ctx, first := seedView(t)
 
-	_, err := queryEvents(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+	_, err := api.QueryEvents(ctx, ViewQuerier{}, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 		Cursor: "gec1_not-a-real-token",
 	})
 	require.Error(t, err)
@@ -316,7 +317,7 @@ func TestQueryEvents_JSONInputFormatIsRejected(t *testing.T) {
 	ctx, first := seedView(t)
 	_, raw := symbolScVal(t, "a0")
 
-	_, err := queryEvents(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+	_, err := api.QueryEvents(ctx, ViewQuerier{}, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 		MinLedger:      first,
 		XDRInputFormat: protocol.FormatJSON,
 		Filters:        []protocol.QueryEventsFilter{{Topic0: requestTopic(t, raw)}},
@@ -328,7 +329,7 @@ func TestQueryEvents_JSONInputFormatIsRejected(t *testing.T) {
 func TestQueryEvents_InvalidRequestIsRejectedBeforeAnyRead(t *testing.T) {
 	ctx, first := seedView(t)
 
-	_, err := queryEvents(ctx, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+	_, err := api.QueryEvents(ctx, ViewQuerier{}, testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 		MinLedger: first,
 		Format:    "protobuf",
 	})
@@ -337,9 +338,10 @@ func TestQueryEvents_InvalidRequestIsRejectedBeforeAnyRead(t *testing.T) {
 }
 
 func TestQueryEvents_WithoutAViewIsAnError(t *testing.T) {
-	_, err := queryEvents(context.Background(), testLimits(), rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
-		MinLedger: chunk.FirstLedgerSeq,
-	})
+	_, err := api.QueryEvents(context.Background(), ViewQuerier{}, testLimits(), rpcv2test.SilentLogger(),
+		&protocol.QueryEventsRequest{
+			MinLedger: chunk.FirstLedgerSeq,
+		})
 	require.Error(t, err)
 	var jerr *jrpc2.Error
 	require.ErrorAs(t, err, &jerr)
@@ -356,7 +358,7 @@ func TestQueryEvents_LimitOverTheOperatorCapIsRejected(t *testing.T) {
 	for _, over := range []uint{3, protocol.QueryEventsMaxLimit + 1} {
 		t.Run(fmt.Sprintf("limit %d over the cap", over), func(t *testing.T) {
 			ctx, first := seedView(t)
-			_, err := queryEvents(ctx, limits, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+			_, err := api.QueryEvents(ctx, ViewQuerier{}, limits, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 				MinLedger: first,
 				Limit:     &over,
 			})
@@ -371,7 +373,7 @@ func TestQueryEvents_LimitOverTheOperatorCapIsRejected(t *testing.T) {
 	t.Run("limit 0", func(t *testing.T) {
 		ctx, first := seedView(t)
 		zero := uint(0)
-		_, err := queryEvents(ctx, limits, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		_, err := api.QueryEvents(ctx, ViewQuerier{}, limits, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 			MinLedger: first,
 			Limit:     &zero,
 		})
@@ -382,7 +384,7 @@ func TestQueryEvents_LimitOverTheOperatorCapIsRejected(t *testing.T) {
 
 	t.Run("at the cap", func(t *testing.T) {
 		ctx, first := seedView(t)
-		resp, err := queryEvents(ctx, limits, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		resp, err := api.QueryEvents(ctx, ViewQuerier{}, limits, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 			MinLedger: first,
 			Limit:     new(uint(2)),
 		})

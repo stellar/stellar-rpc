@@ -1,6 +1,7 @@
-// Package eventsapi serves the events methods, queryEvents and v1 getEvents.
-// It holds the handlers and the conversions between the SDK's request and response types and the
-// pager's own form (query.EventScope, stores/event.Filter).
+// Package eventsapi serves queryEvents for both daemons. It holds the
+// handler and the conversions between the SDK's request and response types
+// and the engine's form (eventquery.EventScope, eventquery.Filter). The
+// engine is injected as an eventquery.Querier.
 package eventsapi
 
 import (
@@ -22,10 +23,8 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/eventquery"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
 // Limits are the page caps an operator configures, which both events
@@ -36,6 +35,9 @@ type Limits struct {
 	// DefaultLimit applies when the request sets no limit.
 	DefaultLimit uint
 }
+
+// DefaultTermBudget is the getEvents v2 proposal's default term budget.
+const DefaultTermBudget uint = 15
 
 // QueryEventsLimits adds the term budget. Only queryEvents has one: v1's own caps
 // bound a request's terms already, so a budget there could only reject
@@ -48,13 +50,15 @@ type QueryEventsLimits struct {
 
 // NewQueryEventsHandler builds the queryEvents handler. It decodes the params itself,
 // not through methods.NewHandler, so an unknown field fails.
-func NewQueryEventsHandler(limits QueryEventsLimits, logger *supportlog.Entry) jrpc2.Handler {
+func NewQueryEventsHandler(
+	querier eventquery.Querier, limits QueryEventsLimits, logger *supportlog.Entry,
+) jrpc2.Handler {
 	return func(ctx context.Context, r *jrpc2.Request) (any, error) {
 		req, err := decodeRequest(r.ParamString(), limits.MaxLimit)
 		if err != nil {
 			return nil, err
 		}
-		return queryEvents(ctx, limits, logger, req)
+		return QueryEvents(ctx, querier, limits, logger, req)
 	}
 }
 
@@ -128,17 +132,23 @@ func invalidParams(message string) error {
 	})
 }
 
-// queryEvents classifies every failure in one place.
-func queryEvents(
-	ctx context.Context, limits QueryEventsLimits, logger *supportlog.Entry,
+// QueryEvents serves one request against querier and classifies every
+// failure in one place. Exported for the daemons' own tests.
+func QueryEvents(
+	ctx context.Context, querier eventquery.Querier, limits QueryEventsLimits, logger *supportlog.Entry,
 	req *protocol.QueryEventsRequest,
 ) (protocol.QueryEventsResponse, error) {
-	view, err := query.ViewFrom(ctx)
+	session, err := querier.Begin(ctx)
 	if err != nil {
 		return protocol.QueryEventsResponse{}, responseError(err, 0, 0, logger)
 	}
-	oldest, latest := view.OldestLedger(), view.LatestLedger()
-	resp, err := serve(ctx, view, limits, req, oldest, latest)
+	defer func() {
+		if cerr := session.Close(); cerr != nil {
+			logger.WithError(cerr).Warn("queryEvents: closing the read session")
+		}
+	}()
+	oldest, latest := session.OldestLedger(), session.LatestLedger()
+	resp, err := serve(ctx, session, limits, req, oldest, latest)
 	if err != nil {
 		return protocol.QueryEventsResponse{}, responseError(err, oldest, latest, logger)
 	}
@@ -146,7 +156,7 @@ func queryEvents(
 }
 
 func serve(
-	ctx context.Context, view *query.ReadView, limits QueryEventsLimits,
+	ctx context.Context, view eventquery.Session, limits QueryEventsLimits,
 	req *protocol.QueryEventsRequest, oldest, latest uint32,
 ) (protocol.QueryEventsResponse, error) {
 	cursor, limit, err := requestCursor(limits, req, oldest, latest)
@@ -161,7 +171,7 @@ func serve(
 	// A range with no ledgers in it is finished before it starts. Only a
 	// below-genesis max produces one; the pager would call it inverted.
 	if s := &cursor.Scope; s.MaxLedger != nil && s.MinLedger > *s.MaxLedger {
-		return response(&query.EventPage{Next: cursor, Status: query.ScanComplete}, req.Format, oldest, latest)
+		return response(&eventquery.EventPage{Next: cursor, Status: eventquery.ScanComplete}, req.Format, oldest, latest)
 	}
 	page, err := view.QueryEvents(ctx, cursor, limit)
 	if err != nil {
@@ -174,14 +184,14 @@ func serve(
 // advances, plus the limit to advance it by.
 func requestCursor(
 	limits QueryEventsLimits, req *protocol.QueryEventsRequest, oldest, latest uint32,
-) (query.EventCursor, int, error) {
+) (eventquery.EventCursor, int, error) {
 	// Check the operator's limit first. req.Valid checks
 	// protocol.QueryEventsMaxLimit, and whichever check runs first is the number
 	// the error names.
 	limit := limits.DefaultLimit
 	if req.Limit != nil {
 		if *req.Limit == 0 || *req.Limit > limits.MaxLimit {
-			return query.EventCursor{}, 0, &protocol.InvalidParamsError{
+			return eventquery.EventCursor{}, 0, &protocol.InvalidParamsError{
 				Message: fmt.Sprintf("limit must be between 1 and %d", limits.MaxLimit),
 				Data:    protocol.InvalidParamsErrorData{Reason: protocol.ErrorReasonInvalidParams},
 			}
@@ -193,23 +203,23 @@ func requestCursor(
 	// the newer gosec does not.
 	pageLimit := int(min(limit, math.MaxInt32)) //nolint:gosec,nolintlint
 	if err := req.Valid(protocol.QueryEventsDefaultMaxFilters); err != nil {
-		return query.EventCursor{}, 0, err
+		return eventquery.EventCursor{}, 0, err
 	}
 	if req.Cursor != "" {
-		cursor, err := query.DecodeEventCursor(req.Cursor)
+		cursor, err := eventquery.DecodeEventCursor(req.Cursor)
 		if err != nil {
-			return query.EventCursor{}, 0, err
+			return eventquery.EventCursor{}, 0, err
 		}
 		if err := validateCursorFilters(cursor.Scope.Filters); err != nil {
-			return query.EventCursor{}, 0, err
+			return eventquery.EventCursor{}, 0, err
 		}
 		return *cursor, pageLimit, nil
 	}
 	scope, err := eventScope(req, oldest, latest)
 	if err != nil {
-		return query.EventCursor{}, 0, err
+		return eventquery.EventCursor{}, 0, err
 	}
-	return query.EventCursor{Scope: scope}, pageLimit, nil
+	return eventquery.EventCursor{Scope: scope}, pageLimit, nil
 }
 
 // validateCursorFilters rejects filter shapes no queryEvents request can build, so
@@ -218,27 +228,27 @@ func requestCursor(
 // system, and a topic-count clause. The pager accepts all three because
 // the v1 handler builds them directly, as values rather than tokens; this
 // handler is the codec's only encoder.
-func validateCursorFilters(filters []event.Filter) error {
+func validateCursorFilters(filters []eventquery.Filter) error {
 	for i := range filters {
 		f := &filters[i]
 		hasTopic := slices.ContainsFunc(f.Topics[:], func(t []byte) bool { return len(t) > 0 })
 		switch {
 		case len(f.ContractID) == 0 && f.EventType == nil && !hasTopic:
-			return fmt.Errorf("%w: filter %d has no constraint", query.ErrCursorMalformed, i)
+			return fmt.Errorf("%w: filter %d has no constraint", eventquery.ErrCursorMalformed, i)
 		case f.EventType != nil && *f.EventType != xdr.ContractEventTypeContract &&
 			*f.EventType != xdr.ContractEventTypeSystem:
-			return fmt.Errorf("%w: filter %d names event type %d", query.ErrCursorMalformed, i, *f.EventType)
-		case f.TopicCount != (event.TopicCountFilter{}):
-			return fmt.Errorf("%w: filter %d carries a topic count", query.ErrCursorMalformed, i)
+			return fmt.Errorf("%w: filter %d names event type %d", eventquery.ErrCursorMalformed, i, *f.EventType)
+		case f.TopicCount != (eventquery.TopicCountFilter{}):
+			return fmt.Errorf("%w: filter %d carries a topic count", eventquery.ErrCursorMalformed, i)
 		}
 	}
 	return nil
 }
 
 // checkTermBudget reports both numbers on rejection. A client needs them
-// to see how far over it is and split the query.
-func checkTermBudget(filters []event.Filter, budget uint32) error {
-	used := uint32(event.CountDistinctTerms(filters)) //nolint:gosec // a term count cannot be negative
+// to see how far over it is and split the eventquery.
+func checkTermBudget(filters []eventquery.Filter, budget uint32) error {
+	used := uint32(eventquery.CountDistinctTerms(filters)) //nolint:gosec // a term count cannot be negative
 	if used <= budget {
 		return nil
 	}
@@ -256,7 +266,7 @@ func checkTermBudget(filters []event.Filter, budget uint32) error {
 // response carries a cursor on every page but the last: an absent cursor is
 // what tells a client the query is finished.
 func response(
-	page *query.EventPage, format string, oldest, latest uint32,
+	page *eventquery.EventPage, format string, oldest, latest uint32,
 ) (protocol.QueryEventsResponse, error) {
 	resp := protocol.QueryEventsResponse{
 		Events:        make([]protocol.EventInfo, 0, len(page.Events)),
@@ -266,13 +276,13 @@ func response(
 		LatestLedger:  latest,
 	}
 	for i := range page.Events {
-		info, err := eventInfo(&page.Events[i], format)
+		info, err := EventInfo(&page.Events[i], format)
 		if err != nil {
 			return protocol.QueryEventsResponse{}, err
 		}
 		resp.Events = append(resp.Events, info)
 	}
-	if page.Status != query.ScanComplete {
+	if page.Status != eventquery.ScanComplete {
 		token, err := page.Next.Encode()
 		if err != nil {
 			return protocol.QueryEventsResponse{}, fmt.Errorf("rpcv2: mint cursor: %w", err)
@@ -285,11 +295,11 @@ func response(
 // responseScannedLedger translates the cursor's watermark for the wire. A
 // cursor uses 0 to mean "nothing covered yet". On the wire that 0 would
 // claim the whole range, so report the ledger just outside it instead.
-func responseScannedLedger(next *query.EventCursor) uint32 {
+func responseScannedLedger(next *eventquery.EventCursor) uint32 {
 	if next.ScannedLedger != 0 {
 		return next.ScannedLedger
 	}
-	if next.Scope.Dir == query.Descending {
+	if next.Scope.Dir == eventquery.Descending {
 		// Saturate, so a scope topped at MaxUint32 cannot wrap to 0.
 		if *next.Scope.MaxLedger == math.MaxUint32 {
 			return math.MaxUint32
@@ -307,7 +317,7 @@ func responseError(err error, oldest, latest uint32, logger *supportlog.Entry) e
 	if errors.As(err, &invalid) {
 		return jrpcError(invalid.Message, invalid.Data)
 	}
-	var outOfRange *query.RangeError
+	var outOfRange *eventquery.RangeError
 	if errors.As(err, &outOfRange) {
 		return jrpcError(clientMessage(err), protocol.LedgerOutOfRangeErrorData{
 			MissingLedger: outOfRange.Requested,
@@ -316,14 +326,14 @@ func responseError(err error, oldest, latest uint32, logger *supportlog.Entry) e
 		})
 	}
 	switch {
-	case errors.Is(err, query.ErrCursorMalformed),
-		errors.Is(err, query.ErrCursorUnknownVersion),
-		errors.Is(err, query.ErrPositionMismatch):
+	case errors.Is(err, eventquery.ErrCursorMalformed),
+		errors.Is(err, eventquery.ErrCursorUnknownVersion),
+		errors.Is(err, eventquery.ErrPositionMismatch):
 		return jrpcError(clientMessage(err), protocol.CursorMalformedErrorData{
 			OldestLedger: oldest,
 			LatestLedger: latest,
 		})
-	case errors.Is(err, query.ErrInvalidLimit),
+	case errors.Is(err, eventquery.ErrInvalidLimit),
 		errors.Is(err, errJSONInputFormatUnsupported):
 		return invalidParams(clientMessage(err))
 	}
@@ -362,17 +372,17 @@ var errJSONInputFormatUnsupported = errors.New(
 // is pinned to latest, so every page of the session shares one top edge.
 func eventScope(
 	req *protocol.QueryEventsRequest, oldest, latest uint32,
-) (query.EventScope, error) {
+) (eventquery.EventScope, error) {
 	// A below-genesis minLedger is raised, not rejected: no ledger exists
 	// below genesis, so the range keeps the same ledgers. The max is never
 	// raised, because that would add genesis to a range that excluded it.
-	scope := query.EventScope{MinLedger: max(req.MinLedger, chunk.FirstLedgerSeq)}
+	scope := eventquery.EventScope{MinLedger: max(req.MinLedger, eventquery.FirstLedgerSeq)}
 	if req.Order == protocol.OrderDescending {
-		scope.Dir = query.Descending
+		scope.Dir = eventquery.Descending
 		// With no max from the client, a low edge past the tip is out of
 		// range.
 		if req.MaxLedger == 0 && scope.MinLedger > latest {
-			return query.EventScope{}, &query.RangeError{
+			return eventquery.EventScope{}, &eventquery.RangeError{
 				Requested: scope.MinLedger, Oldest: oldest, Latest: latest,
 			}
 		}
@@ -386,11 +396,11 @@ func eventScope(
 		scope.MaxLedger = &maxLedger
 	}
 	if len(req.Filters) > 0 {
-		scope.Filters = make([]event.Filter, len(req.Filters))
+		scope.Filters = make([]eventquery.Filter, len(req.Filters))
 		for i := range req.Filters {
 			f, err := eventFilter(&req.Filters[i], req.XDRInputFormat)
 			if err != nil {
-				return query.EventScope{}, fmt.Errorf("filters[%d]: %w", i, err)
+				return eventquery.EventScope{}, fmt.Errorf("filters[%d]: %w", i, err)
 			}
 			scope.Filters[i] = f
 		}
@@ -400,12 +410,12 @@ func eventScope(
 
 // eventFilter converts one request filter into the store's matching form.
 // queryEvents filters carry no arity, so TopicCount stays the wildcard.
-func eventFilter(f *protocol.QueryEventsFilter, xdrInputFormat string) (event.Filter, error) {
-	var out event.Filter
+func eventFilter(f *protocol.QueryEventsFilter, xdrInputFormat string) (eventquery.Filter, error) {
+	var out eventquery.Filter
 	if f.ContractID != "" {
 		raw, err := strkey.Decode(strkey.VersionByteContract, f.ContractID)
 		if err != nil {
-			return event.Filter{}, fmt.Errorf("contractId: %w", err)
+			return eventquery.Filter{}, fmt.Errorf("contractId: %w", err)
 		}
 		out.ContractID = raw
 	}
@@ -418,7 +428,7 @@ func eventFilter(f *protocol.QueryEventsFilter, xdrInputFormat string) (event.Fi
 	default:
 		// Valid admits only the two names above. Anything else is a
 		// handler bug, not client input.
-		return event.Filter{}, fmt.Errorf("unsupported event type %q", f.EventType)
+		return eventquery.Filter{}, fmt.Errorf("unsupported event type %q", f.EventType)
 	}
 	for i, topic := range f.Topics() {
 		if topic == nil {
@@ -427,34 +437,34 @@ func eventFilter(f *protocol.QueryEventsFilter, xdrInputFormat string) (event.Fi
 		// The check is here, not above the loop, so a filter with no topics
 		// is served whatever format it declares.
 		if xdrInputFormat == protocol.FormatJSON {
-			return event.Filter{}, errJSONInputFormatUnsupported
+			return eventquery.Filter{}, errJSONInputFormatUnsupported
 		}
 		// A base64 topic is a JSON string of the ScVal's XDR bytes. Valid
 		// checked them, and they are what the term index is keyed on.
 		var view xdr.ScValView
 		if err := json.Unmarshal(topic, &view); err != nil {
-			return event.Filter{}, fmt.Errorf("topic%d: %w", i, err)
+			return eventquery.Filter{}, fmt.Errorf("topic%d: %w", i, err)
 		}
 		out.Topics[i] = []byte(view)
 	}
 	return out, nil
 }
 
-func responseScanStatus(s query.ScanStatus) string {
+func responseScanStatus(s eventquery.ScanStatus) string {
 	switch s {
-	case query.ScanComplete:
+	case eventquery.ScanComplete:
 		return protocol.ScanStatusComplete
-	case query.ScanWaitingForLedgers:
+	case eventquery.ScanWaitingForLedgers:
 		return protocol.ScanStatusWaitingForLedgers
-	case query.ScanOldestReached:
+	case eventquery.ScanOldestReached:
 		return protocol.ScanStatusOldestReached
 	default:
 		return protocol.ScanStatusHasMore
 	}
 }
 
-// eventInfo builds one response event from a stored event payload.
-func eventInfo(p *event.Payload, format string) (protocol.EventInfo, error) {
+// EventInfo builds one response event from a stored event payload.
+func EventInfo(p *eventquery.Payload, format string) (protocol.EventInfo, error) {
 	cursor := protocol.Cursor{Ledger: p.LedgerSequence, Tx: p.TxIdx, Op: p.OpIdx, Event: p.EventIdx}
 	info, err := methods.EventInfoFromView(xdr.ContractEventView(p.ContractEventBytes), cursor,
 		time.Unix(p.LedgerClosedAt, 0).UTC().Format(time.RFC3339), p.TxHash.HexString(), format)

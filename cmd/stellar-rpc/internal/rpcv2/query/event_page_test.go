@@ -14,6 +14,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/eventquery"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
@@ -901,7 +902,7 @@ func TestQueryEvents_CursorValidation(t *testing.T) {
 		"more filters than the codec cap": {EventCursor{
 			Scope: EventScope{
 				MinLedger: f,
-				Filters:   make([]event.Filter, maxCursorFilters+1),
+				Filters:   make([]event.Filter, eventquery.MaxCursorFilters+1),
 			},
 		}, 1, ErrCursorMalformed},
 		// Malformed filters fail up front, even on a range this view

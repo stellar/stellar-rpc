@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+* `queryEvents` is now served by rpcv1 as well as the archival daemon, with the same request, response, cursor and error contract on both. Clients can page with a cursor minted by either daemon over the ledgers both hold.
+
 ### Removed
 * **`getEvents` responses no longer carry `inSuccessfulContractCall`.** This changes wire behavior for BOTH rpcv1 and rpcv2 — the response type is shared. The field has been deprecated ("remove in v24") since protocol 23, and its value was derivable anyway: `true` for every operation event, and `false` only on the fee and refund events of failed transactions.
 

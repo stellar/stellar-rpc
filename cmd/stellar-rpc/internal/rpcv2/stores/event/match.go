@@ -21,60 +21,26 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2"
 
-	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
-	"github.com/stellar/go-stellar-sdk/xdr"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/eventquery"
 )
 
-// Filter is one item in the union of an events query. Within a
-// single filter, every constrained field is AND-ed together against
-// the corresponding indexed field of an event. Fields left at their
-// zero value are wildcards.
-//
-// Topics[i] constrains topic position i. Positions beyond
-// protocol.MaxTopicCount are not indexed (see TermsForBytes).
-type Filter struct {
-	ContractID []byte
-	Topics     [protocol.MaxTopicCount][]byte
-	// EventType constrains the event's type. A nil pointer is a
-	// wildcard. A filter accepting several types is several filters.
-	EventType *xdr.ContractEventType
-	// TopicCount constrains how many topics the event carries.
-	TopicCount TopicCountFilter
-}
+// Filter, TopicCountFilter and ValidateFilters live in the shared
+// eventquery package, which both daemons' queryEvents engines use. The
+// index-side helpers below (term keys, term groups) stay here.
+type (
+	Filter           = eventquery.Filter
+	TopicCountFilter = eventquery.TopicCountFilter
+)
 
-// TopicCountFilter constrains an event's topic count to at least
-// Count, or to exactly Count when Exact is set. Its zero value, "at
-// least zero", is the wildcard.
-//
-// This is getEvents v1's topic arity: a topic filter ending in "**"
-// matches events with at least as many topics as the filter names, and
-// one that does not match events with exactly that many.
-type TopicCountFilter struct {
-	Count int
-	Exact bool
-}
+// ValidateFilters is eventquery.ValidateFilters.
+func ValidateFilters(filters []Filter) error { return eventquery.ValidateFilters(filters) }
 
-func (f TopicCountFilter) isWildcard() bool { return f == TopicCountFilter{} }
-
-// matches reports whether an event carrying n topics satisfies f. A
-// negative n stands for an event with no V0 body, which carries no
-// topics at all and satisfies no constraint.
-func (f TopicCountFilter) matches(n int) bool {
-	if n < 0 {
-		return false
-	}
-	if f.Exact {
-		return n == f.Count
-	}
-	return n >= f.Count
-}
-
-// termKeys returns the topic-count buckets whose union covers f. Every
+// topicCountTermKeys returns the topic-count buckets whose union covers f. Every
 // count ValidateFilters admits has a bucket of its own, and an "at
 // least" union is closed by the overflow bucket, so the union never
 // holds an event f does not match.
-func (f TopicCountFilter) termKeys() []TermKey {
-	if f.isWildcard() {
+func topicCountTermKeys(f TopicCountFilter) []TermKey {
+	if f.IsWildcard() {
 		return nil
 	}
 	if f.Exact {
@@ -89,7 +55,7 @@ func (f TopicCountFilter) termKeys() []TermKey {
 // over which values a filter names. The topic-count buckets are not
 // value terms; termGroups adds them separately and the budget does
 // not count them.
-func (f *Filter) valueTermKeys() []TermKey {
+func valueTermKeys(f *Filter) []TermKey {
 	var keys []TermKey
 	if len(f.ContractID) > 0 {
 		keys = append(keys, ComputeTermKey(f.ContractID, FieldContractID))
@@ -109,9 +75,9 @@ func (f *Filter) valueTermKeys() []TermKey {
 // termGroups returns the indexed terms this filter constrains, grouped
 // by field: the bitmaps within a group are OR-ed and the groups are
 // AND-ed. Only the topic-count group ever holds more than one term.
-func (f *Filter) termGroups() [][]TermKey {
+func termGroups(f *Filter) [][]TermKey {
 	var groups [][]TermKey
-	for _, key := range f.valueTermKeys() {
+	for _, key := range valueTermKeys(f) {
 		groups = append(groups, []TermKey{key})
 	}
 	// A constrained topic position already implies an "at least" count at
@@ -119,8 +85,8 @@ func (f *Filter) termGroups() [][]TermKey {
 	// that position. Skipping the group there keeps the common
 	// ["a", "**"] shape from OR-ing chunk-sized bucket bitmaps; the
 	// post-filter enforces the count either way.
-	if !f.impliesTopicCount() {
-		if keys := f.TopicCount.termKeys(); len(keys) > 0 {
+	if !impliesTopicCount(f) {
+		if keys := topicCountTermKeys(f.TopicCount); len(keys) > 0 {
 			groups = append(groups, keys)
 		}
 	}
@@ -129,7 +95,7 @@ func (f *Filter) termGroups() [][]TermKey {
 
 // impliesTopicCount reports whether f's constrained topic positions
 // already guarantee its topic-count bound.
-func (f *Filter) impliesTopicCount() bool {
+func impliesTopicCount(f *Filter) bool {
 	if f.TopicCount.Exact {
 		return false
 	}
@@ -339,7 +305,7 @@ func unionForFilters(
 	var uniqueKeys []TermKey
 
 	for i := range filters {
-		groups := filters[i].termGroups()
+		groups := termGroups(&filters[i])
 		if len(groups) == 0 {
 			return nil, true, nil
 		}
@@ -505,58 +471,6 @@ func streamUnion(
 	}
 }
 
-// ValidateFilters rejects filters that would silently never match
-// because of a malformed value. ContractId must be the canonical
-// 32-byte xdr.Hash form (or absent); a short ContractId would
-// bytes.Equal-mismatch every event without surfacing the bug to the
-// caller. A negative topic count is meaningless, and an event type
-// outside the enum is one no event can carry: both key a term nothing
-// is indexed under. Empty/wildcard fields are allowed. Exported so
-// the pager can refuse a malformed cursor up front, on every path;
-// Matches runs this check only when a chunk is actually scanned.
-func ValidateFilters(filters []Filter) error {
-	for fi := range filters {
-		f := &filters[fi]
-		if l := len(f.ContractID); l != 0 && l != 32 {
-			return fmt.Errorf(
-				"events: filter[%d].ContractID must be 0 or 32 bytes, got %d", fi, l)
-		}
-		if f.EventType != nil && !f.EventType.ValidEnum(int32(*f.EventType)) {
-			return fmt.Errorf(
-				"events: filter[%d].EventType %d is not a known event type", fi, *f.EventType)
-		}
-		for pos, topic := range f.Topics {
-			if len(topic) == 0 {
-				continue
-			}
-			// The topic bytes are what ComputeTermKey hashes, so a filter
-			// naming anything but one whole ScVal was never minted here.
-			// The length comparison rejects trailing bytes.
-			view := xdr.ScValView(topic)
-			raw, err := view.Raw()
-			if err != nil || len(raw) != len(topic) {
-				return fmt.Errorf(
-					"events: filter[%d].Topics[%d] is not one ScVal", fi, pos)
-			}
-		}
-		if f.TopicCount.Count < 0 {
-			return fmt.Errorf(
-				"events: filter[%d].TopicCount.Count must be non-negative, got %d",
-				fi, f.TopicCount.Count)
-		}
-		// Above MaxTopicCount the index cannot answer a count exactly:
-		// every such count shares the overflow bucket. No getEvents
-		// filter shape can name that many topics, and the cursor codec
-		// carries the count in one byte.
-		if f.TopicCount.Count > protocol.MaxTopicCount {
-			return fmt.Errorf(
-				"events: filter[%d].TopicCount.Count must be at most %d, got %d",
-				fi, protocol.MaxTopicCount, f.TopicCount.Count)
-		}
-	}
-	return nil
-}
-
 // CountDistinctTerms returns how many distinct value terms the
 // filters name, deduped by field and value together: one contract ID
 // in five filters counts once, the same bytes in two topic positions
@@ -569,7 +483,7 @@ func ValidateFilters(filters []Filter) error {
 func CountDistinctTerms(filters []Filter) int {
 	unique := make(map[TermKey]struct{})
 	for i := range filters {
-		for _, key := range filters[i].valueTermKeys() {
+		for _, key := range valueTermKeys(&filters[i]) {
 			unique[key] = struct{}{}
 		}
 	}
@@ -687,9 +601,9 @@ func streamRange(
 // Match.Ordinal.
 func postFilter(payloads []Payload, ids []uint32, filters []Filter) ([]Match, error) {
 	out := make([]Match, 0, len(payloads))
-	plan := planFilters(filters)
+	matcher := eventquery.NewMatcher(filters)
 	for i := range payloads {
-		ok, err := matchesAnyFilterView(payloads[i].ContractEventBytes, filters, &plan)
+		ok, err := matcher.Matches(payloads[i].ContractEventBytes)
 		if err != nil {
 			return nil, err
 		}
@@ -698,241 +612,4 @@ func postFilter(payloads []Payload, ids []uint32, filters []Filter) ([]Match, er
 		}
 	}
 	return out, nil
-}
-
-// filterPlan caches per-query info computed once at postFilter entry
-// and consumed by matchesAnyFilterView: the topic positions any
-// clause constrains and the highest constrained position (caps the
-// view-path topic walk).
-type filterPlan struct {
-	anyTopic    bool
-	maxTopicIdx int // -1 if no clause constrains any topic
-	needsTopic  [protocol.MaxTopicCount]bool
-}
-
-func planFilters(filters []Filter) filterPlan {
-	plan := filterPlan{maxTopicIdx: -1}
-	for fi := range filters {
-		f := &filters[fi]
-		for i, want := range f.Topics {
-			if len(want) == 0 {
-				continue
-			}
-			plan.needsTopic[i] = true
-			plan.anyTopic = true
-			if i > plan.maxTopicIdx {
-				plan.maxTopicIdx = i
-			}
-		}
-	}
-	return plan
-}
-
-// eventFields holds the decoded fields matchesAnyFilterView pulls out
-// of one event, each resolved at most once and only when some clause
-// asks for it.
-type eventFields struct {
-	contractID     []byte
-	contractIDDone bool
-
-	eventType     xdr.ContractEventType
-	eventTypeDone bool
-
-	topicCount     int
-	topicCountDone bool
-
-	topics     [protocol.MaxTopicCount][]byte
-	topicsDone bool
-}
-
-// matchesAnyFilterView reports whether the event encoded in raw
-// satisfies at least one filter clause. It resolves each field a
-// clause constrains via xdr.ContractEventView navigation,
-// byte-comparing aliased .Raw() slices against the filter clauses.
-// Zero per-event allocation — every byte slice involved aliases into
-// raw.
-//
-// Fields are resolved at most once and only when a clause asks for
-// them, cheapest first: events that fail every clause's type or
-// ContractId check never trigger the topic walk, and events that pass
-// do exactly one linear walk over Topics up to the highest constrained
-// position.
-//
-//nolint:gocognit,cyclop // linear clause loop with per-field lazy caches; helpers would fragment the invariant
-func matchesAnyFilterView(raw []byte, filters []Filter, plan *filterPlan) (bool, error) {
-	ev := xdr.ContractEventView(raw)
-	var got eventFields
-
-	for fi := range filters {
-		f := &filters[fi]
-		if f.EventType != nil {
-			if !got.eventTypeDone {
-				eventType, err := resolveViewEventType(ev)
-				if err != nil {
-					return false, err
-				}
-				got.eventType, got.eventTypeDone = eventType, true
-			}
-			if got.eventType != *f.EventType {
-				continue
-			}
-		}
-		if len(f.ContractID) > 0 {
-			if !got.contractIDDone {
-				cid, err := resolveViewContractID(ev)
-				if err != nil {
-					return false, err
-				}
-				got.contractID, got.contractIDDone = cid, true
-			}
-			if !bytes.Equal(got.contractID, f.ContractID) {
-				continue
-			}
-		}
-		if !f.TopicCount.isWildcard() {
-			if !got.topicCountDone {
-				n, err := resolveViewTopicCount(ev)
-				if err != nil {
-					return false, err
-				}
-				got.topicCount, got.topicCountDone = n, true
-			}
-			if !f.TopicCount.matches(got.topicCount) {
-				continue
-			}
-		}
-		matched := true
-		for i, want := range f.Topics {
-			if len(want) == 0 {
-				continue
-			}
-			if !got.topicsDone {
-				if err := collectTopicViewBytes(ev, plan, &got.topics); err != nil {
-					return false, err
-				}
-				got.topicsDone = true
-			}
-			g := got.topics[i]
-			if g == nil || !bytes.Equal(g, want) {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func resolveViewEventType(ev xdr.ContractEventView) (xdr.ContractEventType, error) {
-	typeView, err := ev.Type()
-	if err != nil {
-		return 0, fmt.Errorf("events: post-filter view Type: %w", err)
-	}
-	eventType, err := typeView.Value()
-	if err != nil {
-		return 0, fmt.Errorf("events: post-filter view Type value: %w", err)
-	}
-	return eventType, nil
-}
-
-// resolveViewTopics returns the event's Body.V0.Topics. ok is false for
-// a body version that carries no topics at all.
-func resolveViewTopics(ev xdr.ContractEventView) (xdr.ContractEventV0TopicsView, bool, error) {
-	body, err := ev.Body()
-	if err != nil {
-		return nil, false, fmt.Errorf("events: post-filter view Body: %w", err)
-	}
-	bodyV, err := body.V()
-	if err != nil {
-		return nil, false, fmt.Errorf("events: post-filter view Body.V: %w", err)
-	}
-	if bodyV != 0 {
-		return nil, false, nil
-	}
-	v0, err := body.V0()
-	if err != nil {
-		return nil, false, fmt.Errorf("events: post-filter view Body.V0: %w", err)
-	}
-	topics, err := v0.Topics()
-	if err != nil {
-		return nil, false, fmt.Errorf("events: post-filter view Body.V0.Topics: %w", err)
-	}
-	return topics, true, nil
-}
-
-// resolveViewTopicCount returns how many topics the event carries, or
-// -1 when it has no V0 body, which TopicCountFilter.matches rejects for
-// every constraint.
-func resolveViewTopicCount(ev xdr.ContractEventView) (int, error) {
-	topics, ok, err := resolveViewTopics(ev)
-	if err != nil || !ok {
-		return -1, err
-	}
-	count, err := topics.Count()
-	if err != nil {
-		return 0, fmt.Errorf("events: post-filter view Body.V0.Topics.Count: %w", err)
-	}
-	return count, nil
-}
-
-// resolveViewContractID returns the event's ContractId aliased into the
-// raw buffer, or nil when it has none.
-func resolveViewContractID(ev xdr.ContractEventView) ([]byte, error) {
-	cidOpt, err := ev.ContractId()
-	if err != nil {
-		return nil, fmt.Errorf("events: post-filter view ContractId opt: %w", err)
-	}
-	cidView, present, err := cidOpt.Unwrap()
-	if err != nil {
-		return nil, fmt.Errorf("events: post-filter view ContractId unwrap: %w", err)
-	}
-	if !present {
-		return nil, nil
-	}
-	cid, err := cidView.Raw()
-	if err != nil {
-		return nil, fmt.Errorf("events: post-filter view ContractId raw: %w", err)
-	}
-	return cid, nil
-}
-
-// collectTopicViewBytes walks the ContractEventView's Body.V0.Topics
-// once linearly and captures each constrained position's .Raw() bytes
-// into topicRaw. Stops after the highest constrained position so the
-// walk is O(plan.maxTopicIdx+1) rather than the O(MaxTopicCount²)
-// that calling .At(j) for each j would produce (ScVecView.At is a
-// prefix walk under the hood). A body version with no topics leaves
-// topicRaw zero (every constrained position will mismatch downstream).
-func collectTopicViewBytes(
-	ev xdr.ContractEventView,
-	plan *filterPlan,
-	topicRaw *[protocol.MaxTopicCount][]byte,
-) error {
-	if !plan.anyTopic {
-		return nil
-	}
-	topicsArr, ok, err := resolveViewTopics(ev)
-	if err != nil || !ok {
-		return err
-	}
-	i := 0
-	for topic, ierr := range topicsArr.Iter() {
-		if ierr != nil {
-			return fmt.Errorf("events: post-filter view topic iter: %w", ierr)
-		}
-		if i > plan.maxTopicIdx || i >= protocol.MaxTopicCount {
-			break
-		}
-		if plan.needsTopic[i] {
-			rawBytes, err := topic.Raw()
-			if err != nil {
-				return fmt.Errorf("events: post-filter view topic[%d].Raw: %w", i, err)
-			}
-			topicRaw[i] = rawBytes
-		}
-		i++
-	}
-	return nil
 }

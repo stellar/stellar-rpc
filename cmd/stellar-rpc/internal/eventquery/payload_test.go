@@ -1,4 +1,4 @@
-package event
+package eventquery
 
 import (
 	"encoding/binary"

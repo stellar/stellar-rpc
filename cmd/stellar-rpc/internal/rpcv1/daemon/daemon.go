@@ -401,6 +401,7 @@ func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *
 		LedgerReader:          sqlitedb.NewLedgerReader(daemon.db),
 		TransactionReader:     sqlitedb.NewTransactionReader(logger, daemon.db, cfg.NetworkPassphrase),
 		EventReader:           sqlitedb.NewEventReader(logger, daemon.db),
+		EventQuerier:          sqlitedb.NewEventQuerier(logger, daemon.db),
 		PreflightGetter:       daemon.preflightWorkerPool,
 		DataStoreLedgerReader: dataStoreLedgerReader,
 	})

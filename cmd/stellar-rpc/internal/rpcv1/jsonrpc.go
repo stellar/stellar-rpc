@@ -4,6 +4,8 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/eventquery"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/eventsapi"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
@@ -20,6 +22,7 @@ type HandlerParams struct {
 	FeeStatWindows        *feewindow.FeeWindows
 	TransactionReader     store.TransactionReader
 	EventReader           store.EventReader
+	EventQuerier          eventquery.Querier
 	LedgerReader          store.LedgerReader
 	Logger                *log.Entry
 	PreflightGetter       methods.PreflightGetter
@@ -54,12 +57,30 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			MaxTransactionsLimit:     cfg.MaxTransactionsLimit,
 			DefaultTransactionsLimit: cfg.DefaultTransactionsLimit,
 		})
+	// queryEvents shares getEvents' operator knobs for now: page caps, queue
+	// and duration limits. The term budget is the archival daemon's default;
+	// SQLite has no index terms, so the budget only keeps the contract the
+	// same on both daemons.
+	specs = append(specs, jsonrpc.HandlerSpec{
+		MethodName: protocol.QueryEventsMethodName,
+		Handler: eventsapi.NewQueryEventsHandler(params.EventQuerier, eventsapi.QueryEventsLimits{
+			Limits: eventsapi.Limits{
+				MaxLimit:     min(cfg.MaxEventsLimit, protocol.QueryEventsMaxLimit),
+				DefaultLimit: min(cfg.DefaultEventsLimit, protocol.QueryEventsMaxLimit),
+			},
+			TermBudget: uint32(eventsapi.DefaultTermBudget),
+		}, params.Logger),
+	})
 	specs = jsonrpc.LimitsByMethod{
 		protocol.GetHealthMethodName: {
 			QueueLimit:           cfg.RequestBacklogGetHealthQueueLimit,
 			RequestDurationLimit: cfg.MaxGetHealthExecutionDuration,
 		},
 		protocol.GetEventsMethodName: {
+			QueueLimit:           cfg.RequestBacklogGetEventsQueueLimit,
+			RequestDurationLimit: cfg.MaxGetEventsExecutionDuration,
+		},
+		protocol.QueryEventsMethodName: {
 			QueueLimit:           cfg.RequestBacklogGetEventsQueueLimit,
 			RequestDurationLimit: cfg.MaxGetEventsExecutionDuration,
 		},

@@ -1,4 +1,4 @@
-package query
+package eventquery
 
 // The getEvents v2 cursor envelope and its codec: the versioned, opaque,
 // self-contained structure behind a response's cursor string. Only the server
@@ -21,8 +21,6 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
 // ErrCursorMalformed rejects a cursor string that does not decode to a
@@ -44,12 +42,12 @@ const cursorPrefixV1 = "gec1_"
 // content.
 const maxCursorBytes = 1 << 20
 
-// maxCursorFilters caps the filter count in both codec directions. It
+// MaxCursorFilters caps the filter count in both codec directions. It
 // matches the getEvents v2 proposal's 256-filter request cap: no encoder
 // mints more, so a cursor beyond it is forged or corrupt. Cursors never
 // expire, so this constant can only grow; lowering it would reject
 // outstanding cursors minted at the old cap.
-const maxCursorFilters = 256
+const MaxCursorFilters = 256
 
 const contractIDLen = 32
 
@@ -97,7 +95,7 @@ type EventScope struct {
 	MinLedger uint32
 	MaxLedger *uint32
 	Dir       Direction
-	Filters   []event.Filter
+	Filters   []Filter
 }
 
 // EventCursor is the envelope: the server-minted structure inside the opaque
@@ -115,7 +113,7 @@ type EventCursor struct {
 // Encode serializes the envelope as a version-1 token. Encode fails on what
 // no decode accepts: an invalid Direction, a descending query without
 // MaxLedger, MinLedger above a present MaxLedger, a wrong-length ContractID,
-// more than maxCursorFilters filters, or output beyond maxCursorBytes — a
+// more than MaxCursorFilters filters, or output beyond maxCursorBytes — a
 // minting bug fails on the page that has it rather than on the resume that
 // follows.
 //
@@ -142,9 +140,9 @@ func (e *EventCursor) Encode() (string, error) {
 	if e.Position != nil {
 		flags |= flagHasPos
 	}
-	if len(e.Scope.Filters) > maxCursorFilters {
+	if len(e.Scope.Filters) > MaxCursorFilters {
 		return "", fmt.Errorf("query: encode cursor: %d filters exceeds the %d-filter cap",
-			len(e.Scope.Filters), maxCursorFilters)
+			len(e.Scope.Filters), MaxCursorFilters)
 	}
 
 	body := []byte{flags}
@@ -160,7 +158,7 @@ func (e *EventCursor) Encode() (string, error) {
 		}
 	}
 	body = binary.BigEndian.AppendUint32(body, e.ScannedLedger)
-	count := uint16(len(e.Scope.Filters)) //nolint:gosec // capped at maxCursorFilters above
+	count := uint16(len(e.Scope.Filters)) //nolint:gosec // capped at MaxCursorFilters above
 	body = binary.BigEndian.AppendUint16(body, count)
 	for i := range e.Scope.Filters {
 		var err error
@@ -178,7 +176,7 @@ func (e *EventCursor) Encode() (string, error) {
 }
 
 // filterFlags validates f's fields and computes its fflags byte.
-func filterFlags(f *event.Filter) (byte, error) {
+func filterFlags(f *Filter) (byte, error) {
 	var fflags byte
 	if n := len(f.ContractID); n > 0 {
 		if n != contractIDLen {
@@ -192,7 +190,7 @@ func filterFlags(f *event.Filter) (byte, error) {
 		}
 		fflags |= fflagType
 	}
-	if f.TopicCount != (event.TopicCountFilter{}) {
+	if f.TopicCount != (TopicCountFilter{}) {
 		if f.TopicCount.Count < 0 || f.TopicCount.Count > protocol.MaxTopicCount {
 			return 0, fmt.Errorf("topic count %d outside [0, %d]",
 				f.TopicCount.Count, protocol.MaxTopicCount)
@@ -210,7 +208,7 @@ func filterFlags(f *event.Filter) (byte, error) {
 	return fflags, nil
 }
 
-func appendFilter(body []byte, f *event.Filter) ([]byte, error) {
+func appendFilter(body []byte, f *Filter) ([]byte, error) {
 	fflags, err := filterFlags(f)
 	if err != nil {
 		return nil, err
@@ -384,19 +382,19 @@ func readEnvelope(r *cursorReader) (*EventCursor, error) {
 	return env, nil
 }
 
-func readFilters(r *cursorReader) ([]event.Filter, error) {
+func readFilters(r *cursorReader) ([]Filter, error) {
 	count, err := r.u16()
 	if err != nil {
 		return nil, err
 	}
-	if int(count) > maxCursorFilters {
+	if int(count) > MaxCursorFilters {
 		return nil, fmt.Errorf("%w: %d filters exceeds the %d-filter cap",
-			ErrCursorMalformed, count, maxCursorFilters)
+			ErrCursorMalformed, count, MaxCursorFilters)
 	}
 	if count == 0 {
 		return nil, nil
 	}
-	filters := make([]event.Filter, count)
+	filters := make([]Filter, count)
 	for i := range filters {
 		if err := readFilter(r, &filters[i]); err != nil {
 			return nil, fmt.Errorf("filter %d: %w", i, err)
@@ -407,7 +405,7 @@ func readFilters(r *cursorReader) ([]event.Filter, error) {
 
 // readFilterTypeCount decodes the event-type and topic-count bytes
 // fflags declares, validating the values and the flag combinations.
-func readFilterTypeCount(r *cursorReader, fflags byte, f *event.Filter) error {
+func readFilterTypeCount(r *cursorReader, fflags byte, f *Filter) error {
 	if fflags&fflagExact != 0 && fflags&fflagCount == 0 {
 		return fmt.Errorf("%w: exact bit without a topic count", ErrCursorMalformed)
 	}
@@ -436,12 +434,12 @@ func readFilterTypeCount(r *cursorReader, fflags byte, f *event.Filter) error {
 			// "At least zero" is the wildcard, which encodes as absent.
 			return fmt.Errorf("%w: topic count 0 without the exact bit", ErrCursorMalformed)
 		}
-		f.TopicCount = event.TopicCountFilter{Count: int(b), Exact: exact}
+		f.TopicCount = TopicCountFilter{Count: int(b), Exact: exact}
 	}
 	return nil
 }
 
-func readFilter(r *cursorReader, f *event.Filter) error {
+func readFilter(r *cursorReader, f *Filter) error {
 	fflags, err := r.u8()
 	if err != nil {
 		return err

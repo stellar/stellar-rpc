@@ -26,6 +26,7 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	api "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/eventsapi"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
@@ -202,7 +203,7 @@ func newShimClient(t *testing.T, lcms [][]byte) *jrpc2.Client {
 	view, err := r.NewReadView()
 	require.NoError(t, err)
 	t.Cleanup(view.Release)
-	base := NewV1Handler(Limits{
+	base := NewV1Handler(api.Limits{
 		MaxLimit:     parityMaxLimit,
 		DefaultLimit: parityDefaultLimit,
 	}, logger)

@@ -14,66 +14,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/eventquery"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
-
-// ErrPositionMismatch: the cursor's Position does not identify a
-// stored event on this node; the client must restart the query.
-var ErrPositionMismatch = errors.New("query: cursor position does not match stored events")
-
-// ErrInvalidLimit rejects a non-positive page limit. Its own sentinel,
-// not ErrCursorMalformed: the limit is a per-request parameter, not
-// part of the cursor, and the handler maps the two differently.
-var ErrInvalidLimit = errors.New("query: page limit must be positive")
-
-// MaxScanLedgers bounds the ledgers one page may scan, so a filter that
-// matches nothing cannot walk the node's whole retention in one call:
-// the page stops at the window's edge and returns ScanHasMore with the
-// watermark advanced through it. The value is the per-request scan bound
-// (see chunk.LedgersPerChunk): a page touches at most two chunks.
-// Registry.maxScanLedgers shrinks it in tests.
-//
-// Exported because a handler whose own window must fit inside one page
-// has to pin itself against this number, not against the constant it
-// happens to derive from.
-const MaxScanLedgers = chunk.LedgersPerChunk
-
-// ScanStatus is where a page's walk stopped; the handler maps it to
-// the wire scanStatus.
-type ScanStatus int
-
-const (
-	// ScanHasMore: more range remains. The page filled, or the page's
-	// scan window ended with scope beyond it.
-	ScanHasMore ScanStatus = iota
-	// ScanComplete: the walk finished the cursor's bounds within
-	// served history.
-	ScanComplete
-	// ScanWaitingForLedgers: the scope needs ledgers past the view's
-	// last committed one. An ascending walk reached it, the whole
-	// scope is still above it, or a descending scope's top edge is
-	// above it: descending never revisits a ledger, so the page waits
-	// (empty, cursor unchanged) rather than clamp the top away.
-	ScanWaitingForLedgers
-	// ScanOldestReached: a descending walk reached the oldest served
-	// ledger, and the scope extends below it.
-	ScanOldestReached
-)
-
-// EventPage is one page of results: the events in walk order and the
-// advanced cursor. Next carries the same Scope with moved bookmarks:
-// ScannedLedger advances only when ledgers were covered, and Position
-// is present only while it leads the watermark (assemblePage drops a
-// passed one).
-type EventPage struct {
-	Events []event.Payload
-	Next   EventCursor
-	Status ScanStatus
-}
 
 // QueryEvents advances cursor by one page of at most limit events.
 // Errors: ErrCursorMalformed for a malformed cursor, ErrInvertedRange
@@ -137,12 +83,12 @@ func (a *ReadView) QueryEventsFrom(
 func (a *ReadView) queryEvents(
 	ctx context.Context, cursor EventCursor, from *EventID, limit int,
 ) (*EventPage, error) {
-	if err := validateCursor(&cursor, limit); err != nil {
+	if err := eventquery.ValidateCursor(&cursor, limit); err != nil {
 		return nil, err
 	}
 	desc := cursor.Scope.Dir == Descending
 
-	lo, hi, reenter := resumeBounds(&cursor)
+	lo, hi, reenter := eventquery.ResumeBounds(&cursor)
 	if from != nil {
 		if from.Ledger < cursor.Scope.MinLedger ||
 			(cursor.Scope.MaxLedger != nil && from.Ledger > *cursor.Scope.MaxLedger) {
@@ -176,14 +122,7 @@ func (a *ReadView) queryEvents(
 	if window == 0 {
 		window = MaxScanLedgers
 	}
-	truncated := hi-lo+1 > window
-	if truncated {
-		if desc {
-			lo = hi - window + 1
-		} else {
-			hi = lo + window - 1
-		}
-	}
+	lo, hi, truncated := eventquery.ClipScanWindow(lo, hi, window, desc)
 
 	chunks := chunksBetween(chunk.IDFromLedger(lo), chunk.IDFromLedger(hi), cursor.Scope.Dir)
 	resume := resumeAt{pos: reenter, from: from}
@@ -192,145 +131,6 @@ func (a *ReadView) queryEvents(
 		return nil, err
 	}
 	return a.assemblePage(cursor, walk, lo, hi, truncated), nil
-}
-
-func validateCursor(cursor *EventCursor, limit int) error {
-	if limit <= 0 {
-		return fmt.Errorf("%w: got %d", ErrInvalidLimit, limit)
-	}
-	if err := validateScope(&cursor.Scope); err != nil {
-		return err
-	}
-	return validateBookmarks(cursor)
-}
-
-// validateScope rejects scope shapes the server never mints.
-func validateScope(scope *EventScope) error {
-	switch scope.Dir {
-	case Ascending:
-	case Descending:
-		if scope.MaxLedger == nil {
-			return fmt.Errorf("%w: descending scope without a max ledger", ErrCursorMalformed)
-		}
-	default:
-		return fmt.Errorf("%w: invalid direction %d", ErrCursorMalformed, scope.Dir)
-	}
-	if scope.MaxLedger != nil && scope.MinLedger > *scope.MaxLedger {
-		return fmt.Errorf("%w: [%d, %d]", ErrInvertedRange, scope.MinLedger, *scope.MaxLedger)
-	}
-	// No ledger exists below genesis. A scope that starts below it can
-	// never finish: a descending walk would report OldestReached
-	// forever. The server never mints such a scope.
-	if scope.MinLedger < chunk.FirstLedgerSeq {
-		return fmt.Errorf("%w: min ledger %d is below genesis (%d)",
-			ErrCursorMalformed, scope.MinLedger, chunk.FirstLedgerSeq)
-	}
-	// The codec caps the filter count; a scope above it would do the
-	// page's full work and then fail to encode the advanced cursor, an
-	// internal error where a client error belongs. Refuse it up front.
-	if len(scope.Filters) > maxCursorFilters {
-		return fmt.Errorf("%w: %d filters exceeds the %d-filter cap",
-			ErrCursorMalformed, len(scope.Filters), maxCursorFilters)
-	}
-	// Checked here so a bad cursor fails on every path. Matches also
-	// checks, but only when a chunk is scanned; the empty-range and
-	// waiting paths scan none.
-	if err := event.ValidateFilters(scope.Filters); err != nil {
-		return fmt.Errorf("%w: %w", ErrCursorMalformed, err)
-	}
-	return nil
-}
-
-// validateBookmarks rejects bookmarks outside the scope's bounds. The
-// server mints scope and bookmarks together, always consistent, so a
-// bookmark outside them can only come from a forged or corrupted
-// cursor. Refuse it rather than guess.
-func validateBookmarks(cursor *EventCursor) error {
-	if pos := cursor.Position; pos != nil {
-		if pos.Ledger < cursor.Scope.MinLedger ||
-			(cursor.Scope.MaxLedger != nil && pos.Ledger > *cursor.Scope.MaxLedger) {
-			return fmt.Errorf("%w: position ledger %d outside scope bounds",
-				ErrCursorMalformed, pos.Ledger)
-		}
-	}
-	// MaxUint32 is rejected for its own reason: no ledger carries that
-	// number, and an ascending resume would compute mark+1, which wraps.
-	if mark := cursor.ScannedLedger; mark == math.MaxUint32 ||
-		(mark != 0 && mark < cursor.Scope.MinLedger) ||
-		(cursor.Scope.MaxLedger != nil && mark > *cursor.Scope.MaxLedger) {
-		return fmt.Errorf("%w: scanned ledger %d is not a servable ledger",
-			ErrCursorMalformed, mark)
-	}
-	return validateBookmarkPair(cursor)
-}
-
-// validateBookmarkPair rejects Position and ScannedLedger combinations
-// no walk mints together. assemblePage drops a Position once the
-// watermark passes it, so a present Position is exactly the one live
-// mid-ledger re-entry point: one ledger past the mark in walk order,
-// or the zero-watermark anchor, the first ledger the walk serves
-// (MinLedger ascending; MaxLedger descending, which validateScope has
-// already guaranteed, so the dereference is safe).
-func validateBookmarkPair(cursor *EventCursor) error {
-	pos, mark := cursor.Position, cursor.ScannedLedger
-	if pos == nil {
-		return nil
-	}
-	var want uint32
-	switch {
-	case cursor.Scope.Dir == Descending && mark == 0:
-		want = *cursor.Scope.MaxLedger
-	case cursor.Scope.Dir == Descending:
-		want = mark - 1
-	case mark == 0:
-		want = cursor.Scope.MinLedger
-	default:
-		want = mark + 1
-	}
-	if pos.Ledger != want {
-		return fmt.Errorf("%w: position ledger %d does not pair with scanned ledger %d",
-			ErrCursorMalformed, pos.Ledger, mark)
-	}
-	return nil
-}
-
-// resumeBounds narrows the scope's bounds by the bookmarks and
-// returns the pre-clamp window [lo, hi]. A present Position is the one
-// live mid-ledger re-entry point (validateBookmarkPair): the window
-// starts at its ledger and Position is returned for the re-entry
-// clip. Otherwise the walk resumes just past the watermark.
-func resumeBounds(cursor *EventCursor) (uint32, uint32, *EventPosition) {
-	lo, hi := cursor.Scope.MinLedger, uint32(math.MaxUint32)
-	if cursor.Scope.MaxLedger != nil {
-		hi = *cursor.Scope.MaxLedger
-	}
-	pos, mark := cursor.Position, cursor.ScannedLedger
-	if cursor.Scope.Dir == Descending {
-		switch {
-		case pos != nil:
-			return lo, pos.Ledger, pos
-		case mark > 0:
-			hi = min(hi, mark-1)
-		}
-		return lo, hi, nil
-	}
-	switch {
-	case pos != nil:
-		return pos.Ledger, hi, pos
-	case mark > 0:
-		lo = max(lo, mark+1)
-	}
-	return lo, hi, nil
-}
-
-// walkResult accumulates the chunks' results; see chunkResult for the
-// stop-fact fields. finished means every part was consumed.
-type walkResult struct {
-	events         []event.Payload
-	last           *EventPosition
-	nextUnserved   *uint32
-	coveredThrough *uint32
-	finished       bool
 }
 
 // eventPart is one chunk's slice of a clamped range: the reader plus
@@ -348,40 +148,40 @@ type eventPart struct {
 func (a *ReadView) walkChunks(
 	ctx context.Context, chunks []chunk.ID, lo, hi uint32, filters []event.Filter,
 	resume resumeAt, desc bool, limit int,
-) (walkResult, error) {
-	var walk walkResult
+) (WalkResult, error) {
+	var walk WalkResult
 	for i, c := range chunks {
 		if i > 0 {
 			resume = resumeAt{} // the resume point is always in the first chunk
 		}
 		r, err := a.Events(c)
 		if err != nil {
-			return walkResult{}, err
+			return WalkResult{}, err
 		}
 		part := eventPart{
 			Chunk: c, Reader: r,
 			From: max(lo, c.FirstLedger()), To: min(hi, c.LastLedger()),
 		}
-		res, err := scanChunk(ctx, part, filters, resume, desc, limit-len(walk.events))
+		res, err := scanChunk(ctx, part, filters, resume, desc, limit-len(walk.Events))
 		if err != nil {
-			return walkResult{}, err
+			return WalkResult{}, err
 		}
-		walk.events = append(walk.events, res.events...)
+		walk.Events = append(walk.Events, res.events...)
 		if res.last != nil {
-			walk.last = res.last
+			walk.Last = res.last
 		}
 		if res.nextUnserved != nil {
-			walk.nextUnserved = res.nextUnserved
+			walk.NextUnserved = res.nextUnserved
 			return walk, nil
 		}
 		if res.coveredThrough != nil {
-			walk.coveredThrough = res.coveredThrough
+			walk.CoveredThrough = res.coveredThrough
 		}
-		if len(walk.events) >= limit && i < len(chunks)-1 {
+		if len(walk.Events) >= limit && i < len(chunks)-1 {
 			return walk, nil // full exactly at a chunk boundary, range remaining
 		}
 	}
-	walk.finished = true
+	walk.Finished = true
 	return walk, nil
 }
 
@@ -569,70 +369,7 @@ func resumeOrdinal(
 // walk's facts: the advanced bookmarks never regress and the watermark
 // never leaves the clamped window [clo, chi].
 func (a *ReadView) assemblePage(
-	cursor EventCursor, walk walkResult, clo, chi uint32, truncated bool,
+	cursor EventCursor, walk WalkResult, clo, chi uint32, truncated bool,
 ) *EventPage {
-	desc := cursor.Scope.Dir == Descending
-	next := cursor
-	if walk.last != nil {
-		next.Position = walk.last
-	}
-	next.ScannedLedger = watermark(&cursor, walk, clo, chi, desc)
-	// Drop a Position the watermark has passed: resumeBounds re-enters
-	// only from a leading Position, so a passed one would never be read
-	// again. Every cursor carries either a bare watermark or the one
-	// live mid-ledger re-entry point.
-	if pos := next.Position; pos != nil {
-		passed := pos.Ledger <= next.ScannedLedger
-		if desc {
-			passed = next.ScannedLedger != 0 && pos.Ledger >= next.ScannedLedger
-		}
-		if passed {
-			next.Position = nil
-		}
-	}
-
-	status := ScanHasMore
-	if walk.finished && !truncated {
-		// A truncated window is never terminal: scope remains beyond it.
-		status = terminalStatus(&cursor.Scope, desc, a.OldestLedger(), a.LatestLedger())
-	}
-	return &EventPage{Events: walk.events, Next: next, Status: status}
-}
-
-// watermark derives the last fully covered ledger from the walk's
-// stop facts. A stop with a known next match covers every ledger
-// strictly before it in walk order. Consumed chunks cover through
-// their far ledger. A walk that covered nothing echoes the cursor's
-// incoming value.
-func watermark(cursor *EventCursor, walk walkResult, clo, chi uint32, desc bool) uint32 {
-	switch {
-	case walk.nextUnserved != nil && desc:
-		if v := *walk.nextUnserved + 1; v <= chi {
-			return v
-		}
-	case walk.nextUnserved != nil:
-		// No underflow: a match's ledger is at least genesis (2).
-		if v := *walk.nextUnserved - 1; v >= clo {
-			return v
-		}
-	case walk.coveredThrough != nil:
-		return *walk.coveredThrough
-	}
-	return cursor.ScannedLedger
-}
-
-// terminalStatus classifies a walk that finished its clamped window:
-// either the scope's own bound was reached (complete), or the walk
-// stopped at the edge of the node's serving range [oldest, latest].
-func terminalStatus(scope *EventScope, desc bool, oldest, latest uint32) ScanStatus {
-	if desc {
-		if scope.MinLedger >= oldest {
-			return ScanComplete
-		}
-		return ScanOldestReached
-	}
-	if scope.MaxLedger != nil && *scope.MaxLedger <= latest {
-		return ScanComplete
-	}
-	return ScanWaitingForLedgers
+	return eventquery.AssemblePage(cursor, walk, clo, chi, truncated, a.OldestLedger(), a.LatestLedger())
 }

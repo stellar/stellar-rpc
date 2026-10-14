@@ -14,6 +14,7 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/eventquery"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
@@ -1078,8 +1079,7 @@ func TestMatchesAnyFilterView_TypeAndCount(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			filters := []Filter{tc.filter}
-			plan := planFilters(filters)
-			got, err := matchesAnyFilterView(tc.raw, filters, &plan)
+			got, err := eventquery.NewMatcher(filters).Matches(tc.raw)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})

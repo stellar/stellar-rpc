@@ -342,7 +342,7 @@ func (s eventScanner) GetEvents(
 		rowQ = rowQ.Where(sq.Eq{"contract_id": contractIDs})
 	}
 	if len(eventTypes) > 0 {
-		rowQ = rowQ.Where(sq.Eq{"event_type": eventTypes})
+		rowQ = rowQ.Where(sq.Eq{eventTypeColumn: eventTypes})
 	}
 
 	// Break down topics into ORs over ANDs, so:

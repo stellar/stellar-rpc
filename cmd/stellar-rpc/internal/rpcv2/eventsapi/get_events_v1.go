@@ -20,6 +20,7 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	api "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/eventsapi"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
@@ -27,9 +28,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-// NewV1Handler builds the v1 getEvents handler. Limits are the getEvents
+// NewV1Handler builds the v1 getEvents handler. api.Limits are the getEvents
 // method's own page caps, which are v1's rather than the v2 spec's.
-func NewV1Handler(limits Limits, logger *supportlog.Entry) jrpc2.Handler {
+func NewV1Handler(limits api.Limits, logger *supportlog.Entry) jrpc2.Handler {
 	return methods.NewHandler(
 		func(ctx context.Context, req protocol.GetEventsRequest) (protocol.GetEventsResponse, error) {
 			return getEventsV1(ctx, limits, logger, &req)
@@ -38,7 +39,7 @@ func NewV1Handler(limits Limits, logger *supportlog.Entry) jrpc2.Handler {
 
 //nolint:cyclop // the v1 handler's validation order, kept in one place like the original
 func getEventsV1(
-	ctx context.Context, limits Limits, logger *supportlog.Entry, req *protocol.GetEventsRequest,
+	ctx context.Context, limits api.Limits, logger *supportlog.Entry, req *protocol.GetEventsRequest,
 ) (protocol.GetEventsResponse, error) {
 	zero := protocol.GetEventsResponse{}
 	if err := req.Valid(limits.MaxLimit); err != nil {
@@ -127,7 +128,7 @@ func getEventsV1(
 	}
 	events := make([]protocol.EventInfo, 0, len(page.Events))
 	for i := range page.Events {
-		info, err := eventInfo(&page.Events[i], req.Format)
+		info, err := api.EventInfo(&page.Events[i], req.Format)
 		if err != nil {
 			return zero, fmt.Errorf("could not parse event: %w", err)
 		}
