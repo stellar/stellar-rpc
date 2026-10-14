@@ -54,7 +54,6 @@ func newQueryHotCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			o.Plan.Settings = env.Settings
 			return runQueryHot(ctx, logger, env, o)
 		})
 	qf.bind(cmd)

@@ -58,7 +58,6 @@ func newQueryColdCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			o.Plan.Settings = env.Settings
 			return runQueryCold(ctx, logger, env, o)
 		})
 	qf.bind(cmd)

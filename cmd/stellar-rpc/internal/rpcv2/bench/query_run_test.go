@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -167,17 +168,17 @@ func TestWarnFixedReadRange(t *testing.T) {
 				Types:       []string{queryTypeLedgers, queryTypeTxPage},
 				LedgersSpan: tc.ledgersSpan,
 				TxPageSpan:  tc.txPageSpan,
-				Settings:    map[string]string{},
 			}
-			warnFixedReadRange(logger, ds, p)
+			settings := map[string]string{}
+			warnFixedReadRange(logger, ds, p, settings)
 			if tc.want == "" {
 				assert.NotContains(t, output.String(), "fixed range")
-				assert.NotContains(t, p.Settings, "fixedReadRange")
+				assert.NotContains(t, settings, "fixedReadRange")
 				return
 			}
 			assert.Contains(t, output.String(), "dataset holds 5 ledgers")
 			assert.Contains(t, output.String(), tc.want+" read the same fixed range")
-			assert.Equal(t, strings.ReplaceAll(tc.want, " and ", ","), p.Settings["fixedReadRange"])
+			assert.Equal(t, strings.ReplaceAll(tc.want, " and ", ","), settings["fixedReadRange"])
 		})
 	}
 }
@@ -245,8 +246,8 @@ func TestQueryCommandsRejectBadInputsBeforeOut(t *testing.T) {
 }
 
 // runQueryCommand runs bench query with args and --out, checks the run record,
-// and returns the scenarios.csv rows.
-func runQueryCommand(t *testing.T, args ...string) []map[string]string {
+// and returns the record and the scenarios.csv rows.
+func runQueryCommand(t *testing.T, args ...string) (runRecord, []map[string]string) {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "out")
 	cmd := NewCommand()
@@ -264,17 +265,28 @@ func runQueryCommand(t *testing.T, args ...string) []map[string]string {
 	assert.Positive(t, record.SetupNs["storeOpen"])
 	assert.FileExists(t, filepath.Join(out, queryLatencyFile))
 	_, rows := readCSVTable(t, filepath.Join(out, queryScenariosFile))
-	return rows
+	return record, rows
 }
 
 // A hot run records the store open time.
 func TestQueryHotCommandRecordsRun(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
-	rows := runQueryCommand(t, queryTierHot, "--chunk", "0", "--hot-dir", hotRoot,
+	record, rows := runQueryCommand(t, queryTierHot, "--chunk", "0", "--hot-dir", hotRoot,
 		"--types", queryTypeLedgers, "--target-rps", "1000", "--duration", "20ms")
 	require.Len(t, rows, 1)
 	assert.Equal(t, queryTypeLedgers, rows[0]["query_type"])
 	assert.Equal(t, "20", rows[0]["planned"])
+	assert.NotContains(t, record.Settings, "fixedReadRange")
+}
+
+// A hot run whose ledgers span covers the whole dataset records
+// settings.fixedReadRange in run.json.
+func TestQueryHotCommandRecordsFixedReadRange(t *testing.T) {
+	hotRoot := ingestHotChunk(t)
+	span := strconv.Itoa(2 * eventEvery) // the fixture's ledger count
+	record, _ := runQueryCommand(t, queryTierHot, "--chunk", "0", "--hot-dir", hotRoot,
+		"--types", queryTypeLedgers, "--ledgers-span", span, "--target-rps", "1000", "--duration", "10ms")
+	assert.Equal(t, queryTypeLedgers, record.Settings["fixedReadRange"])
 }
 
 // ingestColdChunk runs bench ingest cold over one full fixture chunk 0 and
@@ -297,7 +309,7 @@ func ingestColdChunk(t *testing.T) string {
 // A cold run records the store open time and adds one row per scenario.
 func TestQueryColdCommandRecordsRun(t *testing.T) {
 	coldRoot := ingestColdChunk(t)
-	rows := runQueryCommand(t, queryTierCold, "--start-chunk", "0", "--cold-dir", coldRoot,
+	_, rows := runQueryCommand(t, queryTierCold, "--start-chunk", "0", "--cold-dir", coldRoot,
 		"--types", queryTypeLedgers+","+queryTypeTxPage, "--target-rps", "1000,2000", "--duration", "10ms")
 	require.Len(t, rows, 4)
 }
@@ -314,7 +326,6 @@ func TestQueryBenchWritesPartialReport(t *testing.T) {
 		LedgersSpan: defaultLedgersSpan,
 		Passphrase:  network.PublicNetworkPassphrase,
 		Seed:        defaultSeed,
-		Settings:    env.Settings,
 	}
 	open := func() (*queryDataset, func(), error) {
 		return openHotDataset(testLogger(), hotQueryOptions{HotRoot: hotRoot, Chunk: 0, Plan: plan})

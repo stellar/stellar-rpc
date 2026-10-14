@@ -101,10 +101,10 @@ func scenarioSeed(base int64, qtype string) int64 {
 }
 
 // warnFixedReadRange logs the configured types whose span covers the whole
-// dataset and records them in settings.fixedReadRange. pickStart returns the
+// dataset and records them in settings under fixedReadRange. pickStart returns the
 // range's first ledger for those, so every request reads the same ledgers and
 // their percentiles measure a cached read.
-func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan) {
+func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan, settings map[string]string) {
 	room := ds.LastLedger - ds.FirstLedger + 1
 	var fixed []string
 	for _, qtype := range p.Types {
@@ -124,7 +124,7 @@ func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan)
 	}
 	logger.Warnf("dataset holds %d ledgers; %s read the same fixed range every request (span >= range), "+
 		"so their percentiles measure a cached read", room, strings.Join(fixed, " and "))
-	p.Settings["fixedReadRange"] = strings.Join(fixed, ",")
+	settings["fixedReadRange"] = strings.Join(fixed, ",")
 }
 
 // runQueryBench is the body both subcommands share: open the dataset, run the
@@ -143,7 +143,7 @@ func runQueryBench(
 	defer release()
 	env.SetupTimes["storeOpen"] = time.Since(start)
 	logger.Infof("serving ledgers [%d, %d] over %d chunk(s)", ds.FirstLedger, ds.LastLedger, len(ds.Chunks))
-	warnFixedReadRange(logger, ds, p)
+	warnFixedReadRange(logger, ds, p, env.Settings)
 
 	report := &queryReport{}
 	run := &queryRun{logger: logger, ds: ds, plan: p, report: report, clock: timerClock{}}

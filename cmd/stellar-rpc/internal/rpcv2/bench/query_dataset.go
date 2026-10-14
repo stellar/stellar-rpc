@@ -21,9 +21,6 @@ type queryPlan struct {
 	TxPageLimit int
 	Passphrase  string
 	Seed        int64
-
-	// Settings receives the values run.json records under settings.
-	Settings map[string]string
 }
 
 // queryDataset is what one bench query run reads: the registry over the files
