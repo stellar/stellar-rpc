@@ -183,7 +183,10 @@ func runSuite(ctx context.Context, dir, outFile string, count int) []string {
 	cmd.Dir = dir
 	cmd.Stdout, cmd.Stderr = f, os.Stderr
 	if err := cmd.Run(); err != nil {
-		failed := parseFailedPkgs(outFile)
+		failed, parseErr := parseFailedPkgs(outFile)
+		if parseErr != nil {
+			logger.Warnf("reading %s for FAIL lines: %v", outFile, parseErr)
+		}
 		if len(failed) == 0 {
 			failed = []string{"<suite>"}
 		}
@@ -194,11 +197,10 @@ func runSuite(ctx context.Context, dir, outFile string, count int) []string {
 }
 
 // parseFailedPkgs scans a bench output file for go test's FAIL lines.
-func parseFailedPkgs(outFile string) []string {
+func parseFailedPkgs(outFile string) ([]string, error) {
 	f, err := os.Open(outFile)
 	if err != nil {
-		logger.Warnf("reading %s for FAIL lines: %v", outFile, err)
-		return nil
+		return nil, err
 	}
 	defer f.Close()
 	var pkgs []string
@@ -209,7 +211,7 @@ func parseFailedPkgs(outFile string) []string {
 			pkgs = append(pkgs, fields[1])
 		}
 	}
-	return pkgs
+	return pkgs, sc.Err()
 }
 
 // runBenchstat compares the two bench outputs into outFile, teeing benchstat's
