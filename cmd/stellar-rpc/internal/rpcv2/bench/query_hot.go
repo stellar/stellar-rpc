@@ -56,7 +56,8 @@ func newQueryHotCommand() *cobra.Command {
 			}
 			o.Plan.Settings = env.Settings
 			return runQueryHot(ctx, logger, env, o)
-		}, &qf)
+		})
+	qf.bind(cmd)
 	fs := cmd.Flags()
 	fs.Uint32Var(&chunkID, "chunk", 0, "the chunk to query (required)")
 	fs.StringVar(&hotDir, "hot-dir", "",

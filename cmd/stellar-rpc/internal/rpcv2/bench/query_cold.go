@@ -60,7 +60,8 @@ func newQueryColdCommand() *cobra.Command {
 			}
 			o.Plan.Settings = env.Settings
 			return runQueryCold(ctx, logger, env, o)
-		}, &qf)
+		})
+	qf.bind(cmd)
 	fs := cmd.Flags()
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk to query (required)")
 	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to query starting at --start-chunk")
@@ -118,15 +119,8 @@ func runQueryCold(ctx context.Context, logger *supportlog.Entry, env runEnv, opt
 	})
 }
 
-// openColdDataset rebuilds the catalog state a frozen artifact tree implies and
-// returns the queryDataset over it, plus its release. opts must pass validate.
-//
-// The tree has no catalog: bench ingest cold discards its scratch catalog. Each
-// chunk in the range runs the freeze bracket for each kind on disk; the chunk
-// one past the range gets a "ready" hot key with no handle. LastCompleteChunk
-// is the highest ready hot chunk minus one, and NewReadView fails without one;
-// a hot key with no handle resolves to no tier. Retention keeps every ledger
-// from the range's first chunk; the latest ledger is the range's last.
+// openColdDataset rebuilds the catalog state for the frozen chunks in the range
+// and returns the dataset and its release func. opts must pass validate.
 func openColdDataset(logger *supportlog.Entry, opts coldQueryOptions) (*queryDataset, func(), error) {
 	layout := geometry.NewLayout(opts.ColdRoot)
 	cat, releaseCat, err := openScratchCatalog(
@@ -142,7 +136,8 @@ func openColdDataset(logger *supportlog.Entry, opts coldQueryOptions) (*queryDat
 		release()
 		return nil, nil, err
 	}
-	// The frontier: a ready hot chunk above the range, no dir, no handle.
+	// NewReadView needs a ready hot chunk above the range. This one has no
+	// database, so the frozen chunks serve every read.
 	if err := cat.FlipHotReady(end + 1); err != nil {
 		release()
 		return nil, nil, fmt.Errorf("mark frontier hot chunk %s ready: %w", end+1, err)
@@ -154,7 +149,7 @@ func openColdDataset(logger *supportlog.Entry, opts coldQueryOptions) (*queryDat
 		releaseCat()
 	}
 	registry.SetLatestLedger(end.LastLedger(), query.UnknownCloseTime())
-	// As startup.go does.
+	// The daemon seeds close times the same way at startup (startup.go).
 	if err := adapters.SeedCloseTimes(registry); err != nil {
 		release()
 		return nil, nil, fmt.Errorf("seed close times: %w", err)
@@ -173,8 +168,9 @@ func openColdDataset(logger *supportlog.Entry, opts coldQueryOptions) (*queryDat
 	return ds, release, nil
 }
 
-// freezeChunks runs the freeze bracket over each chunk for the artifact kinds
-// on disk. A chunk with no ledger pack is an error.
+// freezeChunks marks each chunk frozen in cat for the artifact kinds on disk,
+// through the same freezing and frozen transitions the daemon uses. A chunk
+// with no ledger pack is an error.
 func freezeChunks(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.ID) error {
 	for _, c := range chunks {
 		var present []geometry.Kind
@@ -203,8 +199,7 @@ func freezeChunks(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.I
 }
 
 // artifactOnDisk reports whether every file of a (chunk, kind) artifact exists.
-// A file the layout names but the process cannot stat is an error, not an
-// absence.
+// A stat failure other than not-exist returns an error.
 func artifactOnDisk(layout geometry.Layout, c chunk.ID, kind geometry.Kind) (bool, error) {
 	paths := layout.ArtifactPaths(c, kind)
 	if len(paths) == 0 {

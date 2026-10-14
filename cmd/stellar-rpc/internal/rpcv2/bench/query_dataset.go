@@ -28,8 +28,7 @@ type queryPlan struct {
 
 // queryDataset is what one bench query run reads: the registry over the files
 // a bench ingest run left on disk, and the ledger range the requests read.
-// Every request takes a read view and resolves its tier through ReadView. The
-// cold dataset publishes no hot handle; the hot one freezes no artifact.
+// Every request takes a read view and resolves its tier through ReadView.
 type queryDataset struct {
 	registry *query.Registry
 
@@ -49,8 +48,8 @@ func (ds *queryDataset) view() (*query.ReadView, error) {
 	return ds.registry.NewReadView()
 }
 
-// verifyServes resolves the ledger store of every chunk, one read view per
-// chunk.
+// verifyServes checks that the read path resolves a ledger store for every
+// chunk, so a gap in the dataset fails the run before any scenario starts.
 func (ds *queryDataset) verifyServes() error {
 	for _, c := range ds.Chunks {
 		view, err := ds.view()
@@ -67,7 +66,7 @@ func (ds *queryDataset) verifyServes() error {
 }
 
 // chunkRange returns the ascending chunk IDs in [start, start+num). The caller
-// validated start+num-1 <= maxChunkID.
+// must ensure num >= 1 and start+num-1 <= maxChunkID.
 func chunkRange(start chunk.ID, num int) []chunk.ID {
 	chunks := make([]chunk.ID, 0, num)
 	for i := range uint32(num) { //nolint:gosec // num >= 1, bounded by validate()

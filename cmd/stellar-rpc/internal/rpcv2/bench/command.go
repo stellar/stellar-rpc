@@ -118,11 +118,6 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 	}
 }
 
-// flagBinder is a flag group newBenchCommand binds onto a subcommand.
-type flagBinder interface {
-	bind(cmd *cobra.Command)
-}
-
 // runEnv is what newBenchCommand hands a run. What the run puts in Settings
 // and SetupTimes goes into run.json.
 type runEnv struct {
@@ -131,16 +126,12 @@ type runEnv struct {
 	SetupTimes map[string]time.Duration
 }
 
-// newBenchCommand creates a bench subcommand with shared flags, the given flag
-// groups, profiling, run metadata, and signal-driven cancellation. validate runs
-// before the command touches --out, so a flag that validate rejects leaves
-// nothing behind; errors found later in the run are recorded in run.json as
-// failed.
+// newBenchCommand creates a bench subcommand with shared flags, profiling, run
+// metadata, and signal-driven cancellation.
 func newBenchCommand(
 	use, short string, prof *profileFlags,
 	validate func() error,
 	run func(ctx context.Context, logger *supportlog.Entry, env runEnv) error,
-	groups ...flagBinder,
 ) *cobra.Command {
 	var outDir string
 	cmd := &cobra.Command{
@@ -168,7 +159,7 @@ func newBenchCommand(
 			if err := requireEmptyOut(outDir); err != nil {
 				return err
 			}
-			if err := os.MkdirAll(outDir, 0o755); err != nil {
+			if err := os.MkdirAll(outDir, dirPerm); err != nil {
 				return fmt.Errorf("create --out dir %s: %w", outDir, err)
 			}
 			record := newRunRecord(cmd, captureFlags(cmd), startedAt)
@@ -195,9 +186,6 @@ func newBenchCommand(
 	cmd.Flags().StringVar(&outDir, "out", "bench-out",
 		"output dir for the CSV report and run.json; must be missing or empty")
 	prof.bind(cmd)
-	for _, g := range groups {
-		g.bind(cmd)
-	}
 	return cmd
 }
 
@@ -246,7 +234,8 @@ func newColdCommand() *cobra.Command {
 			o := opts()
 			o.OutDir = env.OutDir
 			return runCold(ctx, logger, o)
-		}, &src)
+		})
+	src.bind(cmd)
 	fs := cmd.Flags()
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to backfill (required)")
 	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to backfill starting at --start-chunk")
@@ -290,7 +279,8 @@ func newHotCommand() *cobra.Command {
 			o := opts()
 			o.OutDir = env.OutDir
 			return runHot(ctx, logger, o)
-		}, &src)
+		})
+	src.bind(cmd)
 	fs := cmd.Flags()
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to ingest (required)")
 	fs.IntVar(&numChunks, "num-chunks", 1,

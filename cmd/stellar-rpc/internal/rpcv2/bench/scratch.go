@@ -11,7 +11,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 )
 
-const catalogBaseDirPerm os.FileMode = 0o755 // owner rwx, group/others rx
+// dirPerm is the mode of the directories the bench creates: owner rwx,
+// group and others rx.
+const dirPerm os.FileMode = 0o755
 
 // Temp-dir prefixes for scratch catalogs, one per bench subcommand.
 const (
@@ -24,7 +26,7 @@ const (
 func openScratchCatalog(
 	catalogBase, prefix string, layout geometry.Layout, logger *supportlog.Entry,
 ) (*catalog.Catalog, func(), error) {
-	if err := os.MkdirAll(catalogBase, catalogBaseDirPerm); err != nil {
+	if err := os.MkdirAll(catalogBase, dirPerm); err != nil {
 		return nil, nil, fmt.Errorf("create catalog base dir %s: %w", catalogBase, err)
 	}
 	dir, err := os.MkdirTemp(catalogBase, prefix)

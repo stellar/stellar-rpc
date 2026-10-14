@@ -19,9 +19,9 @@ const (
 
 // Query types. Each is a --types value and a latency.csv query_type value.
 const (
-	// queryTypeLedgers: getLedgers' ledger read.
+	// queryTypeLedgers is getLedgers' ledger read.
 	queryTypeLedgers = "ledgers"
-	// queryTypeTxPage: getTransactions' paged ledger read.
+	// queryTypeTxPage is getTransactions' paged ledger read.
 	queryTypeTxPage = "txpage"
 )
 

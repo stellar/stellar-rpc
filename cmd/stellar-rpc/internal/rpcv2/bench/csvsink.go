@@ -398,7 +398,7 @@ func (s *csvSink) files() []file {
 // writeCSVs writes every non-empty aggregated CSV under outDir (created if
 // missing) and returns the files it wrote.
 func (s *csvSink) writeCSVs(outDir string) ([]string, error) {
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
+	if err := os.MkdirAll(outDir, dirPerm); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", outDir, err)
 	}
 	var written []string

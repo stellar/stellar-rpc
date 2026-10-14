@@ -10,10 +10,10 @@
 // aggregates each run into percentile CSV reports.
 //
 // bench query measures read latency on the data that bench ingest wrote: cold
-// reads frozen artifacts, hot reads one hot chunk database. A run opens the
-// dataset under a scratch catalog and runs each query type at each target rate
-// as one scenario, through query.ReadView. It measures storage read paths, not
-// RPC handlers, response serialization or network work. Its open-loop load
-// generator, runConstantArrivalRate, starts requests on a fixed schedule, and
-// queryReport writes the results.
+// reads frozen artifacts, hot reads one hot chunk database. Each scenario runs
+// one query type at one target rate through query.ReadView. An open-loop load
+// generator starts requests on a fixed schedule, so a slow read does not lower
+// the arrival rate. The timings cover the storage read path only; RPC
+// handlers, response serialization and network time are outside them. A run
+// writes latency.csv and scenarios.csv.
 package bench
