@@ -99,13 +99,14 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     with:
       protocol_version: '30'
-      # stellar-core master at ba6a4e6e3, after stellar/stellar-core#5478 made
-      # protocol 30 the current protocol with CAP-0084 and CAP-0087. Its p30
-      # host is rs-soroban-env 8abed902, the same as soroban-env-host-curr.
-      # It requires the 95 contract cost params in the *.p30 upgrade
-      # fixtures. CAP-0088 (#5423) is not in this build yet.
-      core_deb_version: '29.0.1-3637.ba6a4e6e3.noble'
-      core_docker_img: 'stellar/unsafe-stellar-core:29.0.1-3637.ba6a4e6e3.noble'
+      # stellar-core master at 0e49751aa, where protocol 30 is the current
+      # protocol with CAP-0084 and CAP-0087 (stellar/stellar-core#5478) and
+      # CAP-0088 (#5423). Its p30 host is rs-soroban-env 6e6c4a87, which
+      # differs from soroban-env-host-curr's 8abed902 only in release metadata
+      # and in taking soroban-wasmi from crates.io. It requires the 95 contract
+      # cost params in the *.p30 upgrade fixtures.
+      core_deb_version: '29.0.1-3640.0e49751aa.noble'
+      core_docker_img: 'stellar/unsafe-stellar-core:29.0.1-3640.0e49751aa.noble'
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)
