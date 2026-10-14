@@ -119,22 +119,38 @@ func TestTxPageStopsAtFullPage(t *testing.T) {
 }
 
 // A txpage request whose page does not fill stops after --txpage-span ledgers,
-// although its scan range runs to the latest ledger.
+// although its scan range runs further.
 func TestTxPageStopsAfterSpan(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
 	plan := queryPlan{TxPageSpan: 3, TxPageLimit: 1000, Passphrase: network.PublicNetworkPassphrase}
+	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{HotRoot: hotRoot, Chunk: 0, Plan: plan})
+	require.NoError(t, err)
+	defer release()
+	require.Greater(t, ds.LastLedger-ds.FirstLedger+1, 2*plan.TxPageSpan)
+
+	ctx := &errCounter{}
+	timing, err := txPageRequest(ds, plan)(ctx, rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
+	require.NoError(t, err)
+	assert.Less(t, timing.items, plan.TxPageLimit)
+	assert.Equal(t, int32(3), ctx.calls.Load(), "the scan reads --txpage-span ledgers")
+}
+
+// A txpage request reads no ledger past --sample-ledgers, also when
+// --txpage-span is wider than the sample.
+func TestTxPageStaysInSample(t *testing.T) {
+	hotRoot := ingestHotChunk(t)
+	plan := queryPlan{TxPageSpan: 5, TxPageLimit: 1000, Passphrase: network.PublicNetworkPassphrase}
 	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
-		HotRoot: hotRoot, Chunk: 0, SampleLedgers: 3, Plan: plan,
+		HotRoot: hotRoot, Chunk: 0, SampleLedgers: 2, Plan: plan,
 	})
 	require.NoError(t, err)
 	defer release()
 	require.Greater(t, ds.registry.LatestLedger(), ds.LastLedger)
 
 	ctx := &errCounter{}
-	timing, err := txPageRequest(ds, plan)(ctx, rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
+	_, err = txPageRequest(ds, plan)(ctx, rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
 	require.NoError(t, err)
-	assert.Equal(t, 1, timing.items)
-	assert.Equal(t, int32(3), ctx.calls.Load(), "the scan reads --txpage-span ledgers")
+	assert.Equal(t, int32(2), ctx.calls.Load(), "the scan reads only the sampled ledgers")
 }
 
 // txPageScanEnd covers one chunk's span of ledgers from lo, cut at latest.

@@ -61,7 +61,9 @@ func ledgersRequest(ds *queryDataset, p queryPlan) queryRequest {
 func txPageRequest(ds *queryDataset, p queryPlan) queryRequest {
 	return func(ctx context.Context, rng *rand.Rand) (requestTiming, error) {
 		lo := ds.pickStart(rng, p.TxPageSpan)
-		hi := txPageScanEnd(lo, ds.registry.LatestLedger())
+		// The dataset's last ledger stands in for the daemon's latest, so
+		// --sample-ledgers also bounds the scan.
+		hi := txPageScanEnd(lo, ds.LastLedger)
 		return timed(func() (int, error) {
 			txs := 0
 			var read uint32
