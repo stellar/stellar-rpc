@@ -23,7 +23,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stellar/go-stellar-sdk v0.7.2
+	github.com/stellar/go-stellar-sdk v0.7.4-0.20261014050248-990270d32ebe
 	github.com/stretchr/testify v1.12.1
 )
 
@@ -149,11 +149,3 @@ require (
 	gopkg.in/tylerb/graceful.v1 v1.2.15 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// SPIKE: go-stellar-sdk is replaced with the head of stellar/go-stellar-sdk#6015
-// (sisuresh/go p30-cap-0084-validate, 663a89a1, which includes go-stellar-sdk
-// main at 6c5e720f): Protocol 30 XDR generated from stellar-xdr 4f524bba, the
-// same XDR the pinned rs-stellar-xdr uses. Once #6015 merges, require the
-// merged upstream commit and drop this replace together with the
-// .golangci.yml replace-allow-list.
-replace github.com/stellar/go-stellar-sdk => github.com/sisuresh/go v0.0.0-20261008104555-663a89a12043
