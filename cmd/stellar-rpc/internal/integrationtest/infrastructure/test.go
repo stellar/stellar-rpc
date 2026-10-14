@@ -931,18 +931,20 @@ func (i *Test) InvokeHostFunc(
 }
 
 func (i *Test) upgradeLimits() {
-	limitFile := *i.limitFile
-	if limitFile == "" { // skip upgrade
+	limitName := *i.limitFile
+	if limitName == "" { // skip upgrade
 		return
 	}
 	output := i.upgradeLimitsWithFile("enable.xdr") // first enable settings upgrades in general
 	require.Contains(i.t, output, "3500000")
 
-	limitFile = fmt.Sprintf("%s.p%d.xdr", limitFile, i.protocolVersion)
+	limitFile, err := resolveLimitFile(upgradeFiles, limitName, i.protocolVersion)
+	require.NoError(i.t, err)
+	i.t.Logf("Applying limits from %s for protocol %d", limitFile, i.protocolVersion)
 	output = i.upgradeLimitsWithFile(limitFile) // then run out upgrade
 
 	// A coupla oddly-specific values from the .json file to validate against:
-	switch limitFile {
+	switch limitName {
 	case "testnet":
 		require.Contains(i.t, output, "65536")
 	//
@@ -955,7 +957,7 @@ func (i *Test) upgradeLimits() {
 
 func (i *Test) upgradeLimitsWithFile(limitFile string) string {
 	newLimits, err := upgradeFiles.ReadFile(
-		filepath.Join("docker", "upgrades", limitFile))
+		path.Join(upgradesDir, limitFile))
 	require.NoError(i.t, err)
 
 	// Remove any extraneous whitespace from the file
