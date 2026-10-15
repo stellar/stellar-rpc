@@ -29,7 +29,7 @@ func buildPayload(items [][]byte) ([]byte, []uint32) {
 // newTestRecord builds a record bound to a stub Reader with n items per record.
 func newTestRecord(n int, dec RecordDecoder) *record {
 	return &record{
-		reader: &Reader{itemsPerRecord: n, recordDecoder: dec},
+		reader: &Reader{idx: &index{perRecord: n}, recordDecoder: dec},
 	}
 }
 
@@ -184,7 +184,7 @@ func TestRecordReuse(t *testing.T) {
 	}
 	data2 := buildRecordBytes(enc2, sizes2, false)
 
-	rec.reader.itemsPerRecord = 2
+	rec.reader.idx.perRecord = 2
 	if err := rec.decode(data2, 0, 2); err != nil {
 		t.Fatal(err)
 	}
