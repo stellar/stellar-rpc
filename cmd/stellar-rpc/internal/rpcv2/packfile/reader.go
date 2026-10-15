@@ -223,7 +223,12 @@ func openFile(f readAtCloser, fileSize int64, firstRead func(int64) int) openRes
 		first = int64(firstRead(fileSize))
 	}
 	first = min(max(first, trailerSize), fileSize)
-	tail := make([]byte, first)
+	rec, _ := recordWorkspacePool.Get().(*record)
+	defer recordWorkspacePool.Put(rec)
+	if int64(cap(rec.scratch)) < first {
+		rec.scratch = make([]byte, 0, first)
+	}
+	tail := rec.scratch[:first]
 	if _, err := f.ReadAt(tail, fileSize-first); err != nil {
 		return openResult{err: fmt.Errorf("packfile: read trailer region: %w", err)}
 	}
@@ -242,7 +247,7 @@ func openFile(f readAtCloser, fileSize int64, firstRead func(int64) int) openRes
 	appDataSize := int(trailer.AppDataSize)
 
 	// The Reader keeps the index and app data as views into tail, so tail
-	// must hold only the tail's bytes, not the rest of the first read.
+	// must not be the pooled first-read buffer, which goes back to the pool.
 	tailSize := int64(indexSize) + int64(appDataSize) + int64(trailerSize)
 	indexBase := fileSize - tailSize
 	if indexBase < 0 {
