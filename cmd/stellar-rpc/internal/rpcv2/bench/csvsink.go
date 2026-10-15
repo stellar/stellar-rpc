@@ -153,11 +153,10 @@ func newCSVSink() *csvSink {
 // percentiles do not add up to a per-ledger total.
 //
 // The production hot loop is one goroutine, so phases arrive as one burst per
-// ledger in hotchunk.Phase order. PhaseExtract starts a burst. PhaseApply ends
-// it and is emitted only on success, so a failed ledger records no
-// ingest_total. Interleaved bursts from several goroutines are safe but sum
-// across ledgers.
-func (s *csvSink) HotPhase(phase hotchunk.Phase, d time.Duration, items int, _ error) {
+// ledger in hotchunk.Phase order. PhaseExtract starts a burst. A PhaseApply
+// without an error ends it, so a failed ledger records no ingest_total.
+// Interleaved bursts from several goroutines are safe but sum across ledgers.
+func (s *csvSink) HotPhase(phase hotchunk.Phase, d time.Duration, items int, err error) {
 	s.observe(fileHot, phase.String(), d, items)
 
 	// Release mu before observe takes it again.
@@ -169,7 +168,7 @@ func (s *csvSink) HotPhase(phase hotchunk.Phase, d time.Duration, items int, _ e
 	total := s.hotBurst
 	s.mu.Unlock()
 
-	if phase == hotchunk.PhaseApply {
+	if phase == hotchunk.PhaseApply && err == nil {
 		s.observe(fileDriver, driverIngestTotal, total, 1)
 	}
 }
