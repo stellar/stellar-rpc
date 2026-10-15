@@ -178,9 +178,9 @@ func sealRecord(payload, forIndex []byte, wide bool) []byte {
 // and returns data with the checksum stripped.
 //
 // The covered range is everything up to the checksum, so it follows from the
-// record bounds in the offsets index, which Open has already verified. Nothing
-// in the record's own bytes selects it, which is what lets this run before the
-// FOR index is parsed.
+// record bounds in the offset index, which the reader checked when it decoded
+// the record's index group. Nothing in the record's own bytes selects it,
+// which is what lets this run before the FOR index is parsed.
 func verifyRecordCRC(data []byte) ([]byte, error) {
 	if len(data) < recordCRCLen {
 		return nil, fmt.Errorf("%w: record shorter than its CRC32C (%d bytes)", ErrCorrupt, len(data))
@@ -749,7 +749,7 @@ func (w *Writer) Finish(appData []byte) error {
 		w.digestHasher.Sum(fileHash[:0])
 	}
 
-	indexBytes, err := encodeIndex(w.offsets)
+	indexBytes, err := encodeIndex(w.offsets, w.itemsPerRecord)
 	if err != nil {
 		return w.recordErr(err)
 	}
