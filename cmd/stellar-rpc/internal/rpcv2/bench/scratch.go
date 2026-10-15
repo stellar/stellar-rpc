@@ -25,12 +25,7 @@ func openScratchCatalog(
 	if err != nil {
 		return nil, nil, fmt.Errorf("create scratch catalog dir: %w", err)
 	}
-	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	if err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, nil, err
-	}
-	cat, err := catalog.Open(filepath.Join(dir, "catalog"), layout, txLayout, logger)
+	cat, err := catalog.Open(filepath.Join(dir, "catalog"), layout, logger)
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, nil, fmt.Errorf("open scratch catalog: %w", err)

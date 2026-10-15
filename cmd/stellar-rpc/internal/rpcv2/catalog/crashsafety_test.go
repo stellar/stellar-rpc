@@ -46,6 +46,13 @@ func TestCrashSafety_FileWrittenKeyNotFlipped(t *testing.T) {
 	require.NoError(t, durable.BarrierNewFile(idxPath))
 	// <-- crash here: no CommitTxHashIndex.
 
+	// The same for a terminal coverage, whose file is under the cold root.
+	terminal, err := cat.MarkTxHashIndexFreezing(6, 6000, 6999)
+	require.NoError(t, err)
+	terminalPath := cat.layout.TxHashIndexFilePath(terminal)
+	writeArtifact(t, terminalPath)
+	require.NoError(t, durable.BarrierNewFile(terminalPath))
+
 	// INV-3 (disk -> meta): every file on disk has its key.
 	assertEveryFileHasKey(t, cat, root)
 

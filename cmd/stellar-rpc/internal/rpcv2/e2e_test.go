@@ -528,7 +528,7 @@ func e2eReadCatalog(t *testing.T, dataDir string) (*catalog.Catalog, func()) {
 	paths := config.Config{Storage: config.StorageConfig{DefaultDataDir: dataDir}}.WithDefaults().ResolvePaths()
 	windows, err := geometry.NewTxHashIndexLayout(1) // matches chunksPerTxhashIndex = 1
 	require.NoError(t, err)
-	cat, err := catalog.Open(paths.Catalog, config.NewLayoutFromPaths(paths), windows, silentLogger())
+	cat, err := catalog.Open(paths.Catalog, config.NewLayoutFromPaths(paths).WithTxHashIndex(windows), silentLogger())
 	require.NoError(t, err)
 	return cat, func() { _ = cat.Close() }
 }

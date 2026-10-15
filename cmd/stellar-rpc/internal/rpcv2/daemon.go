@@ -338,7 +338,7 @@ func openCatalog(paths config.Paths, opts daemonOptions, logger *supportlog.Entr
 	if err != nil {
 		return nil, err
 	}
-	cat, err := catalog.Open(paths.Catalog, config.NewLayoutFromPaths(paths), txLayout, logger)
+	cat, err := catalog.Open(paths.Catalog, config.NewLayoutFromPaths(paths).WithTxHashIndex(txLayout), logger)
 	if err != nil {
 		return nil, fmt.Errorf("open catalog %q: %w", paths.Catalog, err)
 	}
