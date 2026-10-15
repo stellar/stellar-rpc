@@ -6,8 +6,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -21,16 +23,66 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
-// indexTestChunkID is the chunk ID every WriteColdIndex test uses for
+// Bitmaps is the term index of a test fixture: every term's event ids.
+type Bitmaps map[TermKey]*roaring.Bitmap
+
+func NewBitmaps() Bitmaps { return make(Bitmaps) }
+
+// AddTo records each eventID under key.
+func (b Bitmaps) AddTo(key TermKey, eventIDs ...uint32) {
+	bm, ok := b[key]
+	if !ok {
+		bm = roaring.New()
+		b[key] = bm
+	}
+	bm.AddMany(eventIDs)
+}
+
+// indexTestChunkID is the chunk ID every index test uses for
 // composing per-chunk filenames inside the temp bucket directory.
 const indexTestChunkID = chunk.ID(0)
+
+// writeColdIndex builds chunkID's index in dir from bitmaps, feeding a
+// ColdIndexBuilder every event in id order.
+func writeColdIndex(
+	ctx context.Context, chunkID chunk.ID, bitmaps Bitmaps, dir string, secret [stores.SecretLen]byte,
+) error {
+	b := NewColdIndexBuilder(chunkID, dir, secret)
+	type cursor struct {
+		key  TermKey
+		next uint32
+		it   roaring.IntIterable
+	}
+	cursors := heapOf[*cursor]{less: func(a, b *cursor) bool { return a.next < b.next }}
+	for k, bm := range bitmaps {
+		if it := bm.Iterator(); it.HasNext() {
+			cursors.push(&cursor{key: k, next: it.Next(), it: it})
+		}
+	}
+	for len(cursors.items) > 0 {
+		id := cursors.items[0].next
+		var keys []TermKey
+		for len(cursors.items) > 0 && cursors.items[0].next == id {
+			c := cursors.items[0]
+			keys = append(keys, c.key)
+			if c.it.HasNext() {
+				c.next = c.it.Next()
+				cursors.down()
+			} else {
+				cursors.pop()
+			}
+		}
+		if err := b.Add(id, keys); err != nil {
+			return errors.Join(err, b.Close())
+		}
+	}
+	return b.Write(ctx)
+}
 
 // indexFixture builds a populated Bitmaps containing n distinct
 // contractID terms; each term is mapped to a roaring bitmap of two
 // event IDs derived from i so callers can verify bitmap round-trip
-// integrity term by term. The returned index is already Close()'d
-// so callers can iterate it via WriteColdIndex (which requires a
-// frozen index).
+// integrity term by term.
 func indexFixture(t *testing.T, n int) Bitmaps {
 	t.Helper()
 	idx := NewBitmaps()
@@ -75,7 +127,7 @@ func loadIndexPack(t *testing.T, path string) indexArtifact {
 // slip past every round-trip test.
 func TestIndexPack_TrailerPinsFormatAndRecordSize(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, indexFixture(t, 4), dir, testIndexSecret))
+	require.NoError(t, writeColdIndex(context.Background(), indexTestChunkID, indexFixture(t, 4), dir, testIndexSecret))
 
 	r := packfile.Open(filepath.Join(dir, IndexPackName(indexTestChunkID)), packfile.ReaderOptions{})
 	t.Cleanup(func() { _ = r.Close() })
@@ -91,7 +143,7 @@ func TestWriteIndex_ProducesBothFiles(t *testing.T) {
 	dir := t.TempDir()
 	idx := indexFixture(t, 64)
 
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
+	require.NoError(t, writeColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
 	// index.hash exists and is openable as an MPHF.
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
@@ -108,7 +160,7 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 	const n = 32
 	idx := indexFixture(t, n)
 
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
+	require.NoError(t, writeColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
@@ -124,8 +176,9 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 			fmt.Appendf(nil, "term-%d", i),
 			FieldContractID,
 		)
-		slot, _, err := m.Lookup(term)
-		require.NoError(t, err, "lookup term-%d", i)
+		hit := m.Lookup([]TermKey{term})[0]
+		require.NoError(t, hit.err, "lookup term-%d", i)
+		slot := hit.slot
 
 		record := records[slot]
 		require.GreaterOrEqual(t, len(record), IndexRecordFingerprintLen, "record at slot %d too short", slot)
@@ -146,7 +199,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 	dir := t.TempDir()
 	idx := indexFixture(t, 32)
 
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
+	require.NoError(t, writeColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
@@ -166,14 +219,14 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 			fmt.Appendf(nil, "never-seen-%d", i),
 			FieldTopic0,
 		)
-		slot, _, err := m.Lookup(unseen)
-		if errors.Is(err, ErrKeyNotFound) {
+		hit := m.Lookup([]TermKey{unseen})[0]
+		if errors.Is(hit.err, ErrKeyNotFound) {
 			continue
 		}
-		require.NoError(t, err)
+		require.NoError(t, hit.err)
 		collisions++
 
-		recordFP := records[slot][:IndexRecordFingerprintLen]
+		recordFP := records[hit.slot][:IndexRecordFingerprintLen]
 		if string(recordFP) != string(routedFP(unseen)) {
 			mismatches++
 		}
@@ -187,28 +240,28 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 }
 
 // TestWriteIndex_RespectsContextCancellation locks in the contract
-// that a pre-canceled context causes WriteColdIndex to return a
+// that a pre-canceled context causes ColdIndexBuilder.Write to return a
 // context error (wrapped) instead of completing. Backfill workers
 // need this so a shutdown signal during a long chunk's index build
 // can drop the work promptly.
 func TestWriteIndex_RespectsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // already done before WriteColdIndex sees it
+	cancel() // already done before ColdIndexBuilder.Write sees it
 
-	err := WriteColdIndex(ctx, indexTestChunkID, indexFixture(t, 64), t.TempDir(), testIndexSecret)
+	err := writeColdIndex(ctx, indexTestChunkID, indexFixture(t, 64), t.TempDir(), testIndexSecret)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled,
-		"WriteColdIndex must surface ctx.Err() when canceled before start")
+		"ColdIndexBuilder.Write must surface ctx.Err() when canceled before start")
 }
 
 // TestWriteIndex_ZeroTerms_WritesEmptyIndex covers the eventless-chunk
-// case (the common one for pre-Soroban backfill ranges): WriteColdIndex
+// case (the common one for pre-Soroban backfill ranges): ColdIndexBuilder.Write
 // with zero terms must succeed, publishing a real (empty) index.hash plus
 // a zero-record index.pack, and every lookup against it must miss through
 // the ordinary path.
 func TestWriteIndex_ZeroTerms_WritesEmptyIndex(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, NewBitmaps(), dir, testIndexSecret))
+	require.NoError(t, writeColdIndex(context.Background(), indexTestChunkID, NewBitmaps(), dir, testIndexSecret))
 
 	// index.hash exists (a real streamhash index built over zero terms).
 	hashInfo, err := os.Stat(filepath.Join(dir, IndexHashName(indexTestChunkID)))
@@ -226,57 +279,8 @@ func TestWriteIndex_ZeroTerms_WritesEmptyIndex(t *testing.T) {
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
-	_, _, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
-	assert.ErrorIs(t, lerr, ErrKeyNotFound)
-}
-
-// TestWriteIndex_FailedWriteCleansUpIndexHash regression-tests the
-// "atomic on error" contract: if WriteColdIndex fails after buildMPHF
-// has produced index.hash, the orphaned hash file must be removed so
-// the chunk dir is left clean for retry.
-//
-// We force packfile.Create(index.pack) to fail by pre-creating
-// index.pack as a directory at the target path.
-func TestWriteIndex_FailedWriteCleansUpIndexHash(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.Mkdir(filepath.Join(dir, IndexPackName(indexTestChunkID)), 0o755))
-
-	err := WriteColdIndex(context.Background(), indexTestChunkID, indexFixture(t, 4), dir, testIndexSecret)
-	require.Error(t, err, "WriteColdIndex must fail when index.pack path is a directory")
-
-	_, statErr := os.Stat(filepath.Join(dir, IndexHashName(indexTestChunkID)))
-	assert.True(t, os.IsNotExist(statErr),
-		"index.hash should be removed after WriteColdIndex error, got stat err = %v", statErr)
-}
-
-func TestWriteIndex_SlotsAreDense(t *testing.T) {
-	// Sanity check: streamhash's MPHF produces minimal slots in [0, N).
-	// We rely on this for the packfile record-position == MPHF-slot
-	// correspondence. Probe with several sizes to catch a regression.
-	for _, n := range []int{1, 16, 256, 1024} {
-		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
-			dir := t.TempDir()
-			idx := indexFixture(t, n)
-			require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
-
-			m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
-			require.NoError(t, err)
-			t.Cleanup(func() { _ = m.Close() })
-
-			seen := make(map[uint32]struct{}, n)
-			for i := range n {
-				term := ComputeTermKey(
-					fmt.Appendf(nil, "term-%d", i),
-					FieldContractID,
-				)
-				slot, _, err := m.Lookup(term)
-				require.NoError(t, err)
-				assert.Less(t, slot, uint32(n))
-				seen[slot] = struct{}{}
-			}
-			assert.Len(t, seen, n, "MPHF must hit every slot in [0, %d)", n)
-		})
-	}
+	hit := m.Lookup([]TermKey{ComputeTermKey([]byte("anything"), FieldContractID)})[0]
+	assert.ErrorIs(t, hit.err, ErrKeyNotFound)
 }
 
 func TestWriteIndex_LargeIndex(t *testing.T) {
@@ -287,7 +291,7 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 	const n = 5_000
 	idx := indexFixture(t, n)
 
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
+	require.NoError(t, writeColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
@@ -302,9 +306,9 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 			fmt.Appendf(nil, "term-%d", i),
 			FieldContractID,
 		)
-		slot, _, err := m.Lookup(term)
-		require.NoError(t, err)
-		assert.Equal(t, routedFP(term), records[slot][:IndexRecordFingerprintLen])
+		hit := m.Lookup([]TermKey{term})[0]
+		require.NoError(t, hit.err)
+		assert.Equal(t, routedFP(term), records[hit.slot][:IndexRecordFingerprintLen])
 	}
 }
 
@@ -316,7 +320,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	idx := NewBitmaps()
 	idx.AddTo(ComputeTermKey([]byte("only"), FieldContractID), 42)
 
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
+	require.NoError(t, writeColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
 	records := loadIndexPack(t, filepath.Join(dir, IndexPackName(indexTestChunkID))).entries
 	require.Len(t, records, 1)
@@ -338,10 +342,10 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	_ = binary.LittleEndian.Uint32(record[:IndexRecordFingerprintLen])
 }
 
-// TestWriteColdIndex_StampAndContentHash pins index.pack's app data and content hash.
-func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
+// TestColdIndex_StampAndContentHash pins index.pack's app data and content hash.
+func TestColdIndex_StampAndContentHash(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, indexFixture(t, 4), dir, testIndexSecret))
+	require.NoError(t, writeColdIndex(context.Background(), indexTestChunkID, indexFixture(t, 4), dir, testIndexSecret))
 	r := packfile.Open(filepath.Join(dir, IndexPackName(indexTestChunkID)), packfile.ReaderOptions{})
 	t.Cleanup(func() { _ = r.Close() })
 
@@ -396,7 +400,7 @@ func TestIndexPack_IndexCostsAtMostFourBytesPerRecord(t *testing.T) {
 			// Over half a record each, so no two share one.
 			b := NewBitmaps()
 			base := roaring.New()
-			base.AddMany(everyOther(0, 1))
+			base.AddMany(everyOther(0, 1)[:4097]) // one bitset container
 			more := everyOther(1, 2)
 			for i := range 2_000 {
 				bm := base.Clone()
@@ -408,7 +412,7 @@ func TestIndexPack_IndexCostsAtMostFourBytesPerRecord(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, tc.bitmaps(), dir, testIndexSecret))
+			require.NoError(t, writeColdIndex(context.Background(), indexTestChunkID, tc.bitmaps(), dir, testIndexSecret))
 			r := packfile.Open(filepath.Join(dir, IndexPackName(indexTestChunkID)), packfile.ReaderOptions{})
 			t.Cleanup(func() { _ = r.Close() })
 			tr, err := r.Trailer()
@@ -416,5 +420,163 @@ func TestIndexPack_IndexCostsAtMostFourBytesPerRecord(t *testing.T) {
 			assert.LessOrEqual(t, int64(tr.IndexSize), indexPackTailBytesPerRecord*int64(tr.RecordCount),
 				"index of %d records", tr.RecordCount)
 		})
+	}
+}
+
+// A build over several slabs, with a term whose bitmap is split, checked
+// through the cold reader against the postings fed in. The runs live
+// beside the index files only while the build runs.
+func TestColdIndexBuilder_BuildsAcrossSlabs(t *testing.T) {
+	const total = 9*hotSlabEvents + 100
+	dir, _ := buildColdFixture(t, indexTestChunkID, 1, 1)
+	runsDir := filepath.Join(dir, IndexRunsDirName(indexTestChunkID))
+	// Leftovers of an attempt that never finished are ignored and go with
+	// the directory.
+	require.NoError(t, os.MkdirAll(runsDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(runsDir, "stale"), []byte("x"), 0o600))
+
+	b := NewColdIndexBuilder(indexTestChunkID, dir, testIndexSecret)
+	key := func(name string) TermKey { return ComputeTermKey([]byte(name), FieldContractID) }
+	want := NewBitmaps()
+	for id := range uint32(total) {
+		keys := []TermKey{key("every")}
+		if id%2 == 0 {
+			// Every other id is a bitset container per slab: 80 KiB over
+			// ten slabs, past indexSplitBytes.
+			keys = append(keys, key("half"))
+		}
+		if id%1000 == 7 {
+			keys = append(keys, key("rare"))
+		}
+		if id%4099 == 0 {
+			keys = append(keys, uniqueTopicKey(id))
+		}
+		for _, k := range keys {
+			want.AddTo(k, id)
+		}
+		require.NoError(t, b.Add(id, keys))
+	}
+	require.FileExists(t, filepath.Join(runsDir, "00000"))
+	require.FileExists(t, filepath.Join(runsDir, "stale"))
+	require.NoError(t, b.Write(context.Background()))
+	require.NoDirExists(t, runsDir)
+	require.ErrorContains(t, b.Write(context.Background()), "already written")
+
+	cr, err := OpenColdReader(indexTestChunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{Concurrency: 2})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+	layout, err := cr.waitLayout()
+	require.NoError(t, err)
+	require.Equal(t, uint32(10), layout.slabs)
+	require.Len(t, layout.rows, indexRowLen, "one split term")
+
+	keys := []TermKey{key("every"), key("half"), key("rare"), key("absent")}
+	for id := uint32(0); id < total; id += 4099 {
+		keys = append(keys, uniqueTopicKey(id))
+	}
+	got, _, err := cr.LookupKeys(context.Background(), keys, IDRange{End: total})
+	require.NoError(t, err)
+	for i, k := range keys {
+		if want[k] == nil {
+			require.Nil(t, got[i], "term %d", i)
+			continue
+		}
+		require.True(t, want[k].Equals(got[i]), "term %d", i)
+	}
+	m, err := cr.waitMPHF()
+	require.NoError(t, err)
+	require.Equal(t, uint64(len(want)), m.numKeys())
+}
+
+// uniqueTopicKey is a term no other event carries.
+func uniqueTopicKey(id uint32) TermKey {
+	return ComputeTermKey(binaryID(id), FieldTopic1)
+}
+
+func binaryID(id uint32) []byte {
+	return []byte{byte(id >> 24), byte(id >> 16), byte(id >> 8), byte(id)}
+}
+
+// An event may carry more terms than the buffer holds per event: the slab
+// spills when the buffer fills, and the merge unites the two runs of one
+// slab.
+func TestColdIndexBuilder_SpillsAFullBuffer(t *testing.T) {
+	dir, _ := buildColdFixture(t, indexTestChunkID, 1, 1)
+	b := NewColdIndexBuilder(indexTestChunkID, dir, testIndexSecret)
+	pool := make([]TermKey, 100)
+	for i := range pool {
+		pool[i] = ComputeTermKey(fmt.Appendf(nil, "pool-%d", i), FieldContractID)
+	}
+	want := NewBitmaps()
+	for id := range uint32(hotSlabEvents) {
+		keys := make([]TermKey, 0, 1+maxTermsPerEvent)
+		keys = append(keys, ComputeTermKey([]byte("every"), FieldContractID))
+		for j := range uint32(maxTermsPerEvent) {
+			keys = append(keys, pool[(id*7+j*13)%100])
+		}
+		for _, k := range keys {
+			want.AddTo(k, id)
+		}
+		require.NoError(t, b.Add(id, keys))
+	}
+	runsDir := filepath.Join(dir, IndexRunsDirName(indexTestChunkID))
+	require.FileExists(t, filepath.Join(runsDir, "00000"), "the buffer spilled before the slab ended")
+	require.NoError(t, b.Write(context.Background()))
+
+	cr, err := OpenColdReader(indexTestChunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{Concurrency: 2})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+	keys := slices.Collect(maps.Keys(want))
+	got, _, err := cr.LookupKeys(context.Background(), keys, IDRange{End: hotSlabEvents})
+	require.NoError(t, err)
+	for i, k := range keys {
+		require.True(t, want[k].Equals(got[i]), "term %d", i)
+	}
+	m, err := cr.waitMPHF()
+	require.NoError(t, err)
+	require.Equal(t, uint64(len(want)), m.numKeys())
+}
+
+func TestColdIndexBuilder_RemovesRuns(t *testing.T) {
+	build := func(t *testing.T) (*ColdIndexBuilder, string, string) {
+		t.Helper()
+		dir := t.TempDir()
+		b := NewColdIndexBuilder(chunk.ID(0), dir, testIndexSecret)
+		for id := range uint32(hotSlabEvents + 1) {
+			require.NoError(t, b.Add(id, []TermKey{{1}}))
+		}
+		runsDir := filepath.Join(dir, IndexRunsDirName(chunk.ID(0)))
+		require.DirExists(t, runsDir)
+		return b, dir, runsDir
+	}
+	t.Run("on Close", func(t *testing.T) {
+		b, dir, runsDir := build(t)
+		require.NoError(t, b.Close())
+		require.NoDirExists(t, runsDir)
+		entries, err := os.ReadDir(dir)
+		require.NoError(t, err)
+		require.Empty(t, entries)
+	})
+	t.Run("on a failed Write", func(t *testing.T) {
+		b, dir, runsDir := build(t)
+		require.NoError(t, os.Mkdir(filepath.Join(dir, IndexPackName(chunk.ID(0))), 0o755))
+		require.Error(t, b.Write(context.Background()))
+		require.NoDirExists(t, runsDir)
+		require.NoFileExists(t, filepath.Join(dir, IndexHashName(chunk.ID(0))))
+	})
+}
+
+// Slots must be dense: an entry past a gap, or one repeating a written
+// slot, is still pending when the pack is finished.
+func TestIndexPackWriter_RejectsSlotGapsAndRepeats(t *testing.T) {
+	for _, slots := range [][]uint32{{0, 2}, {0, 0}} {
+		pw, err := packfile.Create(filepath.Join(t.TempDir(), "index.pack"), indexPackWriterOptions())
+		require.NoError(t, err)
+		w := newIndexPackWriter(pw, 0)
+		for _, slot := range slots {
+			require.NoError(t, w.add(indexEntry{slot: slot, bitmap: roaring.BitmapOf(1)}))
+		}
+		require.ErrorContains(t, w.finish(), "non-dense MPHF slots")
+		require.NoError(t, pw.Close())
 	}
 }

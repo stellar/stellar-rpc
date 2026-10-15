@@ -1,7 +1,7 @@
 package event
 
 // cold_reader.go is the read side of a frozen Chunk. It opens the
-// three cold artifacts produced by ColdWriter + WriteColdIndex
+// three cold artifacts produced by ColdWriter + ColdIndexBuilder
 // (events.pack, index.pack, index.hash), decodes the embedded
 // LedgerOffsets app-data block, and serves the Reader
 // interface against them.
@@ -410,7 +410,7 @@ func (c *ColdReader) LookupKeys(
 	results := make([]*roaring.Bitmap, len(keys))
 	reads := make([]entryRead, 0, len(keys))
 	covered := IDRange{End: math.MaxUint32}
-	for i, hit := range mphf.LookupBatch(keys) {
+	for i, hit := range mphf.Lookup(keys) {
 		if hit.err != nil {
 			if errors.Is(hit.err, ErrKeyNotFound) {
 				continue // result[i] stays nil
