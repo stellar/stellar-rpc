@@ -125,7 +125,7 @@ type Store struct {
 
 	db        *grocksdb.DB
 	opts      *grocksdb.Options
-	cfOpts    []*grocksdb.Options
+	cfOpts    map[string]*grocksdb.Options
 	cfHandles map[string]*grocksdb.ColumnFamilyHandle
 	ro        *grocksdb.ReadOptions
 	wo        *grocksdb.WriteOptions
@@ -748,15 +748,22 @@ func (s *Store) constructAndOpen() error {
 		return fmt.Errorf("rocksdb: open %s: %w", abs, err)
 	}
 
-	cfMap := make(map[string]*grocksdb.ColumnFamilyHandle, len(cfHandles))
-	for i, name := range cfNames {
-		cfMap[name] = cfHandles[i]
+	if !s.cfg.ReadOnly {
+		// Files LoadSorted was still building when the last process stopped.
+		// Only the holder of the DB lock may remove them.
+		if err := os.RemoveAll(filepath.Join(abs, loadDirName)); err != nil {
+			s.cfg.Logger.WithError(err).Warnf("rocksdb: removing unfinished load files in %s", abs)
+		}
 	}
 
 	s.db = db
 	s.opts = opts
-	s.cfOpts = cfOpts
-	s.cfHandles = cfMap
+	s.cfOpts = make(map[string]*grocksdb.Options, len(cfNames))
+	s.cfHandles = make(map[string]*grocksdb.ColumnFamilyHandle, len(cfNames))
+	for i, name := range cfNames {
+		s.cfOpts[name] = cfOpts[i]
+		s.cfHandles[name] = cfHandles[i]
+	}
 	s.ro = grocksdb.NewDefaultReadOptions()
 	s.wo = grocksdb.NewDefaultWriteOptions()
 
@@ -875,6 +882,9 @@ func (s *Store) applySharedTableOptions(cfNames []string, cfOpts []*grocksdb.Opt
 		}
 		if override.BlockSize > 0 {
 			bbto.SetBlockSize(override.BlockSize)
+		}
+		if override.CacheIndexAndFilterBlocks {
+			bbto.SetCacheIndexAndFilterBlocks(true)
 		}
 		o.SetBlockBasedTableFactory(bbto)
 		s.bbtos = append(s.bbtos, bbto)
