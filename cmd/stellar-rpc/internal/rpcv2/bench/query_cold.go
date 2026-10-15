@@ -160,6 +160,7 @@ func openColdDataset(logger *supportlog.Entry, opts coldQueryOptions) (*queryDat
 		FirstLedger: opts.StartChunk.FirstLedger(),
 		LastLedger:  end.LastLedger(),
 	}
+	release = ds.serveReads(logger, release)
 	if err := ds.verifyServes(); err != nil {
 		release()
 		return nil, nil, err

@@ -13,7 +13,6 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
@@ -30,11 +29,7 @@ func newServeReads(
 	cfg config.Config, params handlerParams,
 ) func(context.Context, *query.Registry, net.Listener) error {
 	return func(ctx context.Context, reg *query.Registry, listener net.Listener) error {
-		p := params
-		p.registry = reg
-		p.ledgerReader = adapters.NewLedgerReader()
-		p.transactionReader = adapters.NewTransactionReader(p.networkPassphrase, p.metrics)
-		handler := newJSONRPCHandler(cfg, p)
+		handler := newJSONRPCHandler(cfg, params.withRegistry(reg))
 		server := &http.Server{
 			Handler:     handler,
 			ReadTimeout: jsonrpc.DefaultHTTPReadTimeout,

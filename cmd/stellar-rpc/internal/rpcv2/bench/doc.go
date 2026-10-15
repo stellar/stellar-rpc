@@ -11,9 +11,12 @@
 //
 // bench query measures read latency on the data that bench ingest wrote: cold
 // reads frozen artifacts, hot reads one hot chunk database. Each scenario runs
-// one query type at one target rate through query.ReadView. An open-loop load
-// generator starts requests on a fixed schedule, so a slow read does not lower
-// the arrival rate. The timings cover the storage read path only; RPC
-// handlers, response serialization and network time are outside them. A run
-// writes latency.csv and scenarios.csv.
+// one query type at one target rate. Each request calls the daemon's method
+// handler (rpcv2.ReadMethods) through the daemon's JSON-RPC bridge
+// (jsonrpc.NewBridge), in process, which runs one handler per CPU. An
+// open-loop load generator starts requests on a fixed schedule, so a slow read
+// does not lower the arrival rate. latency covers the bridge's request parse,
+// the wait for a handler slot, the handler and the response write;
+// handler_latency covers the handler alone. HTTP and network time are outside
+// both. A run writes latency.csv and scenarios.csv.
 package bench

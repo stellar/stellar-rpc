@@ -10,6 +10,7 @@ import (
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
@@ -125,7 +126,9 @@ func runQueryHot(ctx context.Context, logger *supportlog.Entry, env runEnv, opts
 // scratch catalog and the existing database is opened through
 // query.OpenRegistry, as the daemon does at startup. Nothing is frozen, so only
 // the hot tier serves. The dataset ends at the last committed ledger, because a
-// capped ingest stops mid-chunk, or earlier when --sample-ledgers is set.
+// capped ingest stops mid-chunk, or earlier when --sample-ledgers is set. The
+// registry's latest ledger is the dataset's end, so the handlers serve no
+// ledger past it.
 func openHotDataset(logger *supportlog.Entry, opts hotQueryOptions) (*queryDataset, func(), error) {
 	layout := geometry.NewLayout(opts.HotRoot)
 	path := layout.HotChunkPath(opts.Chunk)
@@ -154,24 +157,13 @@ func openHotDataset(logger *supportlog.Entry, opts hotQueryOptions) (*queryDatas
 		_ = db.Close()
 		releaseCat()
 	}
-	committed, ok, err := db.MaxCommittedSeq()
+	last, err := hotDatasetEnd(db, opts)
 	if err != nil {
 		closeDB()
-		return nil, nil, fmt.Errorf("read hot chunk %s last committed ledger: %w", opts.Chunk, err)
-	}
-	if !ok {
-		closeDB()
-		return nil, nil, fmt.Errorf("hot chunk %s holds no committed ledger: ingest it before querying it", opts.Chunk)
-	}
-	first := opts.Chunk.FirstLedger()
-	if committed < first {
-		closeDB()
-		return nil, nil, fmt.Errorf(
-			"hot chunk %s last committed ledger %d is below the chunk's first ledger %d: "+
-				"the directory holds another chunk's ledgers", opts.Chunk, committed, first)
+		return nil, nil, err
 	}
 
-	registry, err := query.OpenRegistry(cat, geometry.NewRetention(0, opts.Chunk), db, committed)
+	registry, err := query.OpenRegistry(cat, geometry.NewRetention(0, opts.Chunk), db, last)
 	if err != nil {
 		closeDB()
 		return nil, nil, fmt.Errorf("open the read registry over hot chunk %s: %w", opts.Chunk, err)
@@ -181,22 +173,45 @@ func openHotDataset(logger *supportlog.Entry, opts hotQueryOptions) (*queryDatas
 		registry.Close()
 		releaseCat()
 	}
-
-	last := committed
-	// Compare spans: first+SampleLedgers can wrap.
-	if span := committed - first + 1; opts.SampleLedgers > 0 && opts.SampleLedgers < span {
-		last = first + opts.SampleLedgers - 1
+	// The daemon seeds close times the same way at startup (startup.go).
+	if err := adapters.SeedCloseTimes(registry); err != nil {
+		release()
+		return nil, nil, fmt.Errorf("seed close times: %w", err)
 	}
 	ds := &queryDataset{
 		registry:    registry,
 		Passphrase:  opts.Plan.Passphrase,
 		Chunks:      []chunk.ID{opts.Chunk},
-		FirstLedger: first,
+		FirstLedger: opts.Chunk.FirstLedger(),
 		LastLedger:  last,
 	}
+	release = ds.serveReads(logger, release)
 	if err := ds.verifyServes(); err != nil {
 		release()
 		return nil, nil, err
 	}
 	return ds, release, nil
+}
+
+// hotDatasetEnd returns the last ledger a hot dataset over db serves: the last
+// committed ledger, cut to --sample-ledgers from the chunk's first ledger.
+func hotDatasetEnd(db *hotchunk.DB, opts hotQueryOptions) (uint32, error) {
+	committed, ok, err := db.MaxCommittedSeq()
+	if err != nil {
+		return 0, fmt.Errorf("read hot chunk %s last committed ledger: %w", opts.Chunk, err)
+	}
+	if !ok {
+		return 0, fmt.Errorf("hot chunk %s holds no committed ledger: ingest it before querying it", opts.Chunk)
+	}
+	first := opts.Chunk.FirstLedger()
+	if committed < first {
+		return 0, fmt.Errorf(
+			"hot chunk %s last committed ledger %d is below the chunk's first ledger %d: "+
+				"the directory holds another chunk's ledgers", opts.Chunk, committed, first)
+	}
+	// Compare spans: first+SampleLedgers can wrap.
+	if span := committed - first + 1; opts.SampleLedgers > 0 && opts.SampleLedgers < span {
+		return first + opts.SampleLedgers - 1, nil
+	}
+	return committed, nil
 }

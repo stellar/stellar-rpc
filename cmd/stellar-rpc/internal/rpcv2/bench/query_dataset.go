@@ -5,6 +5,8 @@ import (
 	"os"
 	"time"
 
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
@@ -16,18 +18,19 @@ type queryPlan struct {
 	Duration  time.Duration
 	Warmup    int
 
-	LedgersSpan uint32
-	TxPageSpan  uint32
-	TxPageLimit int
-	Passphrase  string
-	Seed        int64
+	LedgersLimit uint32
+	TxPageLimit  uint32
+	Format       string
+	Passphrase   string
+	Seed         int64
 }
 
 // queryDataset is what one bench query run reads: the registry over the files
-// a bench ingest run left on disk, and the ledger range the requests read.
-// Every request takes a read view and resolves its tier through ReadView.
+// a bench ingest run left on disk, the read server over it, and the ledger
+// range the requests read.
 type queryDataset struct {
 	registry *query.Registry
+	server   *readServer
 
 	// Passphrase is the network passphrase the dataset's transactions were
 	// signed under.
@@ -38,6 +41,16 @@ type queryDataset struct {
 
 	// FirstLedger and LastLedger bound the ledgers the requests read.
 	FirstLedger, LastLedger uint32
+}
+
+// serveReads starts ds's read server and returns a release that closes it
+// before it calls release, which closes the registry.
+func (ds *queryDataset) serveReads(logger *supportlog.Entry, release func()) func() {
+	ds.server = newReadServer(ds.registry, ds.Passphrase, logger)
+	return func() {
+		ds.server.close()
+		release()
+	}
 }
 
 // view acquires one read view. The caller must Release it.

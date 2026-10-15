@@ -33,6 +33,7 @@ var allQueryTypes = []string{queryTypeLedgers, queryTypeTxPage}
 // latency.csv metric values.
 const (
 	metricLatency        = "latency"
+	metricHandlerLatency = "handler_latency"
 	metricLatencyFromDue = "latency_from_due"
 	metricStartDelay     = "start_delay"
 )
@@ -93,6 +94,7 @@ func (s scenarioReport) latencyRows() []latencyRow {
 		add(metric, &dist)
 	}
 	timingRow(metricLatency, func(t requestTiming) time.Duration { return t.latency })
+	timingRow(metricHandlerLatency, func(t requestTiming) time.Duration { return t.handlerLatency })
 	timingRow(metricLatencyFromDue, func(t requestTiming) time.Duration { return t.latencyFromDue })
 	startDelay := series{samples: make([]sample, 0, len(s.result.startDelays))}
 	for _, d := range s.result.startDelays {

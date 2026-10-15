@@ -3,9 +3,11 @@ package rpcv2
 import (
 	"context"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/creachadair/jrpc2"
+	"github.com/creachadair/jrpc2/handler"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -13,6 +15,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/eventsapi"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
@@ -37,6 +40,15 @@ type handlerParams struct {
 	retentionWindow   uint32
 }
 
+// withRegistry returns p serving over registry, with the ledger and
+// transaction readers that read through it.
+func (p handlerParams) withRegistry(registry *query.Registry) handlerParams {
+	p.registry = registry
+	p.ledgerReader = adapters.NewLedgerReader()
+	p.transactionReader = adapters.NewTransactionReader(p.networkPassphrase, p.metrics)
+	return p
+}
+
 // newJSONRPCHandler maps the v2 config onto the shared method-spec builder —
 // the v2 counterpart of rpcv1.NewJSONRPCHandler. The handlers are the shared
 // internal/methods constructors, unmodified; only their inputs are v2's (the
@@ -46,6 +58,27 @@ type handlerParams struct {
 // v1 getEvents as the compatibility surface, byte-parity with the shared
 // handler held by its parity suite.
 func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
+	specs := limitsByMethod(cfg.Service.Methods).Apply(buildHandlerSpecs(cfg, p))
+	for i := range specs {
+		if specs[i].MethodName == protocol.GetHealthMethodName {
+			specs[i].Handler = gateHealthOnFirstCommit(specs[i].Handler, p.registry)
+		}
+	}
+
+	return jsonrpc.NewHandler(jsonrpc.Params{
+		Daemon:                p.daemon,
+		Logger:                p.logger,
+		Specs:                 specs,
+		GlobalQueueLimit:      deref(cfg.Service.MaxConcurrentRequests),
+		GlobalDurationWarning: deref(cfg.Service.RequestExecutionWarningThreshold),
+		GlobalDurationLimit:   deref(cfg.Service.MaxRequestExecutionDuration),
+	})
+}
+
+// buildHandlerSpecs returns every method the daemon serves, each handler
+// behind wrapAdapterRequest, without limits. newJSONRPCHandler and
+// ReadMethods both build from it, so the two cannot serve different handlers.
+func buildHandlerSpecs(cfg config.Config, p handlerParams) []jsonrpc.HandlerSpec {
 	m := cfg.Service.Methods
 	specs := jsonrpc.BuildHandlerSpecs(
 		jsonrpc.HandlerDeps{
@@ -85,22 +118,45 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 			TermBudget: uint32(min(deref(m.QueryEvents.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
 		}, p.logger),
 	})
-	specs = limitsByMethod(m).Apply(specs)
 	for i := range specs {
 		specs[i].Handler = wrapAdapterRequest(specs[i].Handler, p.registry)
-		if specs[i].MethodName == protocol.GetHealthMethodName {
-			specs[i].Handler = gateHealthOnFirstCommit(specs[i].Handler, p.registry)
+	}
+	return specs
+}
+
+// readMethodNames are the methods ReadMethods serves: the ones that read only
+// the registry, with no core, preflight or fee-window input.
+//
+//nolint:gochecknoglobals // fixed method list, read-only
+var readMethodNames = []string{
+	protocol.GetLatestLedgerMethodName,
+	protocol.GetLedgersMethodName,
+	protocol.GetTransactionMethodName,
+	protocol.GetTransactionsMethodName,
+	protocol.GetEventsMethodName,
+	protocol.QueryEventsMethodName,
+}
+
+// ReadMethods returns the daemon's read-only methods over registry, built by
+// the code that builds the daemon's method table, for an in-process server
+// such as jsonrpc.NewBridge. The handlers carry no queue or duration limits, no
+// metrics and no health gate; cfg's unset fields take their defaults.
+func ReadMethods(
+	cfg config.Config, registry *query.Registry, networkPassphrase string, logger *supportlog.Entry,
+) handler.Map {
+	p := handlerParams{
+		daemon:            host.MakeNoOpDaemon(),
+		logger:            logger,
+		metrics:           observability.NopMetrics{},
+		networkPassphrase: networkPassphrase,
+	}.withRegistry(registry)
+	out := handler.Map{}
+	for _, spec := range buildHandlerSpecs(cfg.WithDefaults(), p) {
+		if slices.Contains(readMethodNames, spec.MethodName) {
+			out[spec.MethodName] = spec.Handler
 		}
 	}
-
-	return jsonrpc.NewHandler(jsonrpc.Params{
-		Daemon:                p.daemon,
-		Logger:                p.logger,
-		Specs:                 specs,
-		GlobalQueueLimit:      deref(cfg.Service.MaxConcurrentRequests),
-		GlobalDurationWarning: deref(cfg.Service.RequestExecutionWarningThreshold),
-		GlobalDurationLimit:   deref(cfg.Service.MaxRequestExecutionDuration),
-	})
+	return out
 }
 
 // limitsByMethod maps [service.methods] onto the shared limits table. Both the

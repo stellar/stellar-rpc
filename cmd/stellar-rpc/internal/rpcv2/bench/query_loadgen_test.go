@@ -665,3 +665,14 @@ func TestTimerClock(t *testing.T) {
 		assert.GreaterOrEqual(t, timing.latencyFromDue, timing.latency, "request %d", i)
 	}
 }
+
+// timed runs fn and returns its run time as latency.
+func timed(fn func() (int, error)) (requestTiming, error) {
+	start := time.Now()
+	items, err := fn()
+	latency := time.Since(start)
+	if err != nil {
+		return requestTiming{}, err
+	}
+	return requestTiming{latency: latency, items: items}, nil
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -100,20 +101,18 @@ func scenarioSeed(base int64, qtype string) int64 {
 	return base + int64(slices.Index(allQueryTypes, qtype))
 }
 
-// warnFixedReadRange logs the configured types whose span covers the whole
-// dataset and records them in settings under fixedReadRange. pickStart returns the
-// range's first ledger for those, so every request reads the same ledgers and
-// their percentiles measure a cached read.
+// warnFixedReadRange logs the configured types whose requests all start at the
+// dataset's first ledger and records them in settings under fixedReadRange.
+// pickStart returns that ledger when a ledgers request's limit covers the whole
+// dataset, or for any type when the dataset holds one ledger, so every request
+// reads the same ledgers and their percentiles measure a cached read.
 func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan, settings map[string]string) {
 	room := ds.LastLedger - ds.FirstLedger + 1
 	var fixed []string
 	for _, qtype := range p.Types {
-		var span uint32
-		switch qtype {
-		case queryTypeLedgers:
-			span = p.LedgersSpan
-		case queryTypeTxPage:
-			span = p.TxPageSpan
+		span := uint32(1)
+		if qtype == queryTypeLedgers {
+			span = p.LedgersLimit
 		}
 		if span >= room {
 			fixed = append(fixed, qtype)
@@ -122,7 +121,7 @@ func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan,
 	if len(fixed) == 0 {
 		return
 	}
-	logger.Warnf("dataset holds %d ledgers; %s read the same fixed range every request (span >= range), "+
+	logger.Warnf("dataset holds %d ledgers; %s read the same fixed range every request (limit >= range), "+
 		"so their percentiles measure a cached read", room, strings.Join(fixed, " and "))
 	settings["fixedReadRange"] = strings.Join(fixed, ",")
 }
@@ -144,6 +143,8 @@ func runQueryBench(
 	env.SetupTimes["storeOpen"] = time.Since(start)
 	logger.Infof("serving ledgers [%d, %d] over %d chunk(s)", ds.FirstLedger, ds.LastLedger, len(ds.Chunks))
 	warnFixedReadRange(logger, ds, p, env.Settings)
+	env.Settings["format"] = p.Format
+	env.Settings["handlerConcurrency"] = strconv.Itoa(handlerConcurrency())
 
 	report := &queryReport{}
 	run := &queryRun{logger: logger, ds: ds, plan: p, report: report, clock: timerClock{}}

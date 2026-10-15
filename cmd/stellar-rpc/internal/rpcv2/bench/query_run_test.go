@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -18,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/network"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -148,26 +151,25 @@ func TestWarnThinSamples(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(output.String(), "fewer than"), "latency_from_due rows do not warn")
 }
 
-// A configured span that covers the whole dataset warns and lands in the run
-// settings; a span that fits inside it stays quiet.
+// A ledgers limit that covers the whole dataset, or a one-ledger dataset, warns
+// and lands in the run settings; a limit that fits inside it stays quiet.
 func TestWarnFixedReadRange(t *testing.T) {
-	ds := &queryDataset{FirstLedger: 10, LastLedger: 14}
 	for _, tc := range []struct {
-		name        string
-		ledgersSpan uint32
-		txPageSpan  uint32
-		want        string
+		name         string
+		last         uint32
+		ledgersLimit uint32
+		want         string
 	}{
-		{"both spans cover the range", 5, 10, "ledgers and txpage"},
-		{"only txpage covers it", 2, 5, "txpage"},
-		{"both spans fit inside", 2, 3, ""},
+		{"one-ledger dataset", 10, 1, "ledgers and txpage"},
+		{"the ledgers limit covers the range", 14, 5, "ledgers"},
+		{"the ledgers limit fits inside", 14, 2, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			ds := &queryDataset{FirstLedger: 10, LastLedger: tc.last}
 			logger, output := capturingLogger()
 			p := queryPlan{
-				Types:       []string{queryTypeLedgers, queryTypeTxPage},
-				LedgersSpan: tc.ledgersSpan,
-				TxPageSpan:  tc.txPageSpan,
+				Types:        []string{queryTypeLedgers, queryTypeTxPage},
+				LedgersLimit: tc.ledgersLimit,
 			}
 			settings := map[string]string{}
 			warnFixedReadRange(logger, ds, p, settings)
@@ -176,7 +178,7 @@ func TestWarnFixedReadRange(t *testing.T) {
 				assert.NotContains(t, settings, "fixedReadRange")
 				return
 			}
-			assert.Contains(t, output.String(), "dataset holds 5 ledgers")
+			assert.Contains(t, output.String(), fmt.Sprintf("dataset holds %d ledgers", tc.last-10+1))
 			assert.Contains(t, output.String(), tc.want+" read the same fixed range")
 			assert.Equal(t, strings.ReplaceAll(tc.want, " and ", ","), settings["fixedReadRange"])
 		})
@@ -268,24 +270,26 @@ func runQueryCommand(t *testing.T, args ...string) (runRecord, []map[string]stri
 	return record, rows
 }
 
-// A hot run records the store open time.
+// A hot run records the store open time, the response format and the handler
+// concurrency.
 func TestQueryHotCommandRecordsRun(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
 	record, rows := runQueryCommand(t, queryTierHot, "--chunk", "0", "--hot-dir", hotRoot,
-		"--types", queryTypeLedgers, "--target-rps", "1000", "--duration", "20ms")
+		"--types", queryTypeLedgers, "--target-rps", "1000", "--duration", "20ms", "--format", protocol.FormatJSON)
 	require.Len(t, rows, 1)
 	assert.Equal(t, queryTypeLedgers, rows[0]["query_type"])
 	assert.Equal(t, "20", rows[0]["planned"])
 	assert.NotContains(t, record.Settings, "fixedReadRange")
+	assert.Equal(t, protocol.FormatJSON, record.Settings["format"])
+	assert.Equal(t, strconv.Itoa(runtime.NumCPU()), record.Settings["handlerConcurrency"])
 }
 
-// A hot run whose ledgers span covers the whole dataset records
+// A hot run whose ledgers limit covers the whole sampled dataset records
 // settings.fixedReadRange in run.json.
 func TestQueryHotCommandRecordsFixedReadRange(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
-	span := strconv.Itoa(2 * eventEvery) // the fixture's ledger count
-	record, _ := runQueryCommand(t, queryTierHot, "--chunk", "0", "--hot-dir", hotRoot,
-		"--types", queryTypeLedgers, "--ledgers-span", span, "--target-rps", "1000", "--duration", "10ms")
+	record, _ := runQueryCommand(t, queryTierHot, "--chunk", "0", "--hot-dir", hotRoot, "--sample-ledgers", "10",
+		"--types", queryTypeLedgers, "--ledgers-limit", "10", "--target-rps", "1000", "--duration", "10ms")
 	assert.Equal(t, queryTypeLedgers, record.Settings["fixedReadRange"])
 }
 
@@ -320,12 +324,13 @@ func TestQueryBenchWritesPartialReport(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
 	env := runEnv{OutDir: t.TempDir(), Settings: map[string]string{}, SetupTimes: map[string]time.Duration{}}
 	plan := queryPlan{
-		Types:       []string{queryTypeLedgers, "unknown"},
-		TargetRPS:   []float64{1000},
-		Duration:    10 * time.Millisecond,
-		LedgersSpan: defaultLedgersSpan,
-		Passphrase:  network.PublicNetworkPassphrase,
-		Seed:        defaultSeed,
+		Types:        []string{queryTypeLedgers, "unknown"},
+		TargetRPS:    []float64{1000},
+		Duration:     10 * time.Millisecond,
+		LedgersLimit: defaultLedgersLimit,
+		Format:       protocol.FormatBase64,
+		Passphrase:   network.PublicNetworkPassphrase,
+		Seed:         defaultSeed,
 	}
 	open := func() (*queryDataset, func(), error) {
 		return openHotDataset(testLogger(), hotQueryOptions{HotRoot: hotRoot, Chunk: 0, Plan: plan})

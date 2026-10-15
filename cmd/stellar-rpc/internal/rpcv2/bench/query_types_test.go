@@ -2,17 +2,15 @@ package bench
 
 import (
 	"context"
-	"math"
 	"math/rand/v2"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/network"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
@@ -36,41 +34,51 @@ func ingestHotChunk(t *testing.T) string {
 	return hotRoot
 }
 
-// Every query type reads under a live context and stops with the context error
-// once the context is done.
+// testPlan is a plan with the default request flags and the given format.
+func testPlan(format string) queryPlan {
+	return queryPlan{
+		Types:        allQueryTypes,
+		LedgersLimit: defaultLedgersLimit,
+		TxPageLimit:  defaultTxPageLimit,
+		Format:       format,
+		Passphrase:   network.PublicNetworkPassphrase,
+		Seed:         defaultSeed,
+	}
+}
+
+// Every query type answers in both formats under a live context, reports both
+// timings, and stops with the context error once the context is done.
 func TestQueryRequests(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
-	plan := queryPlan{
-		Types:       allQueryTypes,
-		LedgersSpan: defaultLedgersSpan,
-		TxPageSpan:  defaultTxPageSpan,
-		TxPageLimit: defaultTxPageLimit,
-		Passphrase:  network.PublicNetworkPassphrase,
-		Seed:        defaultSeed,
-	}
-	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{HotRoot: hotRoot, Chunk: 0, Plan: plan})
+	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
+		HotRoot: hotRoot, Chunk: 0, Plan: testPlan(protocol.FormatBase64),
+	})
 	require.NoError(t, err)
 	defer release()
 	assert.Equal(t, chunk.ID(0).FirstLedger()+2*eventEvery-1, ds.LastLedger, "--sample-ledgers 0 keeps every ledger")
 
-	for _, qtype := range allQueryTypes {
-		t.Run(qtype, func(t *testing.T) {
-			req, err := newQueryRequest(ds, plan, qtype)
-			require.NoError(t, err)
-			rng := rand.New(rand.NewPCG(defaultSeed, defaultSeed))
-			for range 10 {
-				timing, err := req(context.Background(), rng)
+	for _, format := range queryFormats {
+		plan := testPlan(format)
+		for _, qtype := range allQueryTypes {
+			t.Run(qtype+" "+format, func(t *testing.T) {
+				req, err := newQueryRequest(ds, plan, qtype)
 				require.NoError(t, err)
-				if qtype == queryTypeLedgers {
-					assert.Equal(t, defaultLedgersSpan, timing.items)
+				rng := rand.New(rand.NewPCG(defaultSeed, defaultSeed))
+				for range 10 {
+					timing, err := req(context.Background(), rng)
+					require.NoError(t, err)
+					assert.Positive(t, timing.handlerLatency)
+					assert.LessOrEqual(t, timing.handlerLatency, timing.latency)
+					if qtype == queryTypeLedgers {
+						assert.Equal(t, defaultLedgersLimit, timing.items)
+					}
 				}
-			}
-		})
+			})
+		}
 	}
-
 	for _, qtype := range allQueryTypes {
 		t.Run(qtype+" stops on cancel", func(t *testing.T) {
-			req, err := newQueryRequest(ds, plan, qtype)
+			req, err := newQueryRequest(ds, testPlan(protocol.FormatBase64), qtype)
 			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
@@ -80,90 +88,46 @@ func TestQueryRequests(t *testing.T) {
 	}
 }
 
-// errCounter is a context that is never done and counts its Err calls.
-// txPageRequest calls Err once for each ledger the scan yields, so the count is
-// the number of ledgers it read.
-type errCounter struct {
-	calls atomic.Int32
-}
-
-func (*errCounter) Deadline() (time.Time, bool) { return time.Time{}, false }
-
-func (*errCounter) Done() <-chan struct{} { return nil }
-
-func (c *errCounter) Err() error {
-	c.calls.Add(1)
-	return nil
-}
-
-func (*errCounter) Value(any) any { return nil }
-
-// A txpage request ends at the ledger that fills the page and reads no ledger
-// after it.
-func TestTxPageStopsAtFullPage(t *testing.T) {
+// A txpage request returns at most --txpage-limit transactions.
+func TestTxPageRequestLimit(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
-	// The dataset holds two ledgers; only the first carries a transaction.
-	plan := queryPlan{TxPageSpan: 2, TxPageLimit: 1, Passphrase: network.PublicNetworkPassphrase}
 	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
-		HotRoot: hotRoot, Chunk: 0, SampleLedgers: 2, Plan: plan,
+		HotRoot: hotRoot, Chunk: 0, Plan: testPlan(protocol.FormatBase64),
+	})
+	require.NoError(t, err)
+	defer release()
+	// The fixture's transactions are in its first and its 101st ledger.
+	ds.LastLedger = ds.FirstLedger
+	for limit, want := range map[uint32]int{1: 1, defaultTxPageLimit: 2} {
+		plan := testPlan(protocol.FormatBase64)
+		plan.TxPageLimit = limit
+		timing, err := txPageRequest(ds, plan)(context.Background(), rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
+		require.NoError(t, err)
+		assert.Equal(t, want, timing.items, "--txpage-limit %d", limit)
+	}
+}
+
+// --sample-ledgers ends the handlers' range: the latest ledger is the sample's
+// last, and a txpage request reads no ledger past it.
+func TestHotDatasetSampleBoundsHandlers(t *testing.T) {
+	hotRoot := ingestHotChunk(t)
+	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
+		HotRoot: hotRoot, Chunk: 0, SampleLedgers: 2, Plan: testPlan(protocol.FormatBase64),
 	})
 	require.NoError(t, err)
 	defer release()
 	require.Equal(t, chunk.ID(0).FirstLedger()+1, ds.LastLedger)
 
-	ctx := &errCounter{}
-	timing, err := txPageRequest(ds, plan)(ctx, rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
+	var latest protocol.GetLatestLedgerResponse
+	_, err = ds.server.call(context.Background(), protocol.GetLatestLedgerMethodName, nil, &latest)
 	require.NoError(t, err)
-	assert.Equal(t, 1, timing.items)
-	assert.Equal(t, int32(1), ctx.calls.Load(), "the scan reads only the ledger that fills the page")
-}
+	assert.Equal(t, ds.LastLedger, latest.Sequence)
 
-// A txpage request whose page does not fill stops after --txpage-span ledgers,
-// although its scan range runs further.
-func TestTxPageStopsAfterSpan(t *testing.T) {
-	hotRoot := ingestHotChunk(t)
-	plan := queryPlan{TxPageSpan: 3, TxPageLimit: 1000, Passphrase: network.PublicNetworkPassphrase}
-	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{HotRoot: hotRoot, Chunk: 0, Plan: plan})
+	ds.LastLedger = ds.FirstLedger
+	timing, err := txPageRequest(ds, testPlan(protocol.FormatBase64))(
+		context.Background(), rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
 	require.NoError(t, err)
-	defer release()
-	require.Greater(t, ds.LastLedger-ds.FirstLedger+1, 2*plan.TxPageSpan)
-
-	ctx := &errCounter{}
-	timing, err := txPageRequest(ds, plan)(ctx, rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
-	require.NoError(t, err)
-	assert.Less(t, timing.items, plan.TxPageLimit)
-	assert.Equal(t, int32(3), ctx.calls.Load(), "the scan reads --txpage-span ledgers")
-}
-
-// A txpage request reads no ledger past --sample-ledgers, also when
-// --txpage-span is wider than the sample.
-func TestTxPageStaysInSample(t *testing.T) {
-	hotRoot := ingestHotChunk(t)
-	plan := queryPlan{TxPageSpan: 5, TxPageLimit: 1000, Passphrase: network.PublicNetworkPassphrase}
-	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
-		HotRoot: hotRoot, Chunk: 0, SampleLedgers: 2, Plan: plan,
-	})
-	require.NoError(t, err)
-	defer release()
-	require.Greater(t, ds.registry.LatestLedger(), ds.LastLedger)
-
-	ctx := &errCounter{}
-	_, err = txPageRequest(ds, plan)(ctx, rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
-	require.NoError(t, err)
-	assert.Equal(t, int32(2), ctx.calls.Load(), "the scan reads only the sampled ledgers")
-}
-
-// txPageScanEnd covers one chunk's span of ledgers from lo, cut at latest.
-func TestTxPageScanEnd(t *testing.T) {
-	const lo = uint32(100)
-	assert.Equal(t, lo, txPageScanEnd(lo, lo))
-	assert.Equal(t, lo+1, txPageScanEnd(lo+1, lo))
-	assert.Equal(t, lo+5, txPageScanEnd(lo, lo+5))
-	assert.Equal(t, lo+chunk.LedgersPerChunk-1, txPageScanEnd(lo, lo+chunk.LedgersPerChunk-1))
-	assert.Equal(t, lo+chunk.LedgersPerChunk-1, txPageScanEnd(lo, lo+chunk.LedgersPerChunk))
-	assert.Equal(t, lo+chunk.LedgersPerChunk-1, txPageScanEnd(lo, math.MaxUint32))
-	high := uint32(math.MaxUint32 - 5)
-	assert.Equal(t, uint32(math.MaxUint32), txPageScanEnd(high, math.MaxUint32))
+	assert.Equal(t, 1, timing.items, "the transaction in the 101st ledger is past the sample")
 }
 
 // --sample-ledgers at or above the ingested span keeps every committed ledger.
@@ -181,20 +145,41 @@ func TestOpenHotDatasetSampleLedgers(t *testing.T) {
 	}
 }
 
-// pickRange returns a span-long range inside the dataset's range, clamped to
-// the range when the span is wider.
-func TestPickRange(t *testing.T) {
+// pickStart returns a start whose span-long read stays inside the dataset's
+// range, and the range's start when the span is wider.
+func TestPickStart(t *testing.T) {
 	ds := &queryDataset{FirstLedger: 10, LastLedger: 14}
 	rng := rand.New(rand.NewPCG(1, 1))
 	for _, span := range []uint32{1, 4, 5, 6} {
 		for range 100 {
-			lo, hi := ds.pickRange(rng, span)
+			lo := ds.pickStart(rng, span)
 			require.GreaterOrEqual(t, lo, ds.FirstLedger, "span %d", span)
-			require.LessOrEqual(t, hi, ds.LastLedger, "span %d", span)
-			require.Equal(t, min(span, 5), hi-lo+1, "span %d", span)
+			require.LessOrEqual(t, lo+min(span, 5)-1, ds.LastLedger, "span %d", span)
 			if span >= 5 {
 				require.Equal(t, ds.FirstLedger, lo, "span %d", span)
 			}
 		}
 	}
+}
+
+// A ledgers limit wider than the dataset reads the whole dataset and stays
+// flagged as a fixed read range.
+func TestLedgersLimitWiderThanDataset(t *testing.T) {
+	hotRoot := ingestHotChunk(t)
+	plan := testPlan(protocol.FormatBase64)
+	plan.Types = []string{queryTypeLedgers}
+	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
+		HotRoot: hotRoot, Chunk: 0, SampleLedgers: 5, Plan: plan,
+	})
+	require.NoError(t, err)
+	defer release()
+	require.Greater(t, plan.LedgersLimit, ds.LastLedger-ds.FirstLedger+1)
+
+	timing, err := ledgersRequest(ds, plan)(context.Background(), rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
+	require.NoError(t, err)
+	assert.Equal(t, 5, timing.items)
+
+	settings := map[string]string{}
+	warnFixedReadRange(testLogger(), ds, plan, settings)
+	assert.Equal(t, queryTypeLedgers, settings["fixedReadRange"])
 }

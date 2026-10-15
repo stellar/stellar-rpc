@@ -12,21 +12,23 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/network"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 )
 
 func validQueryFlags() queryFlags {
 	return queryFlags{
-		types:       queryTypeLedgers,
-		targetRPS:   "1",
-		duration:    time.Second,
-		ledgersSpan: defaultLedgersSpan,
-		txPageSpan:  defaultTxPageSpan,
-		txPageLimit: defaultTxPageLimit,
-		passphrase:  network.PublicNetworkPassphrase,
-		seed:        defaultSeed,
+		types:        queryTypeLedgers,
+		targetRPS:    "1",
+		duration:     time.Second,
+		ledgersLimit: defaultLedgersLimit,
+		txPageLimit:  defaultTxPageLimit,
+		format:       protocol.FormatBase64,
+		passphrase:   network.PublicNetworkPassphrase,
+		seed:         defaultSeed,
 	}
 }
 
@@ -58,24 +60,20 @@ func TestParseRejectsRepeats(t *testing.T) {
 	assert.Equal(t, []string{queryTypeTxPage, queryTypeLedgers}, got)
 }
 
-// TestPlanBoundsReadSpans: --ledgers-span and --txpage-span accept maxReadSpan
-// and reject maxReadSpan+1.
-func TestPlanBoundsReadSpans(t *testing.T) {
-	f := validQueryFlags()
-	f.ledgersSpan = maxReadSpan
-	f.txPageSpan = maxReadSpan
-	_, err := f.plan()
-	require.NoError(t, err)
-
-	f = validQueryFlags()
-	f.ledgersSpan = maxReadSpan + 1
-	_, err = f.plan()
-	require.ErrorContains(t, err, "--ledgers-span")
-
-	f = validQueryFlags()
-	f.txPageSpan = maxReadSpan + 1
-	_, err = f.plan()
-	require.ErrorContains(t, err, "--txpage-span")
+// --ledgers-limit and --txpage-limit accept the caps of the daemon's default
+// config, and both formats pass.
+func TestPlanAcceptsLimitCaps(t *testing.T) {
+	assert.Equal(t, config.DefaultGetLedgersMaxItemsPerResponse, maxLedgersLimit())
+	assert.Equal(t, config.DefaultGetTransactionsMaxItemsPerResponse, maxTxPageLimit())
+	for _, format := range queryFormats {
+		f := validQueryFlags()
+		f.ledgersLimit = uint32(maxLedgersLimit())
+		f.txPageLimit = uint32(maxTxPageLimit())
+		f.format = format
+		p, err := f.plan()
+		require.NoError(t, err)
+		assert.Equal(t, format, p.Format)
+	}
 }
 
 // plan rejects a --target-rps, --duration and --warmup combination that no

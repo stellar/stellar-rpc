@@ -3,7 +3,9 @@ package rpcv2
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -295,4 +297,28 @@ func TestDeriveLifecycleGrace_TracksARaisedMethodBudget(t *testing.T) {
 	long := 2 * time.Minute
 	cfg.Service.Methods.SimulateTransaction.MaxExecutionDuration = &long
 	assert.Equal(t, long+graceMargin, deriveLifecycleGrace(cfg.Service))
+}
+
+// ReadMethods serves exactly the read methods, each through the per-request
+// read view and with the getLedgers cap of the default config.
+func TestReadMethods(t *testing.T) {
+	methods := ReadMethods(config.Config{}, seedServingRegistry(t), "test passphrase", silentLogger())
+	assert.ElementsMatch(t, readMethodNames, slices.Collect(maps.Keys(methods)))
+
+	client := rpcv2test.NewLocalClient(t, methods)
+	var latest protocol.GetLatestLedgerResponse
+	require.NoError(t, client.CallResult(context.Background(), protocol.GetLatestLedgerMethodName, nil, &latest))
+	assert.Equal(t, uint32(chunk.FirstLedgerSeq), latest.Sequence)
+
+	var ledgers protocol.GetLedgersResponse
+	require.NoError(t, client.CallResult(context.Background(), protocol.GetLedgersMethodName,
+		protocol.GetLedgersRequest{StartLedger: chunk.FirstLedgerSeq}, &ledgers))
+	require.Len(t, ledgers.Ledgers, 1)
+
+	err := client.CallResult(context.Background(), protocol.GetLedgersMethodName,
+		protocol.GetLedgersRequest{
+			StartLedger: chunk.FirstLedgerSeq,
+			Pagination:  &protocol.LedgerPaginationOptions{Limit: config.DefaultGetLedgersMaxItemsPerResponse + 1},
+		}, &ledgers)
+	require.ErrorContains(t, err, "limit must not exceed")
 }

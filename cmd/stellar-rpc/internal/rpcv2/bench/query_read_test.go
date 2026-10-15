@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"path/filepath"
@@ -11,10 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go-stellar-sdk/network"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 // executeQuery runs bench query with args and a new --out, and requires success.
@@ -35,24 +35,24 @@ func requireNoScratchCatalog(t *testing.T, dir string) {
 	}
 }
 
-// newRequest is the constructor of one ledger-reading request type.
+// newRequest is the constructor of one request type.
 type newRequest func(*queryDataset, queryPlan) queryRequest
 
-// requestItems narrows ds to [lo, hi] and runs one request that reads all of
-// it.
+// requestItems narrows the starts ds picks to [lo, hi], sets the ledgers limit
+// to the range's size, and runs one request.
 func requestItems(ds *queryDataset, p queryPlan, newReq newRequest, lo, hi uint32) (int, error) {
 	ds.FirstLedger, ds.LastLedger = lo, hi
-	p.LedgersSpan, p.TxPageSpan = hi-lo+1, hi-lo+1
+	p.LedgersLimit = hi - lo + 1
 	timing, err := newReq(ds, p)(context.Background(), rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
 	return timing.items, err
 }
 
-// A one-ledger ledgers request, and any request past the latest ledger, reads
-// through the point read. A ledgers request that reads fewer ledgers than its
-// range holds fails.
+// A one-ledger ledgers request reads one ledger, a request past the latest
+// ledger fails in the handler, and a ledgers request that returns fewer
+// ledgers than its limit fails.
 func TestQueryRequestReads(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
-	plan := queryPlan{TxPageLimit: defaultTxPageLimit, Passphrase: network.PublicNetworkPassphrase}
+	plan := testPlan(protocol.FormatBase64)
 	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{HotRoot: hotRoot, Chunk: 0, Plan: plan})
 	require.NoError(t, err)
 	defer release()
@@ -66,21 +66,22 @@ func TestQueryRequestReads(t *testing.T) {
 		{queryTypeLedgers, ledgersRequest},
 		{queryTypeTxPage, txPageRequest},
 	} {
-		t.Run(tc.qtype+" point read", func(t *testing.T) {
-			items, err := requestItems(ds, plan, tc.newReq, first, first)
-			require.NoError(t, err)
-			assert.Equal(t, 1, items)
-
-			// Only the point read reports ErrNotFound; a scan past the store's
-			// last ledger yields nothing.
-			_, err = requestItems(ds, plan, tc.newReq, last+1, last+1)
-			require.ErrorIs(t, err, stores.ErrNotFound)
+		t.Run(tc.qtype+" past the latest ledger", func(t *testing.T) {
+			_, err := requestItems(ds, plan, tc.newReq, last+1, last+1)
+			require.ErrorContains(t, err, fmt.Sprintf("start ledger (%d) must be between", last+1))
 		})
 	}
 
+	t.Run("point read", func(t *testing.T) {
+		items, err := requestItems(ds, plan, ledgersRequest, first, first)
+		require.NoError(t, err)
+		assert.Equal(t, 1, items)
+	})
+
 	t.Run("missing ledgers", func(t *testing.T) {
+		// The dataset claims five ledgers past the last one the store holds.
 		_, err := requestItems(ds, plan, ledgersRequest, last-4, last+5)
-		require.ErrorContains(t, err, "read 5 of the 10 ledgers")
+		require.ErrorContains(t, err, "getLedgers returned 5 of the 10 ledgers")
 	})
 }
 
@@ -108,7 +109,7 @@ func TestQueryColdTwoChunks(t *testing.T) {
 		OutDir:     filepath.Join(t.TempDir(), "csv"),
 	}))
 
-	plan := queryPlan{TxPageLimit: defaultTxPageLimit, Passphrase: network.PublicNetworkPassphrase}
+	plan := testPlan(protocol.FormatBase64)
 	ds, release, err := openColdDataset(testLogger(), coldQueryOptions{ColdRoot: coldRoot, NumChunks: 2, Plan: plan})
 	require.NoError(t, err)
 	assert.Equal(t, chunk.ID(1).LastLedger(), ds.LastLedger)
@@ -118,12 +119,14 @@ func TestQueryColdTwoChunks(t *testing.T) {
 	items, err := requestItems(ds, plan, ledgersRequest, lo, hi)
 	require.NoError(t, err)
 	assert.Equal(t, 10, items)
-	items, err = requestItems(ds, plan, txPageRequest, lo, hi)
+	plan.TxPageLimit = 1
+	items, err = requestItems(ds, plan, txPageRequest, lo, lo)
 	require.NoError(t, err)
 	assert.Equal(t, 1, items)
 	release()
 
 	executeQuery(t, queryTierCold, "--start-chunk", "0", "--num-chunks", "2", "--cold-dir", coldRoot,
-		"--types", queryTypeLedgers+","+queryTypeTxPage, "--target-rps", "1000", "--duration", "10ms")
+		"--types", queryTypeLedgers+","+queryTypeTxPage, "--target-rps", "1000", "--duration", "10ms",
+		"--format", protocol.FormatJSON)
 	requireNoScratchCatalog(t, coldRoot)
 }

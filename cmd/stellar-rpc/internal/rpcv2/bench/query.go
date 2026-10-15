@@ -12,13 +12,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/stellar/go-stellar-sdk/network"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 )
 
 // newQueryCommand returns the `bench query` command tree: `cold` benchmarks
 // reads served from frozen artifacts, `hot` reads served from a hot chunk
-// database. Both read through query.ReadView.
+// database. Both call the daemon's read method handlers.
 func newQueryCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "query",
@@ -30,10 +29,9 @@ func newQueryCommand() *cobra.Command {
 
 // Read-shape flag defaults.
 const (
-	defaultLedgersSpan = 10
-	defaultTxPageSpan  = 5
-	defaultTxPageLimit = 200
-	defaultSeed        = 1
+	defaultLedgersLimit = 10
+	defaultTxPageLimit  = 200
+	defaultSeed         = 1
 )
 
 // Scenario flag defaults.
@@ -51,11 +49,6 @@ const (
 	queryTierHot  = "hot"
 )
 
-// maxReadSpan is the widest span --ledgers-span and --txpage-span accept: one
-// chunk. The cap also keeps a request's last ledger, start+span-1, inside
-// uint32.
-const maxReadSpan = chunk.LedgersPerChunk
-
 // queryFlags is the flag set both bench query subcommands share, beyond --out
 // and the profiling flags newBenchCommand binds. The spellings and value
 // formats of --types, --target-rps, --duration and --warmup are the campaign
@@ -66,11 +59,11 @@ type queryFlags struct {
 	duration  time.Duration
 	warmup    int
 
-	ledgersSpan uint32
-	txPageSpan  uint32
-	txPageLimit int
-	passphrase  string
-	seed        int64
+	ledgersLimit uint32
+	txPageLimit  uint32
+	format       string
+	passphrase   string
+	seed         int64
 }
 
 func (f *queryFlags) bind(cmd *cobra.Command) {
@@ -84,13 +77,13 @@ func (f *queryFlags) bind(cmd *cobra.Command) {
 		"measured duration of each --target-rps scenario; the --warmup iterations run before it")
 	fs.IntVar(&f.warmup, "warmup", 0,
 		"unmeasured iterations per scenario, started at the scenario's rate before measurement starts")
-	spanRange := "in [1, " + strconv.FormatUint(uint64(maxReadSpan), 10) + "]"
-	fs.Uint32Var(&f.ledgersSpan, "ledgers-span", defaultLedgersSpan,
-		"ledgers one ledgers request reads, "+spanRange+" (1 = a point read)")
-	fs.Uint32Var(&f.txPageSpan, "txpage-span", defaultTxPageSpan,
-		"ledgers one txpage request reads, "+spanRange)
-	fs.IntVar(&f.txPageLimit, "txpage-limit", defaultTxPageLimit,
-		"the most transactions one txpage request makes (the page size), >= 1")
+	fs.Uint32Var(&f.ledgersLimit, "ledgers-limit", defaultLedgersLimit,
+		"getLedgers limit of one ledgers request, in [1, "+strconv.FormatUint(uint64(maxLedgersLimit()), 10)+
+			"] (1 = a point read)")
+	fs.Uint32Var(&f.txPageLimit, "txpage-limit", defaultTxPageLimit,
+		"getTransactions limit of one txpage request, in [1, "+strconv.FormatUint(uint64(maxTxPageLimit()), 10)+"]")
+	fs.StringVar(&f.format, "format", protocol.FormatBase64,
+		"response format of every request: "+strings.Join(queryFormats, " | "))
 	fs.StringVar(&f.passphrase, "network-passphrase", network.PublicNetworkPassphrase,
 		"network passphrase the dataset's transactions were signed under; txpage needs it "+
 			"to pair envelopes")
@@ -118,15 +111,15 @@ func (f *queryFlags) plan() (queryPlan, error) {
 		return queryPlan{}, errors.New("--network-passphrase is required")
 	}
 	return queryPlan{
-		Types:       types,
-		TargetRPS:   rates,
-		Duration:    f.duration,
-		Warmup:      f.warmup,
-		LedgersSpan: f.ledgersSpan,
-		TxPageSpan:  f.txPageSpan,
-		TxPageLimit: f.txPageLimit,
-		Passphrase:  f.passphrase,
-		Seed:        f.seed,
+		Types:        types,
+		TargetRPS:    rates,
+		Duration:     f.duration,
+		Warmup:       f.warmup,
+		LedgersLimit: f.ledgersLimit,
+		TxPageLimit:  f.txPageLimit,
+		Format:       f.format,
+		Passphrase:   f.passphrase,
+		Seed:         f.seed,
 	}, nil
 }
 
@@ -147,15 +140,17 @@ func (f *queryFlags) checkScenarioFlags(rates []float64) error {
 	return nil
 }
 
-// checkRequestFlags checks the flags that set what each request reads.
+// checkRequestFlags checks the flags that set what each request reads. A limit
+// above the daemon's cap is an error, because the handler would reject every
+// request.
 func (f *queryFlags) checkRequestFlags() error {
-	switch {
-	case f.ledgersSpan < 1 || f.ledgersSpan > maxReadSpan:
-		return fmt.Errorf("--ledgers-span must be in [1, %d], got %d", maxReadSpan, f.ledgersSpan)
-	case f.txPageSpan < 1 || f.txPageSpan > maxReadSpan:
-		return fmt.Errorf("--txpage-span must be in [1, %d], got %d", maxReadSpan, f.txPageSpan)
-	case f.txPageLimit < 1:
-		return fmt.Errorf("--txpage-limit must be >= 1, got %d", f.txPageLimit)
+	switch maxLedgers, maxTxs := maxLedgersLimit(), maxTxPageLimit(); {
+	case f.ledgersLimit < 1 || uint(f.ledgersLimit) > maxLedgers:
+		return fmt.Errorf("--ledgers-limit must be in [1, %d], got %d", maxLedgers, f.ledgersLimit)
+	case f.txPageLimit < 1 || uint(f.txPageLimit) > maxTxs:
+		return fmt.Errorf("--txpage-limit must be in [1, %d], got %d", maxTxs, f.txPageLimit)
+	case !slices.Contains(queryFormats, f.format):
+		return fmt.Errorf("--format: unknown format %q (want %s)", f.format, strings.Join(queryFormats, " | "))
 	}
 	return nil
 }

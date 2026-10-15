@@ -303,3 +303,21 @@ func TestBridge_Panic(t *testing.T) {
 		})
 	}
 }
+
+// NewBridge serves with no duration limit: a handler's context has no deadline
+// and carries the request context's values.
+func TestNewBridge_UnboundedRequestContext(t *testing.T) {
+	type key struct{}
+	b := NewBridge(handler.Map{"m": handler.New(func(hctx context.Context) (any, error) {
+		_, hasDeadline := hctx.Deadline()
+		return map[string]any{"deadline": hasDeadline, "value": hctx.Value(key{})}, nil
+	})}, log.DefaultLogger)
+	t.Cleanup(b.Close)
+	req := httptest.NewRequestWithContext(context.WithValue(t.Context(), key{}, "planted"), http.MethodPost, "/",
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"m"}`))
+	req.Header.Set("Content-Type", contentTypeJSON)
+	rec := httptest.NewRecorder()
+	b.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.JSONEq(t, `{"jsonrpc":"2.0","id":1,"result":{"deadline":false,"value":"planted"}}`, rec.Body.String())
+}
