@@ -17,7 +17,7 @@ package event
 //   4. MPHF wrapper around github.com/stellar/streamhash —
 //      buildMPHF + openMPHF + Lookup. The writer builds the
 //      index.hash file via buildMPHF; the reader opens it via
-//      openMPHF and routes term-key queries through Lookup.
+//      openMPHF and routes term-key queries through LookupBatch.
 //
 // Writer-side code (ColdWriter, WriteColdIndex) lives in
 // cold_writer.go + cold_index.go; the reader lives in cold_reader.go.
@@ -305,7 +305,7 @@ func decodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
 // `field || value`) to a unique slot in [0, N), where N is the
 // number of unique terms in a Chunk. index.pack is laid out as one
 // roaring-bitmap record per slot. The cold reader looks up a
-// TermKey via Lookup, reads the bitmap record at that slot, and
+// TermKey via LookupBatch, reads the bitmap record at that slot, and
 // MUST verify a 4-byte fingerprint stored alongside the bitmap
 // before trusting it: an MPHF returns a slot for every input,
 // including keys never added at build time. False positives are
@@ -453,24 +453,17 @@ func buildMPHF(
 // <chunkDir>/index.hash produced by an earlier buildMPHF) for
 // query-time lookups.
 //
-// The file is read into memory up-front via os.ReadFile +
-// streamhash.OpenBytes rather than mmapped. Rationale: a typical
-// MPHF for a single Chunk is small (~hundreds of KB at production
-// term counts), and on storage with expensive random IOPS (e.g.
-// EBS, ~1 ms each) mmap page-faults on cold Lookups cost more than
-// a single sequential read amortized across the index's lifetime.
+// The file is mmapped rather than read whole. Pages fault in from the kernel
+// page cache, which every reader of the same chunk shares regardless of its
+// own lifetime, so a per-request open costs a map and unmap plus the pages
+// its lookups touch, not a copy of a file whose size scales with the chunk's
+// term count.
 //
-// Close on the returned handle is a no-op for the OpenBytes path
-// (streamhash holds no fd / mmap), but callers should still call it
-// for symmetry with other open variants.
+// Close unmaps; callers must call it.
 func openMPHF(path string) (*mphf, error) {
-	data, err := os.ReadFile(path)
+	idx, err := streamhash.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("events: read %s: %w", path, err)
-	}
-	idx, err := streamhash.OpenBytes(data)
-	if err != nil {
-		return nil, fmt.Errorf("events: parse %s: %w", path, err)
+		return nil, fmt.Errorf("events: open %s: %w", path, err)
 	}
 	secret, merr := decodeEventsMeta(idx.UserMetadata())
 	if merr != nil {
@@ -497,26 +490,62 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 // slot, and only the fingerprint catches that residual collision.
 func (m *mphf) Lookup(key TermKey) (uint32, [IndexRecordFingerprintLen]byte, error) {
 	rk := routedKey(m.secret, key)
+	slot, err := slotOf(m.idx.QueryRank(rk[:]))
+	return slot, fingerprintOf(rk), err
+}
+
+// slotLookup is one key's answer from LookupBatch, as Lookup returns it.
+type slotLookup struct {
+	slot uint32
+	fp   [IndexRecordFingerprintLen]byte
+	err  error
+}
+
+// LookupBatch is Lookup for every key at once. streamhash requests the keys'
+// index pages together rather than one lookup after another, so on a cold
+// page cache the lookups cost about one round of reads instead of one per
+// key. results[i] answers keys[i].
+func (m *mphf) LookupBatch(keys []TermKey) []slotLookup {
+	routed := make([]TermKey, len(keys))
+	queries := make([][]byte, len(keys))
+	results := make([]slotLookup, len(keys))
+	for i, key := range keys {
+		routed[i] = routedKey(m.secret, key)
+		queries[i] = routed[i][:]
+		results[i].fp = fingerprintOf(routed[i])
+	}
+	for i, r := range m.idx.QueryBatch(queries) {
+		results[i].slot, results[i].err = slotOf(r.Rank, r.Err)
+	}
+	return results
+}
+
+// fingerprintOf is the fingerprint index.pack stores for the term routed to rk.
+func fingerprintOf(rk TermKey) [IndexRecordFingerprintLen]byte {
 	var fp [IndexRecordFingerprintLen]byte
 	v, _ := streamhash.Fingerprint(rk[:]) // rk is 16 bytes, so this cannot fail
 	binary.LittleEndian.PutUint32(fp[:], v)
-	slot, err := m.idx.QueryRank(rk[:])
+	return fp
+}
+
+// slotOf turns a streamhash rank and error into Lookup's slot and error.
+func slotOf(rank uint64, err error) (uint32, error) {
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {
-			return 0, fp, ErrKeyNotFound
+			return 0, ErrKeyNotFound
 		}
-		return 0, fp, fmt.Errorf("events: query: %w", err)
+		return 0, fmt.Errorf("events: query: %w", err)
 	}
-	if slot > math.MaxUint32 {
+	if rank > math.MaxUint32 {
 		// streamhash returns uint64 but slot count is bounded by the
 		// chunk's unique-term count (≪ 2^32). An overflow here would
 		// signal a build-time invariant violation, not a query error.
-		return 0, fp, fmt.Errorf("events: slot %d overflows uint32", slot)
+		return 0, fmt.Errorf("events: slot %d overflows uint32", rank)
 	}
-	return uint32(slot), fp, nil
+	return uint32(rank), nil
 }
 
-// Close releases the index; a no-op for the in-memory OpenBytes path.
+// Close unmaps the index file; callers must call it (see openMPHF).
 func (m *mphf) Close() error {
 	return m.idx.Close()
 }
