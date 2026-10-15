@@ -7,7 +7,7 @@ package event
 //   1. Filenames and packfile format identifiers for the three cold
 //      artifacts (events.pack, index.pack, index.hash).
 //
-//   2. events.pack record codec: ItemsPerRecord, the zstd encoder
+//   2. events.pack record codec: the record limits, the zstd encoder
 //      constructor, and the shared zstd decoder.
 //
 //   3. LedgerOffsets app-data encoding (encodeLedgerOffsets /
@@ -167,10 +167,15 @@ func decodeIndexBuildStamp(data []byte) (uint16, uint64, error) {
 // events.pack record codec.
 // ──────────────────────────────────────────────────────────────────
 
-// eventsPackItemsPerRecord is the number of payloads packed into one
+// eventsPackItemsPerRecord is the most payloads packed into one
 // events.pack record. Records are the unit the zstd encoder sees, so
 // this also sets the compression frame size.
 const eventsPackItemsPerRecord = 128
+
+// eventsPackMaxRecordBytes bounds what other contracts' large events add
+// to a read. Payloads average about 250 bytes, so records still close at
+// eventsPackItemsPerRecord and the index stores no item counts.
+const eventsPackMaxRecordBytes = 128 << 10
 
 // indexPackItemsPerRecord is the number of bitmaps packed into one
 // index.pack record. Chosen to keep the on-disk offset array small

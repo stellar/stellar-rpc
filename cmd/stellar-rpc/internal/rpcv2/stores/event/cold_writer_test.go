@@ -1,6 +1,7 @@
 package event
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -278,6 +279,68 @@ func TestEventsPack_TrailerPinsFormatAndRecordSize(t *testing.T) {
 		"events.pack Format must match eventsPackFormat constant")
 	assert.Equal(t, uint32(eventsPackItemsPerRecord), tr.ItemsPerRecord,
 		"events.pack ItemsPerRecord must match eventsPackItemsPerRecord constant")
+}
+
+func TestEventsPack_RecordByteLimit(t *testing.T) {
+	const chunkID = chunk.ID(0)
+	const n, firstLarge, numLarge = 600, 300, 4
+	write := func(payloads []Payload) (string, int) {
+		dir := t.TempDir()
+		w, err := NewColdWriter(chunkID, dir, ColdWriterOptions{})
+		require.NoError(t, err)
+		for _, p := range payloads {
+			require.NoError(t, w.Append(p))
+		}
+		offsets := NewLedgerOffsets(chunkID.FirstLedger())
+		require.NoError(t, offsets.Append(chunkID.FirstLedger(), uint32(len(payloads))))
+		require.NoError(t, w.Finish(offsets))
+
+		r := packfile.Open(filepath.Join(dir, EventsPackName(chunkID)),
+			packfile.ReaderOptions{RecordDecoder: eventsPackDecoder})
+		t.Cleanup(func() { _ = r.Close() })
+		tr, err := r.Trailer()
+		require.NoError(t, err)
+		return dir, int(tr.RecordCount)
+	}
+
+	payloads := make([]Payload, n)
+	for i := range payloads {
+		payloads[i] = makeColdPayload(chunkID.FirstLedger(), 1, fmt.Sprintf("e%d", i))
+	}
+	recordsAtItemLimit := (n + eventsPackItemsPerRecord - 1) / eventsPackItemsPerRecord
+	_, records := write(payloads)
+	assert.Equal(t, recordsAtItemLimit, records, "small payloads fill every record")
+
+	for i := firstLarge; i < firstLarge+numLarge; i++ {
+		payloads[i].ContractEventBytes = bytes.Repeat([]byte{byte(i)}, 100<<10)
+	}
+	dir, records := write(payloads)
+	assert.Greater(t, records, recordsAtItemLimit, "large payloads close records early")
+
+	// Payload reads touch only events.pack, so the chunk needs no index.
+	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cr.Close() })
+
+	ids := make([]uint32, n)
+	for i := range ids {
+		ids[i] = uint32(i)
+	}
+	fetched, err := cr.FetchEvents(context.Background(), ids)
+	require.NoError(t, err)
+	assert.Equal(t, payloads, fetched, "FetchEvents")
+
+	ranged, err := fetchRangePayloads(t, cr, firstLarge, n-firstLarge)
+	require.NoError(t, err)
+	assert.Equal(t, payloads[firstLarge:], ranged, "FetchRange from the first large payload")
+
+	var all []Payload
+	for p, err := range cr.All(context.Background()) {
+		require.NoError(t, err)
+		p.ContractEventBytes = bytes.Clone(p.ContractEventBytes)
+		all = append(all, p)
+	}
+	assert.Equal(t, payloads, all, "All")
 }
 
 // TestColdWriter_EventsPackContentHash pins that events.pack carries a
