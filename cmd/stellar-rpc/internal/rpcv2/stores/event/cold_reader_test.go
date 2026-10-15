@@ -882,14 +882,13 @@ func TestColdReader_RejectsNonEmptyIndexOnEventlessChunk(t *testing.T) {
 
 // TestColdReader_CorruptIndexOffsetsIsCorrupt covers the other half of
 // index.pack. A record-level flip surfaces through LookupKeys' read; a flip in
-// the offsets index or the trailer surfaces at open, through validateMPHF,
+// the offsets index or the trailer surfaces at open, through waitLayout,
 // which is a different path and has to reach the same sentinel.
 func TestColdReader_CorruptIndexOffsetsIsCorrupt(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
 
-	// The offsets index sits between the last record and the trailer; app data
-	// is empty for index.pack, so it ends 76 bytes before EOF.
+	// The offsets index sits before the app data and the 76-byte trailer.
 	indexPath := filepath.Join(dir, IndexPackName(chunkID))
 	b, err := os.ReadFile(indexPath)
 	require.NoError(t, err)
@@ -898,7 +897,7 @@ func TestColdReader_CorruptIndexOffsetsIsCorrupt(t *testing.T) {
 	tr, err := pr.Trailer()
 	require.NoError(t, err)
 	require.Positive(t, tr.IndexSize)
-	flipByteAt(t, indexPath, len(b)-76-int(tr.IndexSize))
+	flipByteAt(t, indexPath, len(b)-76-int(tr.AppDataSize)-int(tr.IndexSize))
 
 	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
@@ -924,7 +923,7 @@ func TestColdReader_CloseOnlySurfacesCorrupt(t *testing.T) {
 	tr, err := pr.Trailer()
 	require.NoError(t, err)
 	require.Positive(t, tr.IndexSize)
-	flipByteAt(t, indexPath, len(b)-76-int(tr.IndexSize))
+	flipByteAt(t, indexPath, len(b)-76-int(tr.AppDataSize)-int(tr.IndexSize))
 
 	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
@@ -977,16 +976,10 @@ func TestColdReader_UncheckedIndexPackIsCorrupt(t *testing.T) {
 // eventful and eventless chunks.
 func rewriteIndexPackStamp(t *testing.T, dir string, chunkID chunk.ID, schema uint16, mask uint64) {
 	t.Helper()
-	stamp := make([]byte, indexStampLen)
-	stamp[0] = indexStampVersion
+	stamp := encodeIndexAppData(indexLayout{})
 	binary.BigEndian.PutUint16(stamp[1:3], schema)
 	binary.BigEndian.PutUint64(stamp[3:11], mask)
-	pw, err := packfile.Create(filepath.Join(dir, IndexPackName(chunkID)), packfile.WriterOptions{
-		Format:         indexPackFormat,
-		ItemsPerRecord: indexPackItemsPerRecord,
-		RecordChecksum: indexPackChecksum,
-		Overwrite:      true,
-	})
+	pw, err := packfile.Create(filepath.Join(dir, IndexPackName(chunkID)), indexPackWriterOptions())
 	require.NoError(t, err)
 	require.NoError(t, pw.Finish(stamp))
 }
