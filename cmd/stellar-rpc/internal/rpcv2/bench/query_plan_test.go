@@ -153,3 +153,53 @@ func TestPlanRejectsUnrunnableScenarios(t *testing.T) {
 		})
 	}
 }
+
+// --warmup defaults to 0 and --evict-page-cache to true; a hot dataset warms
+// up defaultHotWarmup iterations unless --warmup was given, and evicts nothing.
+func TestQueryCacheControls(t *testing.T) {
+	cmd := newQueryCommand()
+	assert.Equal(t, "0", cmd.Flags().Lookup("warmup").DefValue)
+	assert.Equal(t, "true", cmd.Flags().Lookup("evict-page-cache").DefValue)
+
+	base := queryPlan{TargetRPS: []float64{1}, Duration: time.Second, Evict: true}
+	cold, err := base.forTier(tierCold)
+	require.NoError(t, err)
+	assert.Equal(t, base, cold)
+	hot, err := base.forTier(tierHot)
+	require.NoError(t, err)
+	assert.Equal(t, defaultHotWarmup, hot.Warmup)
+	assert.False(t, hot.Evict)
+	set := base
+	set.Warmup, set.WarmupSet = 3, true
+	hot, err = set.forTier(tierHot)
+	require.NoError(t, err)
+	assert.Equal(t, 3, hot.Warmup)
+	full := queryPlan{TargetRPS: []float64{maxIterations}, Duration: time.Second}
+	_, err = full.forTier(tierHot)
+	require.ErrorContains(t, err, "the hot --warmup default")
+
+	for _, tc := range []struct {
+		warmup int
+		evict  bool
+		want   string
+	}{
+		{0, false, "existing-cache"},
+		{20, false, "warm-run"},
+		{20, true, "warm-run"},
+	} {
+		p := queryPlan{Warmup: tc.warmup, Evict: tc.evict}
+		assert.Equal(t, tc.want, p.cacheScenario())
+	}
+	evicting := queryPlan{Evict: true}
+	if evictSupported {
+		assert.Equal(t, "cold-start", evicting.cacheScenario())
+	} else {
+		assert.Equal(t, "existing-cache", evicting.cacheScenario(), "eviction cannot be requested off Linux")
+	}
+	assert.Equal(t, "off", evictionState(false))
+	want := "unsupported-on-this-platform"
+	if evictSupported {
+		want = "requested"
+	}
+	assert.Equal(t, want, evictionState(true))
+}
