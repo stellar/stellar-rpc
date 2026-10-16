@@ -147,10 +147,10 @@ func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan,
 	settings["fixedReadRange"] = strings.Join(fixed, ",")
 }
 
-// runQueryBench is the bench query body: open the dataset, run the
-// scenarios, write the report. The open time goes into setupNs.storeOpen. A
-// failure after the dataset opens still writes the scenarios added so far,
-// logged as PARTIAL.
+// runQueryBench is the bench query body: open the dataset, run the scenarios,
+// write the report. The open time goes into setupNs.storeOpen. A failure after
+// the dataset opens still writes the CSVs of the scenarios added so far,
+// logged as PARTIAL, but no bench.txt.
 func runQueryBench(
 	ctx context.Context, logger *supportlog.Entry, env runEnv, p queryPlan,
 	open func() (*queryDataset, func(), error),
@@ -174,7 +174,7 @@ func runQueryBench(
 	env.Settings["format"] = p.Format
 	env.Settings["handlerConcurrency"] = strconv.Itoa(handlerConcurrency())
 
-	report := &queryReport{}
+	report := &queryReport{tier: ds.Tier}
 	run := &queryRun{logger: logger, ds: ds, plan: p, report: report, clock: timerClock{}, settings: env.Settings}
 	runErr := run.scenarios(ctx)
 	written, err := report.write(env.OutDir)
@@ -183,7 +183,7 @@ func runQueryBench(
 			logger.Warnf("writing the PARTIAL report: %v", err)
 		}
 		if len(written) > 0 {
-			logger.Warnf("run incomplete: wrote %d PARTIAL CSVs to %s (rows cover only the scenarios that ran)",
+			logger.Warnf("run incomplete: wrote %d PARTIAL CSVs to %s (they cover only the scenarios that ran)",
 				len(written), env.OutDir)
 		}
 		return runErr
@@ -191,7 +191,14 @@ func runQueryBench(
 	if err != nil {
 		return err
 	}
+	if len(written) > 0 {
+		path, err := report.stageBench(env.OutDir, env.Staged)
+		if err != nil {
+			return err
+		}
+		written = append(written, path)
+	}
 	report.logSummary(logger)
-	logger.Infof("wrote %d CSVs to %s", len(written), env.OutDir)
+	logger.Infof("wrote %d report files to %s", len(written), env.OutDir)
 	return nil
 }

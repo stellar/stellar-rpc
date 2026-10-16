@@ -253,12 +253,15 @@ warning for the `latency` row.
 `--out` must not exist, or it must be an empty directory. The command checks
 the flags and that `--data-dir` holds a catalog before it changes `--out`.
 When the checks pass, `bench query` writes `run.json`. It writes
-`latency.csv` and `scenarios.csv` when at least one scenario has a result.
+`latency.csv` and `scenarios.csv` when at least one scenario has a result. It
+writes `bench.txt` only when the run ends with `status` set to `ok`: the file
+gets its name after the final `run.json` is written (see section 8.4).
 
 If a measured request fails, the run fails after the command adds its scenario
 to the report. A failed warmup request does not fail the run. If the run fails
-or you cancel it, the command writes the scenarios that have a result, and
-the log marks the report as PARTIAL.
+or you cancel it, the command writes the CSVs of the scenarios that have a
+result, and the log marks the report as PARTIAL. It does not write
+`bench.txt`.
 
 ### 8.1 `latency.csv`
 
@@ -323,6 +326,59 @@ process stopped before its last write.
 | `txhashPoolHashes`, `txhashPoolLedgers` | The size of the txhash pool and the number of ledgers that supplied it. See section 9.1. |
 | `eventsPool` | `derived` or `unfiltered`. See section 9.2. |
 | `fixedReadRange` | The types whose requests read the same ledgers each time. See section 9. |
+
+### 8.4 `bench.txt`
+
+`bench.txt` contains the scenarios in the Go benchmark format, for
+`benchstat`. The first two lines are `goos` and `goarch`. Then there is one
+line for each scenario that has at least one planned iteration, in run order.
+The fields are tab-separated:
+
+```
+BenchmarkQuery/tier=cold/type=ledgers/rps=10	600	812345 ns/op	790123 p50-ns	2345678 p99-ns	301234 handler-p50-ns	901234 handler-p99-ns	2400000 p99-from-due-ns	10 items/op	0 dropped
+```
+
+The name has the parts `tier=<cold|hot>`, `type=<query_type>` and
+`rps=<target_rps>`. The tier is the tier of the dataset (see section 1.3). For
+`txhash`, one more line for each lookup outcome follows the scenario line. Its
+name ends with `/outcome=found` or `/outcome=not_found`, and it has no
+`dropped`.
+
+| Field | Definition |
+|---|---|
+| Iterations (second field) | `succeeded`, or `count` of the outcome. When no request succeeded, `planned`. |
+| `ns/op` | The mean `latency`: `total_ns / count`. |
+| `p50-ns`, `p99-ns` | The `latency` percentiles. |
+| `handler-p50-ns`, `handler-p99-ns` | The `handler_latency` percentiles. |
+| `p99-from-due-ns` | The p99 of `latency_from_due`. |
+| `items/op` | `items / count` of the `latency` row. |
+| `dropped` | The dropped measured iterations. |
+
+When no request succeeded, the scenario line has only `dropped`.
+
+To compare two builds:
+
+1. Run each build at least 6 times, each run with a different `--out`. Both
+   builds must use the same dataset and flags. The name does not contain the
+   dataset or the flags, so `benchstat` cannot see a difference in them. Run
+   on one host, and alternate the builds (old, new, old, new, ...). For a hot
+   dataset, give each run a fresh copy of the dataset directory, because a
+   run can change the hot databases.
+2. Put the `bench.txt` files of each build into one file, for example
+   `cat old-*/bench.txt > old.txt`.
+3. Run `benchstat old.txt new.txt`.
+4. Read the `dropped` table first. If `dropped` of a scenario changed, its
+   latency tables compare different loads.
+5. Then read the latency tables. Compare `p50-ns` with `handler-p50-ns` to
+   see if a change is in the handler or in the bridge.
+
+`status` set to `ok` does not mean that the run held the target rate.
+Dropped iterations do not fail a run.
+
+The txhash outcome lines repeat the requests of the txhash line. To remove
+them, run `benchstat -filter '/outcome:""' old.txt new.txt`. `benchstat` does
+not correct for multiple comparisons. With many scenarios, expect some
+differences with p < 0.05 by chance.
 
 ## 9. Query types
 
