@@ -282,6 +282,9 @@ func runQueryCommand(t *testing.T, args ...string) (runRecord, []map[string]stri
 	assert.Equal(t, "bench query", record.Command)
 	assert.Positive(t, record.SetupNs["storeOpen"])
 	assert.FileExists(t, filepath.Join(out, queryLatencyFile))
+	bench, err := os.ReadFile(filepath.Join(out, queryBenchFile))
+	require.NoError(t, err)
+	assert.Contains(t, string(bench), "\nBenchmarkQuery/tier="+record.Settings["tier"]+"/type=")
 	_, rows := readCSVTable(t, filepath.Join(out, queryScenariosFile))
 	return record, rows
 }
@@ -423,7 +426,7 @@ func TestQueryRunBuildsEachPoolOnce(t *testing.T) {
 }
 
 // A run that fails after a scenario is added still writes that scenario's
-// CSVs, logs them PARTIAL and returns the run error.
+// CSVs, logs them PARTIAL, writes no bench.txt and returns the run error.
 func TestQueryBenchWritesPartialReport(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
 	env := runEnv{OutDir: t.TempDir(), Settings: map[string]string{}, SetupTimes: map[string]time.Duration{}}
@@ -447,7 +450,8 @@ func TestQueryBenchWritesPartialReport(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Equal(t, queryTypeLedgers, rows[0]["query_type"])
 	assert.FileExists(t, filepath.Join(env.OutDir, queryLatencyFile))
-	assert.Contains(t, output.String(), "PARTIAL CSVs")
+	assert.NoFileExists(t, filepath.Join(env.OutDir, queryBenchFile))
+	assert.Contains(t, output.String(), "wrote 2 PARTIAL CSVs")
 }
 
 // --cpuprofile writes one non-empty CPU profile per type and rate, and none at

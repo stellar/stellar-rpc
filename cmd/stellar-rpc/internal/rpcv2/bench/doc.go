@@ -21,7 +21,8 @@
 // does not lower the arrival rate. latency covers the bridge's request parse,
 // the wait for a handler slot, the handler and the response write;
 // handler_latency covers the handler alone, read view included. HTTP and
-// network time are outside both. A run writes latency.csv and scenarios.csv.
+// network time are outside both. A run writes latency.csv and scenarios.csv,
+// and bench.txt in Go benchmark format when it succeeds.
 // README.md defines the datasets, the terms and the formulas.
 //
 // Before each scenario, a cold run asks the kernel to drop the dataset's
