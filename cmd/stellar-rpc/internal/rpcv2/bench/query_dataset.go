@@ -3,10 +3,12 @@ package bench
 import (
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
@@ -18,17 +20,23 @@ type queryPlan struct {
 	Duration  time.Duration
 	Warmup    int
 
-	LedgersLimit uint32
-	TxPageLimit  uint32
-	Format       string
-	Passphrase   string
-	Seed         int64
+	LedgersLimit     uint32
+	TxPageLimit      uint32
+	EventsLimit      uint32
+	NotFoundFraction float64
+	Format           string
+	Passphrase       string
+	Seed             int64
+
+	// TxHashPoolSize caps the sampled pool, in [1, maxTxHashPoolSize].
+	TxHashPoolSize int
 }
 
-// queryDataset is what one bench query run reads: the registry over the files
-// a bench ingest run left on disk, the read server over it, and the ledger
-// range the requests read.
+// queryDataset is what one bench query run reads: the dataset catalog, the
+// registry over the files a bench ingest run left on disk, the read server over
+// it, and the ledger range the requests and pools read.
 type queryDataset struct {
+	catalog  *catalog.Catalog
 	registry *query.Registry
 	server   *readServer
 
@@ -42,7 +50,7 @@ type queryDataset struct {
 	// Chunks is the benchmarked chunk range, ascending.
 	Chunks []chunk.ID
 
-	// FirstLedger and LastLedger bound the ledgers the requests read.
+	// FirstLedger and LastLedger bound the ledgers the requests and pools read.
 	FirstLedger, LastLedger uint32
 }
 
@@ -61,18 +69,27 @@ func (ds *queryDataset) view() (*query.ReadView, error) {
 	return ds.registry.NewReadView()
 }
 
-// verifyServes checks that the read path resolves a ledger store for every
-// chunk, so a gap in the dataset fails the run before any scenario starts.
-func (ds *queryDataset) verifyServes() error {
+// verifyServes checks, one read view per chunk, that every chunk serves its
+// ledger store and, when types includes events, its events store, so a gap in
+// the dataset fails the run before any scenario starts.
+func (ds *queryDataset) verifyServes(types []string) error {
+	events := slices.Contains(types, queryTypeEvents)
 	for _, c := range ds.Chunks {
 		view, err := ds.view()
 		if err != nil {
 			return fmt.Errorf("acquire read view: %w", err)
 		}
 		_, err = view.Ledgers(c)
+		if err != nil {
+			view.Release()
+			return fmt.Errorf("chunk %s has no servable ledger store: %w", c, err)
+		}
+		if events {
+			_, err = view.Events(c)
+		}
 		view.Release()
 		if err != nil {
-			return fmt.Errorf("chunk %s has no servable ledger store: %w", c, err)
+			return fmt.Errorf("chunk %s has no servable events store: %w", c, err)
 		}
 	}
 	return nil

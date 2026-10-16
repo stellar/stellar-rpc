@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"math"
 	"strconv"
 	"testing"
 	"time"
@@ -16,14 +17,61 @@ import (
 
 func validQueryFlags() queryFlags {
 	return queryFlags{
-		types:        queryTypeLedgers,
-		targetRPS:    "1",
-		duration:     time.Second,
-		ledgersLimit: defaultLedgersLimit,
-		txPageLimit:  defaultTxPageLimit,
-		format:       protocol.FormatBase64,
-		passphrase:   network.PublicNetworkPassphrase,
-		seed:         defaultSeed,
+		types:            queryTypeLedgers,
+		targetRPS:        "1",
+		duration:         time.Second,
+		ledgersLimit:     defaultLedgersLimit,
+		txPageLimit:      defaultTxPageLimit,
+		eventsLimit:      defaultEventsLimit,
+		notFoundFraction: defaultNotFoundFraction,
+		txHashPoolSize:   defaultTxHashPoolSize,
+		format:           protocol.FormatBase64,
+		passphrase:       network.PublicNetworkPassphrase,
+		seed:             defaultSeed,
+	}
+}
+
+// plan bounds --txhash-pool-size, --not-found-fraction and --events-limit,
+// the last at the daemon's queryEvents cap.
+func TestQueryPlanPoolAndEventsFlags(t *testing.T) {
+	for _, size := range []int{-1, 0, 1, defaultTxHashPoolSize, maxTxHashPoolSize, maxTxHashPoolSize + 1} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			f := validQueryFlags()
+			f.txHashPoolSize = size
+			p, err := f.plan()
+			if size < 1 || size > maxTxHashPoolSize {
+				require.ErrorContains(t, err, "--txhash-pool-size")
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, size, p.TxHashPoolSize)
+			}
+		})
+	}
+	for _, fraction := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -0.1, 1.1} {
+		f := validQueryFlags()
+		f.notFoundFraction = fraction
+		_, err := f.plan()
+		require.ErrorContains(t, err, "--not-found-fraction")
+	}
+	for _, fraction := range []float64{0, 1} {
+		f := validQueryFlags()
+		f.notFoundFraction = fraction
+		p, err := f.plan()
+		require.NoError(t, err)
+		assert.InDelta(t, fraction, p.NotFoundFraction, 0)
+	}
+	assert.Equal(t, config.DefaultQueryEventsMaxItemsPerResponse, maxEventsLimit())
+	for limit, want := range map[uint32]string{
+		0: "--events-limit must be in [1, 1000], got 0", 1000: "", 1001: "--events-limit must be in [1, 1000], got 1001",
+	} {
+		f := validQueryFlags()
+		f.eventsLimit = limit
+		_, err := f.plan()
+		if want == "" {
+			require.NoError(t, err)
+			continue
+		}
+		require.ErrorContains(t, err, want)
 	}
 }
 

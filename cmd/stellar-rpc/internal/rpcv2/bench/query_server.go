@@ -39,6 +39,11 @@ func maxTxPageLimit() uint {
 	return *servingConfig().Service.Methods.GetTransactions.MaxItemsPerResponse
 }
 
+// maxEventsLimit is the daemon's default queryEvents cap.
+func maxEventsLimit() uint {
+	return *servingConfig().Service.Methods.QueryEvents.MaxItemsPerResponse
+}
+
 // handlerConcurrency is how many handlers the read server runs at once: the
 // daemon's bridge runs one per CPU.
 func handlerConcurrency() int { return runtime.NumCPU() }

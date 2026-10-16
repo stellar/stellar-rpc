@@ -17,19 +17,22 @@ import (
 const minLatencyRowSamples = 100
 
 // queryRun is one bench query run's scenarios: the dataset they read, the
-// plan, the report they add to and the load generator's time source.
+// plan, the report they add to, the load generator's time source and the run
+// settings the pools record.
 type queryRun struct {
-	logger *supportlog.Entry
-	ds     *queryDataset
-	plan   queryPlan
-	report *queryReport
-	clock  scenarioClock
+	logger   *supportlog.Entry
+	ds       *queryDataset
+	plan     queryPlan
+	report   *queryReport
+	clock    scenarioClock
+	settings map[string]string
 }
 
-// scenarios runs every type at every rate.
+// scenarios runs every type at every rate. A type's pool is built once and
+// shared by every rate.
 func (r *queryRun) scenarios(ctx context.Context) error {
 	for _, qtype := range r.plan.Types {
-		req, err := newQueryRequest(r.ds, r.plan, qtype)
+		req, err := newQueryRequest(ctx, r.logger, r.ds, r.plan, qtype, r.settings)
 		if err != nil {
 			return fmt.Errorf("prepare the %s benchmark: %w", qtype, err)
 		}
@@ -89,8 +92,8 @@ func isContextErr(err error) bool {
 func warnThinSamples(logger *supportlog.Entry, sc scenarioSummary) {
 	for _, row := range sc.latency {
 		if row.metric == metricLatency && row.agg.n < minLatencyRowSamples {
-			logger.Warnf("%-8s target_rps=%-8s latency has %d samples, fewer than %d",
-				sc.queryType, formatRPS(sc.targetRPS), row.agg.n, minLatencyRowSamples)
+			logger.Warnf("%-8s target_rps=%-8s latency outcome=%s has %d samples, fewer than %d",
+				sc.queryType, formatRPS(sc.targetRPS), row.outcome, row.agg.n, minLatencyRowSamples)
 		}
 	}
 }
@@ -104,15 +107,19 @@ func scenarioSeed(base int64, qtype string) int64 {
 // warnFixedReadRange logs the configured types whose requests all start at the
 // dataset's first ledger and records them in settings under fixedReadRange.
 // pickStart returns that ledger when a ledgers request's limit covers the whole
-// dataset, or for any type when the dataset holds one ledger, so every request
-// reads the same ledgers and their percentiles measure a cached read.
+// dataset, or for any type that picks a start when the dataset holds one
+// ledger, so every request reads the same ledgers and their percentiles
+// measure a cached read. txhash requests pick a hash, not a start.
 func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan, settings map[string]string) {
 	room := ds.LastLedger - ds.FirstLedger + 1
 	var fixed []string
 	for _, qtype := range p.Types {
 		span := uint32(1)
-		if qtype == queryTypeLedgers {
+		switch qtype {
+		case queryTypeLedgers:
 			span = p.LedgersLimit
+		case queryTypeTxHash:
+			continue
 		}
 		if span >= room {
 			fixed = append(fixed, qtype)
@@ -148,7 +155,7 @@ func runQueryBench(
 	env.Settings["handlerConcurrency"] = strconv.Itoa(handlerConcurrency())
 
 	report := &queryReport{}
-	run := &queryRun{logger: logger, ds: ds, plan: p, report: report, clock: timerClock{}}
+	run := &queryRun{logger: logger, ds: ds, plan: p, report: report, clock: timerClock{}, settings: env.Settings}
 	runErr := run.scenarios(ctx)
 	written, err := report.write(env.OutDir)
 	if runErr != nil {

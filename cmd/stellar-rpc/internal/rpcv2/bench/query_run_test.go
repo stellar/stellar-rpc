@@ -40,7 +40,7 @@ func TestScenarioSeedIsDistinctPerType(t *testing.T) {
 }
 
 func testQueryRun(logger *supportlog.Entry, ds *queryDataset, p queryPlan, clock scenarioClock) *queryRun {
-	return &queryRun{logger: logger, ds: ds, plan: p, report: &queryReport{}, clock: clock}
+	return &queryRun{logger: logger, ds: ds, plan: p, report: &queryReport{}, clock: clock, settings: map[string]string{}}
 }
 
 // A measured request failure fails the run, and the scenario's counts and
@@ -133,26 +133,36 @@ func TestQueryScenarioCanceled(t *testing.T) {
 	}
 }
 
-// A latency row under minLatencyRowSamples warns; a latency_from_due row does
-// not.
+// Each latency row under minLatencyRowSamples warns, whatever its outcome;
+// handler_latency and latency_from_due rows do not.
 func TestWarnThinSamples(t *testing.T) {
-	sc := scenarioReport{queryType: queryTypeLedgers, targetRPS: 2}
-	for range minLatencyRowSamples {
-		sc.result.timings = append(sc.result.timings, requestTiming{latency: time.Millisecond})
+	sc := scenarioReport{queryType: queryTypeTxHash, targetRPS: 2}
+	for i := range minLatencyRowSamples + 10 {
+		outcome := outcomeFound
+		if i < 10 {
+			outcome = outcomeNotFound
+		}
+		sc.result.timings = append(sc.result.timings, requestTiming{latency: time.Millisecond, outcome: outcome})
 	}
 	logger, output := capturingLogger()
 	var q queryReport
 	warnThinSamples(logger, q.add(sc))
-	assert.NotContains(t, output.String(), "fewer than")
+	assert.Contains(t, output.String(), "latency outcome=not_found has 10 samples, fewer than 100")
+	assert.NotContains(t, output.String(), "outcome=found has")
+	assert.NotContains(t, output.String(), "outcome=all has")
 
+	output.Reset()
 	sc.result.timings = sc.result.timings[:50]
 	warnThinSamples(logger, q.add(sc))
-	assert.Contains(t, output.String(), "latency has 50 samples, fewer than 100")
-	assert.Equal(t, 1, strings.Count(output.String(), "fewer than"), "latency_from_due rows do not warn")
+	for _, label := range []string{"all has 50", "found has 40", "not_found has 10"} {
+		assert.Contains(t, output.String(), "latency outcome="+label+" samples")
+	}
+	assert.Equal(t, 3, strings.Count(output.String(), "fewer than"), "only latency rows warn")
 }
 
-// A ledgers limit that covers the whole dataset, or a one-ledger dataset, warns
-// and lands in the run settings; a limit that fits inside it stays quiet.
+// A ledgers limit that covers the whole dataset, or a one-ledger dataset for
+// every type that picks a start, warns and lands in the run settings; a limit
+// that fits inside it stays quiet, and txhash never warns.
 func TestWarnFixedReadRange(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -160,7 +170,7 @@ func TestWarnFixedReadRange(t *testing.T) {
 		ledgersLimit uint32
 		want         string
 	}{
-		{"one-ledger dataset", 10, 1, "ledgers and txpage"},
+		{"one-ledger dataset", 10, 1, "ledgers and txpage and events"},
 		{"the ledgers limit covers the range", 14, 5, "ledgers"},
 		{"the ledgers limit fits inside", 14, 2, ""},
 	} {
@@ -168,7 +178,7 @@ func TestWarnFixedReadRange(t *testing.T) {
 			ds := &queryDataset{FirstLedger: 10, LastLedger: tc.last}
 			logger, output := capturingLogger()
 			p := queryPlan{
-				Types:        []string{queryTypeLedgers, queryTypeTxPage},
+				Types:        allQueryTypes,
 				LedgersLimit: tc.ledgersLimit,
 			}
 			settings := map[string]string{}
@@ -293,14 +303,39 @@ func ingestColdChunk(t *testing.T) string {
 	return coldRoot
 }
 
-// A cold run records the store open time and the tier, and adds one row per
-// scenario.
+// A cold run serves every query type at two rates, type by type, and records
+// the store open time, the tier and the pool settings in run.json.
 func TestQueryColdCommandRecordsRun(t *testing.T) {
 	coldRoot := ingestColdChunk(t)
 	record, rows := runQueryCommand(t, "--data-dir", coldRoot,
-		"--types", queryTypeLedgers+","+queryTypeTxPage, "--target-rps", "1000,2000", "--duration", "10ms")
-	require.Len(t, rows, 4)
+		"--types", strings.Join(allQueryTypes, ","), "--target-rps", "1000,2000", "--duration", "10ms")
 	assert.Equal(t, tierCold, record.Settings["tier"])
+	assert.NotEmpty(t, record.Settings["txhashPoolHashes"])
+	assert.NotEmpty(t, record.Settings["eventsPool"])
+	require.Len(t, rows, 2*len(allQueryTypes))
+	for i, row := range rows {
+		assert.Equal(t, allQueryTypes[i/2], row["query_type"], "row %d", i)
+		assert.Equal(t, []string{"1000", "2000"}[i%2], row["target_rps"], "row %d", i)
+		assert.Equal(t, "0", row["failed"], row["query_type"])
+	}
+}
+
+// scenarios builds each type's pool once and runs every rate on it.
+func TestQueryRunBuildsEachPoolOnce(t *testing.T) {
+	plan := testPlan(protocol.FormatBase64)
+	plan.Types = []string{queryTypeTxHash, queryTypeEvents}
+	plan.TargetRPS = []float64{1000, 2000}
+	plan.Duration = 10 * time.Millisecond
+	ds, release, err := openDataset(testLogger(), queryOptions{DataDir: ingestHotChunk(t), Plan: plan})
+	require.NoError(t, err)
+	defer release()
+
+	logger, output := capturingLogger()
+	run := testQueryRun(logger, ds, plan, timerClock{})
+	require.NoError(t, run.scenarios(context.Background()))
+	require.Len(t, run.report.scenarios, 4)
+	assert.Equal(t, 1, strings.Count(output.String(), "txhash pool: "))
+	assert.Equal(t, 1, strings.Count(output.String(), "events pool: "))
 }
 
 // A run that fails after a scenario is added still writes that scenario's
