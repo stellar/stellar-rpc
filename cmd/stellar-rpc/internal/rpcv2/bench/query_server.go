@@ -39,6 +39,11 @@ func maxTxPageLimit() uint {
 	return *servingConfig().Service.Methods.GetTransactions.MaxItemsPerResponse
 }
 
+// maxEventsLimit is the daemon's default queryEvents cap.
+func maxEventsLimit() uint {
+	return *servingConfig().Service.Methods.QueryEvents.MaxItemsPerResponse
+}
+
 // readServer serves the daemon's read methods through the daemon's JSON-RPC
 // bridge, in process and without HTTP. A call's latency covers the bridge's
 // request parse, the wait for a handler slot, the handler and the response
@@ -156,14 +161,22 @@ func timeHandler(h jrpc2.Handler) jrpc2.Handler {
 	}
 }
 
-// itemCount returns how many ledgers or transactions a getLedgers or
-// getTransactions result holds, and 0 for any other result.
+// itemCount returns how many ledgers, transactions or events a read result
+// holds, and 0 for any other result. A getTransaction result counts 1 when it
+// found the transaction.
 func itemCount(res any) int {
 	switch r := res.(type) {
 	case protocol.GetLedgersResponse:
 		return len(r.Ledgers)
 	case protocol.GetTransactionsResponse:
 		return len(r.Transactions)
+	case protocol.GetTransactionResponse:
+		if r.Status == protocol.TransactionStatusNotFound {
+			return 0
+		}
+		return 1
+	case protocol.QueryEventsResponse:
+		return len(r.Events)
 	default:
 		return 0
 	}
