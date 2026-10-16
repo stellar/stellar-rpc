@@ -3,6 +3,7 @@ package bench
 import (
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -18,11 +19,14 @@ type queryPlan struct {
 	Duration  time.Duration
 	Warmup    int
 
-	LedgersLimit uint32
-	TxPageLimit  uint32
-	Format       string
-	Passphrase   string
-	Seed         int64
+	LedgersLimit     uint32
+	TxPageLimit      uint32
+	EventsLimit      uint32
+	NotFoundFraction float64
+	TxHashPoolSize   int
+	Format           string
+	Passphrase       string
+	Seed             int64
 }
 
 // queryDataset is what one bench query run reads: the registry over the files
@@ -61,18 +65,27 @@ func (ds *queryDataset) view() (*query.ReadView, error) {
 	return ds.registry.NewReadView()
 }
 
-// verifyServes checks that the read path resolves a ledger store for every
-// chunk, so a gap in the dataset fails the run before any scenario starts.
-func (ds *queryDataset) verifyServes() error {
+// verifyServes checks that every chunk serves its ledger store and, when types
+// includes events, its events store, so a gap in the dataset fails the run
+// before any scenario starts.
+func (ds *queryDataset) verifyServes(types []string) error {
+	events := slices.Contains(types, queryTypeEvents)
 	for _, c := range ds.Chunks {
 		view, err := ds.view()
 		if err != nil {
 			return fmt.Errorf("acquire read view: %w", err)
 		}
 		_, err = view.Ledgers(c)
+		if err != nil {
+			view.Release()
+			return fmt.Errorf("chunk %s has no servable ledger store: %w", c, err)
+		}
+		if events {
+			_, err = view.Events(c)
+		}
 		view.Release()
 		if err != nil {
-			return fmt.Errorf("chunk %s has no servable ledger store: %w", c, err)
+			return fmt.Errorf("chunk %s has no servable events store: %w", c, err)
 		}
 	}
 	return nil

@@ -2,20 +2,42 @@ package bench
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math/rand/v2"
+	"strconv"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
 // newQueryRequest builds one query type's request. Each request is one call to
-// the daemon's method handler and returns how many items came back.
-func newQueryRequest(ds *queryDataset, p queryPlan, qtype string) (queryRequest, error) {
+// the daemon's method handler and returns how many items came back. For txhash
+// and events it first builds the type's pool and records it in settings.
+func newQueryRequest(
+	ctx context.Context, logger *supportlog.Entry, ds *queryDataset, p queryPlan, qtype string,
+	settings map[string]string,
+) (queryRequest, error) {
 	switch qtype {
 	case queryTypeLedgers:
 		return ledgersRequest(ds, p), nil
 	case queryTypeTxPage:
 		return txPageRequest(ds, p), nil
+	case queryTypeTxHash:
+		pool, err := buildTxHashPool(ctx, logger, ds, p.NotFoundFraction, p.Seed, p.TxHashPoolSize)
+		if err != nil {
+			return nil, err
+		}
+		settings["txhashPoolHashes"] = strconv.Itoa(len(pool.hashes))
+		settings["txhashPoolLedgers"] = strconv.Itoa(pool.ledgerCount)
+		return txHashRequest(ds, p, pool), nil
+	case queryTypeEvents:
+		pool, err := buildEventFilterPool(ctx, logger, ds)
+		if err != nil {
+			return nil, err
+		}
+		settings["eventsPool"] = pool.kind()
+		return eventsRequest(ds, p, pool), nil
 	default:
 		return nil, fmt.Errorf("unknown query type %q", qtype)
 	}
@@ -52,6 +74,46 @@ func txPageRequest(ds *queryDataset, p queryPlan) queryRequest {
 			StartLedger: ds.pickStart(rng, 1),
 			Pagination:  &protocol.LedgerPaginationOptions{Limit: uint(p.TxPageLimit)},
 			Format:      p.Format,
+		})
+	}
+}
+
+// txHashRequest calls getTransaction for a hash from the pool. A response
+// whose status differs from the pool's expectation fails the request.
+func txHashRequest(ds *queryDataset, p queryPlan, pool *txHashPool) queryRequest {
+	return func(ctx context.Context, rng *rand.Rand) (requestTiming, error) {
+		hash, wantFound := pool.pick(rng)
+		timing, err := ds.server.call(ctx, protocol.GetTransactionMethodName, protocol.GetTransactionRequest{
+			Hash:   hex.EncodeToString(hash[:]),
+			Format: p.Format,
+		})
+		if err != nil {
+			return requestTiming{}, err
+		}
+		found := timing.items == 1
+		if found != wantFound {
+			return requestTiming{}, fmt.Errorf("transaction %x: found=%t, expected %t", hash, found, wantFound)
+		}
+		timing.outcome = outcomeNotFound
+		if found {
+			timing.outcome = outcomeFound
+		}
+		return timing, nil
+	}
+}
+
+// eventsRequest calls queryEvents for one page of at most --events-limit events
+// from a random start ledger to the end of the dataset's range, under a filter
+// set from the pool.
+func eventsRequest(ds *queryDataset, p queryPlan, pool *eventFilterPool) queryRequest {
+	limit := uint(p.EventsLimit)
+	return func(ctx context.Context, rng *rand.Rand) (requestTiming, error) {
+		return ds.server.call(ctx, protocol.QueryEventsMethodName, protocol.QueryEventsRequest{
+			MinLedger: ds.pickStart(rng, 1),
+			MaxLedger: ds.LastLedger,
+			Filters:   pool.pick(rng),
+			Limit:     &limit,
+			Format:    p.Format,
 		})
 	}
 }

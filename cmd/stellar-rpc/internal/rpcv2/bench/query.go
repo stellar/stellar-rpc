@@ -17,9 +17,11 @@ import (
 
 // Read-shape flag defaults.
 const (
-	defaultLedgersLimit = 10
-	defaultTxPageLimit  = 200
-	defaultSeed         = 1
+	defaultLedgersLimit     = 10
+	defaultTxPageLimit      = 200
+	defaultEventsLimit      = 10
+	defaultNotFoundFraction = 0.12
+	defaultSeed             = 1
 )
 
 // Scenario flag defaults.
@@ -31,6 +33,9 @@ const (
 // maxTargetRPS is the highest rate --target-rps accepts.
 const maxTargetRPS = 100_000
 
+// maxTxHashPoolSize is the largest --txhash-pool-size.
+const maxTxHashPoolSize = 1_000_000
+
 // queryFlags is the bench query flag set that shapes the requests, beyond --out
 // and the profiling flags newBenchCommand binds. The spellings and value
 // formats of --types, --target-rps, --duration and --warmup are the campaign
@@ -41,11 +46,14 @@ type queryFlags struct {
 	duration  time.Duration
 	warmup    int
 
-	ledgersLimit uint32
-	txPageLimit  uint32
-	format       string
-	passphrase   string
-	seed         int64
+	ledgersLimit     uint32
+	txPageLimit      uint32
+	eventsLimit      uint32
+	notFoundFraction float64
+	txHashPoolSize   int
+	format           string
+	passphrase       string
+	seed             int64
 }
 
 func (f *queryFlags) bind(cmd *cobra.Command) {
@@ -64,11 +72,17 @@ func (f *queryFlags) bind(cmd *cobra.Command) {
 			"] (1 = a point read)")
 	fs.Uint32Var(&f.txPageLimit, "txpage-limit", defaultTxPageLimit,
 		"getTransactions limit of one txpage request, in [1, "+strconv.FormatUint(uint64(maxTxPageLimit()), 10)+"]")
+	fs.Uint32Var(&f.eventsLimit, "events-limit", defaultEventsLimit,
+		"queryEvents limit of one events request, in [1, "+strconv.FormatUint(uint64(maxEventsLimit()), 10)+"]")
+	fs.Float64Var(&f.notFoundFraction, "not-found-fraction", defaultNotFoundFraction,
+		"share of txhash lookups for a hash that is not in the dataset, in [0, 1]")
+	fs.IntVar(&f.txHashPoolSize, "txhash-pool-size", defaultTxHashPoolSize,
+		"txhash pool size, in [1, "+strconv.Itoa(maxTxHashPoolSize)+"]; the pool can hold fewer hashes")
 	fs.StringVar(&f.format, "format", protocol.FormatBase64,
 		"response format of every request: "+strings.Join(queryFormats, " | "))
 	fs.StringVar(&f.passphrase, "network-passphrase", network.PublicNetworkPassphrase,
-		"network passphrase the dataset's transactions were signed under; txpage needs it "+
-			"to pair envelopes")
+		"network passphrase the dataset's transactions were signed under; txhash and "+
+			"txpage need it to pair envelopes, and a wrong one fails the txhash pool build")
 	fs.Int64Var(&f.seed, "seed", defaultSeed,
 		"seed for the work each request picks, so a re-run reads the same ledgers")
 }
@@ -93,15 +107,18 @@ func (f *queryFlags) plan() (queryPlan, error) {
 		return queryPlan{}, errors.New("--network-passphrase is required")
 	}
 	return queryPlan{
-		Types:        types,
-		TargetRPS:    rates,
-		Duration:     f.duration,
-		Warmup:       f.warmup,
-		LedgersLimit: f.ledgersLimit,
-		TxPageLimit:  f.txPageLimit,
-		Format:       f.format,
-		Passphrase:   f.passphrase,
-		Seed:         f.seed,
+		Types:            types,
+		TargetRPS:        rates,
+		Duration:         f.duration,
+		Warmup:           f.warmup,
+		LedgersLimit:     f.ledgersLimit,
+		TxPageLimit:      f.txPageLimit,
+		EventsLimit:      f.eventsLimit,
+		NotFoundFraction: f.notFoundFraction,
+		TxHashPoolSize:   f.txHashPoolSize,
+		Format:           f.format,
+		Passphrase:       f.passphrase,
+		Seed:             f.seed,
 	}, nil
 }
 
@@ -131,6 +148,12 @@ func (f *queryFlags) checkRequestFlags() error {
 		return fmt.Errorf("--ledgers-limit must be in [1, %d], got %d", maxLedgers, f.ledgersLimit)
 	case f.txPageLimit < 1 || uint(f.txPageLimit) > maxTxs:
 		return fmt.Errorf("--txpage-limit must be in [1, %d], got %d", maxTxs, f.txPageLimit)
+	case f.eventsLimit < 1 || uint(f.eventsLimit) > maxEventsLimit():
+		return fmt.Errorf("--events-limit must be in [1, %d], got %d", maxEventsLimit(), f.eventsLimit)
+	case !(f.notFoundFraction >= 0 && f.notFoundFraction <= 1): // also rejects NaN
+		return fmt.Errorf("--not-found-fraction must be in [0, 1], got %v", f.notFoundFraction)
+	case f.txHashPoolSize < 1 || f.txHashPoolSize > maxTxHashPoolSize:
+		return fmt.Errorf("--txhash-pool-size must be in [1, %d], got %d", maxTxHashPoolSize, f.txHashPoolSize)
 	case !slices.Contains(queryFormats, f.format):
 		return fmt.Errorf("--format: unknown format %q (want %s)", f.format, strings.Join(queryFormats, " | "))
 	}
