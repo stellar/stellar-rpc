@@ -51,9 +51,11 @@ the new index replaces. Thus, the timings of a run that adds chunks are
 different from the timings of a run into an empty root. `settings.append` and
 `settings.datasetFirstChunk` in `run.json` record this.
 
-At the end of a successful run, the ingest creates the empty **live chunk**
-after the last committed ledger, as daemon startup does. A run that adds
-chunks removes the old live chunk first.
+At the end of a successful run, the ingest opens the **live chunk** as daemon
+startup does: the chunk that holds the ledger after the last committed ledger.
+If the run ends at a chunk boundary, the live chunk is new and empty. If the
+run ends in a chunk, the live chunk is that chunk, and no run can add chunks
+to the dataset. A run that adds chunks removes the empty live chunk first.
 
 ### 1.3 Query
 
