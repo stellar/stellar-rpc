@@ -13,6 +13,7 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
@@ -102,18 +103,19 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		return err
 	}
 	defer func() { _ = cat.Close() }()
+	// The source opens before prepareIngest, whose append discards the live
+	// chunk, so a source that fails to open leaves the dataset queryable.
+	backend, release, err := openSource(ctx, opts.Source)
+	if err != nil {
+		return err
+	}
+	defer release()
 	//nolint:gosec // validate() proved StartChunk+NumChunks-1 <= maxChunkID
 	end := opts.StartChunk + chunk.ID(uint32(opts.NumChunks-1))
 	first, err := prepareIngest(cat, tierCold, opts.StartChunk, end)
 	if err != nil {
 		return fmt.Errorf("--cold-out-dir %s: %w", opts.ColdRoot, err)
 	}
-
-	backend, release, err := openSource(ctx, opts.Source)
-	if err != nil {
-		return err
-	}
-	defer release()
 
 	// An append backfills from the dataset's first chunk, as the daemon does
 	// from its retention floor: frozen chunks are skipped and the tx-hash index
@@ -147,7 +149,29 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		return err
 	}
 	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)
+	if err := destroyPruningTxHashIndexes(cat); err != nil {
+		return err
+	}
 	return finishIngest(cat, first, logger)
+}
+
+// destroyPruningTxHashIndexes removes the tx-hash index coverages the backfill
+// superseded, with the catalog destroy the daemon's prune scan uses. The
+// caller must hold no reader on the dataset.
+func destroyPruningTxHashIndexes(cat *catalog.Catalog) error {
+	covs, err := cat.AllTxHashIndexKeys()
+	if err != nil {
+		return fmt.Errorf("read tx-hash index keys: %w", err)
+	}
+	for _, cov := range covs {
+		if cov.State != geometry.StatePruning {
+			continue
+		}
+		if err := cat.DestroyTxHashIndexKey(cov); err != nil {
+			return fmt.Errorf("destroy superseded tx-hash index %s: %w", cov.Key, err)
+		}
+	}
+	return nil
 }
 
 // logColdWall logs the run's total wall-clock and, for multi-chunk runs, the

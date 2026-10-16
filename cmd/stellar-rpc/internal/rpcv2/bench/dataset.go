@@ -156,17 +156,15 @@ func discardLiveChunk(cat *catalog.Catalog, c chunk.ID) error {
 
 // finishIngest completes a successful ingest whose dataset starts at first. A
 // new dataset pins first's first ledger as its earliest ledger, as the daemon
-// pins earliest_ledger on first start. The dataset's read registry is then
-// opened and closed the way bench query and daemon startup open it, which
-// creates the empty live chunk, so a later bench query writes nothing.
+// pins earliest_ledger on first start. The empty live chunk is then created
+// the way daemon startup creates it, so a later bench query writes nothing.
 func finishIngest(cat *catalog.Catalog, first chunk.ID, logger *supportlog.Entry) error {
-	earliest, pinned, err := cat.EarliestLedger()
+	_, pinned, err := cat.EarliestLedger()
 	if err != nil {
 		return err
 	}
 	if !pinned {
-		earliest = first.FirstLedger()
-		if err := cat.PinEarliestLedger(earliest); err != nil {
+		if err := cat.PinEarliestLedger(first.FirstLedger()); err != nil {
 			return fmt.Errorf("pin the dataset's earliest ledger: %w", err)
 		}
 	}
@@ -174,10 +172,8 @@ func finishIngest(cat *catalog.Catalog, first chunk.ID, logger *supportlog.Entry
 	if err != nil {
 		return fmt.Errorf("derive the dataset's last committed ledger: %w", err)
 	}
-	registry, _, err := rpcv2.OpenServing(cat, geometry.NewRetention(0, chunk.IDFromLedger(earliest)), last, logger)
-	if err != nil {
-		return fmt.Errorf("open the dataset for reads: %w", err)
+	if err := rpcv2.CreateLiveChunk(cat, last, logger); err != nil {
+		return fmt.Errorf("create the dataset's live chunk: %w", err)
 	}
-	registry.Close()
 	return nil
 }

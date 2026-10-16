@@ -82,6 +82,53 @@ func TestColdIngestKeepsAndAppendsCatalog(t *testing.T) {
 	assert.True(t, covered, "one frozen tx-hash index covers both chunks")
 }
 
+// A cold append whose source fails to open leaves the dataset's live chunk in
+// place, so bench query still opens the dataset.
+func TestColdAppendWithFailingSourceKeepsLiveChunk(t *testing.T) {
+	coldRoot := ingestColdChunk(t)
+	err := runCold(context.Background(), testLogger(), coldOptions{
+		Source:     sourceConfig{Kind: sourceBSB, BucketPath: "unused", DatastoreType: "unknown"},
+		StartChunk: 1, NumChunks: 1, Workers: 1,
+		ColdRoot: coldRoot, OutDir: filepath.Join(t.TempDir(), "csv"),
+	})
+	require.ErrorContains(t, err, "open BSB backend")
+
+	cat := reopenCatalog(t, coldRoot)
+	state, err := cat.HotState(1)
+	require.NoError(t, err)
+	assert.Equal(t, geometry.HotReady, state)
+	require.NoError(t, cat.Close())
+	_, release, err := openDataset(testLogger(), queryOptions{DataDir: coldRoot, Plan: testPlan(protocol.FormatBase64)})
+	require.NoError(t, err)
+	release()
+}
+
+// Cold appends leave only the latest tx-hash index coverage, in the catalog
+// and on disk.
+func TestColdAppendsDestroySupersededTxHashIndex(t *testing.T) {
+	srcRoot := t.TempDir()
+	packDir, _ := writeSourcePack(t, srcRoot, 0, chunk.LedgersPerChunk)
+	coldRoot := t.TempDir()
+	for c := range chunk.ID(3) {
+		if c > 0 {
+			_, _ = writeSourcePack(t, srcRoot, c, chunk.LedgersPerChunk)
+		}
+		_, err := ingestCold(t, packDir, coldRoot, c)
+		require.NoError(t, err)
+	}
+
+	cat := reopenCatalog(t, coldRoot)
+	covs, err := cat.AllTxHashIndexKeys()
+	require.NoError(t, err)
+	require.Len(t, covs, 1)
+	assert.Equal(t, geometry.StateFrozen, covs[0].State)
+	assert.Equal(t, chunk.ID(0), covs[0].Lo)
+	assert.Equal(t, chunk.ID(2), covs[0].Hi)
+	layout := geometry.NewLayout(coldRoot)
+	assert.Equal(t, []string{filepath.Base(layout.TxHashIndexFilePath(covs[0]))},
+		dirNames(t, layout.TxHashIndexDir(covs[0].Index)))
+}
+
 // A hot ingest keeps its catalog with the pinned earliest ledger, and an
 // append that would skip ledgers is refused.
 func TestHotIngestKeepsCatalog(t *testing.T) {

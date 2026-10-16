@@ -248,6 +248,17 @@ func LastCommittedLedger(cat *catalog.Catalog) (uint32, error) {
 	return lastCommittedLedger(cat)
 }
 
+// CreateLiveChunk opens or creates the hot DB of the chunk after lastCommitted,
+// as daemon startup does, and closes it.
+func CreateLiveChunk(cat *catalog.Catalog, lastCommitted uint32, logger *supportlog.Entry) error {
+	resume := lastCommitted + 1
+	hotDB, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), logger)
+	if err != nil {
+		return fmt.Errorf("open resume hot tier for ledger %d: %w", resume, err)
+	}
+	return hotDB.Close()
+}
+
 // requirePinnedEarliest returns the pinned earliest_ledger, erroring when the pin
 // is absent: an absent pin reads as 0 and mis-classifies a first start as a
 // restart, so refuse it loudly. validateConfig pins it before run; not done here.
