@@ -30,12 +30,15 @@ func newQueryCommand() *cobra.Command {
 		dataDir       string
 		startChunk    uint32
 		sampleLedgers uint32
+		evict         bool
 	)
 	opts := func() (queryOptions, error) {
 		plan, err := qf.plan()
 		if err != nil {
 			return queryOptions{}, err
 		}
+		plan.WarmupSet = cmd.Flags().Changed("warmup")
+		plan.Evict = evict
 		return queryOptions{
 			DataDir:       dataDir,
 			StartChunk:    chunk.ID(startChunk),
@@ -71,6 +74,8 @@ func newQueryCommand() *cobra.Command {
 	fs.Uint32Var(&sampleLedgers, "sample-ledgers", 0,
 		"use only this many ledgers from the first queried chunk's start for the requests "+
 			"(0 = every committed ledger)")
+	fs.BoolVar(&evict, "evict-page-cache", true,
+		"request best-effort OS page-cache eviction of a cold dataset's files before each scenario (Linux only)")
 	markRequired(cmd, "data-dir")
 	return cmd
 }
@@ -173,6 +178,13 @@ func openDataset(logger *supportlog.Entry, opts queryOptions) (*queryDataset, fu
 		release()
 		return nil, nil, err
 	}
+	var evictPaths []string
+	if tier == tierCold {
+		if evictPaths, err = coldArtifactPaths(cat, chunks); err != nil {
+			release()
+			return nil, nil, err
+		}
+	}
 	ds := &queryDataset{
 		registry:    registry,
 		Passphrase:  opts.Plan.Passphrase,
@@ -180,6 +192,7 @@ func openDataset(logger *supportlog.Entry, opts queryOptions) (*queryDataset, fu
 		Chunks:      chunks,
 		FirstLedger: floor.FirstLedger(),
 		LastLedger:  served,
+		EvictPaths:  evictPaths,
 	}
 	release = ds.serveReads(logger, release)
 	if err := ds.verifyServes(opts.Plan.Types); err != nil {
@@ -215,6 +228,34 @@ func servedBounds(cat *catalog.Catalog, opts queryOptions) (chunk.ID, uint32, er
 		return 0, 0, fmt.Errorf("the dataset ends at ledger %d, before chunk %s", last, floor)
 	}
 	return floor, last, nil
+}
+
+// coldArtifactPaths lists the artifact files the catalog records as frozen for
+// chunks, plus every frozen tx-hash index file in the catalog.
+func coldArtifactPaths(cat *catalog.Catalog, chunks []chunk.ID) ([]string, error) {
+	layout := cat.Layout()
+	var paths []string
+	for _, c := range chunks {
+		for _, kind := range geometry.AllKinds() {
+			state, err := cat.State(c, kind)
+			if err != nil {
+				return nil, fmt.Errorf("read the state of chunk %s %s: %w", c, kind, err)
+			}
+			if state == geometry.StateFrozen {
+				paths = append(paths, layout.ArtifactPaths(c, kind)...)
+			}
+		}
+	}
+	covs, err := cat.AllTxHashIndexKeys()
+	if err != nil {
+		return nil, fmt.Errorf("list tx-hash index coverages: %w", err)
+	}
+	for _, cov := range covs {
+		if cov.State == geometry.StateFrozen {
+			paths = append(paths, layout.TxHashIndexFilePath(cov))
+		}
+	}
+	return paths, nil
 }
 
 // requireLiveChunk checks that the dataset ending at last has its live chunk,
