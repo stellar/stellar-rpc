@@ -17,6 +17,7 @@ import (
 const runRecordFile = "run.json"
 
 // runRecord is the run.json schema. Treat key renames as breaking changes.
+// See README.md for every key.
 type runRecord struct {
 	SchemaVersion int               `json:"schemaVersion"`
 	Command       string            `json:"command"`
