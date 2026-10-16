@@ -1,0 +1,13 @@
+{
+  "workspace": ".",
+  "go_sast_enabled": true,
+  "rust_sast_enabled": true,
+  "go_disabled_rules": "go-error-not-checked,go-file-path-traversal,go-command-execution",
+  "sast_ignore_overrides": "go-file-path-traversal:cmd/stellar-rpc/internal/config/main.go,rust-memory-safety:cmd/stellar-rpc/lib/preflight/src/lib.rs,rust-memory-safety:cmd/stellar-rpc/lib/preflight/src/shared.rs,rust-memory-safety:cmd/stellar-rpc/lib/xdr2json/src/lib.rs,rust-panic-in-production:cmd/stellar-rpc/lib/ffi/src/lib.rs,rust-panic-in-production:cmd/stellar-rpc/lib/preflight/src/shared.rs,rust-panic-in-production:cmd/stellar-rpc/lib/xdr2json/src/lib.rs,rust-unsafe-usage:cmd/stellar-rpc/lib/ffi/src/lib.rs,rust-unsafe-usage:cmd/stellar-rpc/lib/preflight/src/lib.rs,rust-unsafe-usage:cmd/stellar-rpc/lib/preflight/src/shared.rs,rust-unsafe-usage:cmd/stellar-rpc/lib/xdr2json/src/lib.rs",
+  "secret_scanning_enabled": true,
+  "console_tabular_enabled": true,
+  "dockerfiles": "cmd/stellar-rpc/docker/Dockerfile,cmd/stellar-rpc/docker/Dockerfile.release",
+  "socket_tier_1_enabled": false,
+  "trivy_vuln_enabled": false,
+  "trufflehog_exclude_dir": "vendor,target,.git"
+}
