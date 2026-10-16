@@ -66,7 +66,8 @@ func (f *queryFlags) bind(cmd *cobra.Command) {
 	fs.DurationVar(&f.duration, "duration", defaultScenarioDuration,
 		"measured duration of each --target-rps scenario; the --warmup iterations run before it")
 	fs.IntVar(&f.warmup, "warmup", 0,
-		"unmeasured iterations per scenario, started at the scenario's rate before measurement starts")
+		"unmeasured iterations per scenario, started at the scenario's rate before measurement starts; "+
+			"default: 0 on a cold dataset, "+strconv.Itoa(defaultHotWarmup)+" on a hot one")
 	fs.Uint32Var(&f.ledgersLimit, "ledgers-limit", defaultLedgersLimit,
 		"getLedgers limit of one ledgers request, in [1, "+strconv.FormatUint(uint64(maxLedgersLimit()), 10)+
 			"] (1 = a point read)")
