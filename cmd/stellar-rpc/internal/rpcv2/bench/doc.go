@@ -1,6 +1,6 @@
-// Package bench benchmarks ingestion and reads. bench ingest
-// times the cold backfill that bulk-materializes past ledgers at startup, and
-// the hot loop that ingests the live stream as it advances.
+// Package bench benchmarks ingestion and reads. The bench ingest command times
+// the cold backfill, which writes past ledgers to frozen artifacts at startup,
+// and the hot loop, which ingests new ledgers as they close.
 //
 // A bench ingest run drives the daemon's production ingestion code over a
 // benchmark-controlled ledger source and times it: cold calls
@@ -22,6 +22,7 @@
 // the wait for a handler slot, the handler and the response write;
 // handler_latency covers the handler alone, read view included. HTTP and
 // network time are outside both. A run writes latency.csv and scenarios.csv.
+// README.md defines the datasets, the terms and the formulas.
 //
 // Before each scenario, a cold run asks the kernel to drop the dataset's
 // frozen files from the page cache (--evict-page-cache, Linux only). Then the

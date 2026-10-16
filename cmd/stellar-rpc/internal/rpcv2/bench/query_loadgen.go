@@ -12,7 +12,7 @@ import (
 
 // This file is the open-loop load generator for query benchmarks. It starts
 // requests on a fixed schedule and never waits for a response before it
-// starts the next request.
+// starts the next request. See README.md for the terms and formulas.
 
 // requestTiming holds the timings of one successful request.
 type requestTiming struct {
