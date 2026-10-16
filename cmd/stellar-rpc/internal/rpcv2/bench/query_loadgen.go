@@ -18,15 +18,16 @@ import (
 type requestTiming struct {
 	// latency is the run time of the request itself.
 	latency time.Duration
+	// handlerLatency is the run time of the method handler inside latency.
+	handlerLatency time.Duration
 	// latencyFromDue spans the iteration's due time to its response.
 	latencyFromDue time.Duration
 	items          int
 }
 
-// queryRequest sends one request and measures its own latency, usually by
-// calling timed. Calls run concurrently, each with its own rng. A request must
-// return soon after ctx is done, because a canceled scenario waits for every
-// running request.
+// queryRequest sends one request and measures its own latency. Calls run
+// concurrently, each with its own rng. A request must return soon after ctx is
+// done, because a canceled scenario waits for every running request.
 type queryRequest func(ctx context.Context, rng *rand.Rand) (requestTiming, error)
 
 // maxConcurrent caps a scenario's running requests. An iteration reached while
@@ -324,15 +325,4 @@ func splitmix64(x uint64) uint64 {
 	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
 	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
 	return x ^ (x >> 31)
-}
-
-// timed runs fn and returns its run time as latency.
-func timed(fn func() (int, error)) (requestTiming, error) {
-	start := time.Now()
-	items, err := fn()
-	latency := time.Since(start)
-	if err != nil {
-		return requestTiming{}, err
-	}
-	return requestTiming{latency: latency, items: items}, nil
 }

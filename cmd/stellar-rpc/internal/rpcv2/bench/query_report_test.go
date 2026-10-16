@@ -43,14 +43,20 @@ func readCSVTable(t *testing.T, path string) ([]string, []map[string]string) {
 func twoScenarioReport() *queryReport {
 	var q queryReport
 	q.add(scenarioReport{
-		queryType: "ledgers",
+		queryType: queryTypeLedgers,
 		targetRPS: 10,
 		result: scenarioResult{
 			scenarioRecord: scenarioRecord{
 				startDelays: []time.Duration{0, 2 * time.Microsecond},
 				timings: []requestTiming{
-					{latency: 3 * time.Millisecond, latencyFromDue: 4 * time.Millisecond, items: 5},
-					{latency: time.Millisecond, latencyFromDue: 2 * time.Millisecond, items: 5},
+					{
+						latency: 3 * time.Millisecond, handlerLatency: 2 * time.Millisecond,
+						latencyFromDue: 4 * time.Millisecond, items: 5,
+					},
+					{
+						latency: time.Millisecond, handlerLatency: 500 * time.Microsecond,
+						latencyFromDue: 2 * time.Millisecond, items: 5,
+					},
 				},
 				measured: phaseCounts{started: 2},
 			},
@@ -61,7 +67,7 @@ func twoScenarioReport() *queryReport {
 		},
 	})
 	q.add(scenarioReport{
-		queryType: "txpage",
+		queryType: queryTypeTxPage,
 		targetRPS: 0.5,
 		result: scenarioResult{
 			scenarioRecord: scenarioRecord{
@@ -82,7 +88,7 @@ func twoScenarioReport() *queryReport {
 	return &q
 }
 
-// TestQueryReportLatencyRows: latency.csv has the three metric rows of each
+// TestQueryReportLatencyRows: latency.csv has the four metric rows of each
 // scenario.
 func TestQueryReportLatencyRows(t *testing.T) {
 	outDir := t.TempDir()
@@ -103,9 +109,11 @@ func TestQueryReportLatencyRows(t *testing.T) {
 	}
 	assert.Equal(t, []key{
 		{"ledgers", "10", "latency"},
+		{"ledgers", "10", "handler_latency"},
 		{"ledgers", "10", "latency_from_due"},
 		{"ledgers", "10", "start_delay"},
 		{"txpage", "0.5", "latency"},
+		{"txpage", "0.5", "handler_latency"},
 		{"txpage", "0.5", "latency_from_due"},
 		{"txpage", "0.5", "start_delay"},
 	}, keys)
@@ -117,7 +125,14 @@ func TestQueryReportLatencyRows(t *testing.T) {
 	assert.Equal(t, "1000000", ledgersLatency["p50_ns"])
 	assert.Equal(t, "3000000", ledgersLatency["max_ns"])
 
-	ledgersFromDue := rows[1]
+	ledgersHandler := rows[1]
+	assert.Equal(t, "2", ledgersHandler["count"])
+	assert.Equal(t, "10", ledgersHandler["items"])
+	assert.Equal(t, "2500000", ledgersHandler["total_ns"])
+	assert.Equal(t, "500000", ledgersHandler["p50_ns"])
+	assert.Equal(t, "2000000", ledgersHandler["max_ns"])
+
+	ledgersFromDue := rows[2]
 	assert.Equal(t, "2", ledgersFromDue["count"])
 	assert.Equal(t, "10", ledgersFromDue["items"])
 	assert.Equal(t, "6000000", ledgersFromDue["total_ns"])
@@ -125,11 +140,11 @@ func TestQueryReportLatencyRows(t *testing.T) {
 	assert.Equal(t, "4000000", ledgersFromDue["max_ns"])
 
 	// start_delay keeps its zero sample: count equals planned.
-	assert.Equal(t, "2", rows[2]["count"])
-	assert.Equal(t, "0", rows[2]["items"])
-	assert.Equal(t, "4", rows[5]["count"])
+	assert.Equal(t, "2", rows[3]["count"])
+	assert.Equal(t, "0", rows[3]["items"])
+	assert.Equal(t, "4", rows[7]["count"])
 
-	txPageLatency := rows[3]
+	txPageLatency := rows[4]
 	assert.Equal(t, "2", txPageLatency["count"])
 	assert.Equal(t, "1", txPageLatency["items"])
 	assert.Equal(t, "10000", txPageLatency["p50_ns"])
@@ -141,12 +156,13 @@ func TestQueryReportPercentileColumns(t *testing.T) {
 	for i := range timings {
 		timings[i] = requestTiming{
 			latency:        time.Duration(i+1) * time.Millisecond,
+			handlerLatency: time.Duration(i+1) * time.Microsecond,
 			latencyFromDue: time.Duration(i+11) * time.Millisecond,
 		}
 	}
 	var q queryReport
 	q.add(scenarioReport{
-		queryType: "ledgers",
+		queryType: queryTypeLedgers,
 		targetRPS: 10,
 		result: scenarioResult{
 			scenarioRecord: scenarioRecord{
@@ -164,14 +180,16 @@ func TestQueryReportPercentileColumns(t *testing.T) {
 	require.NoError(t, err)
 
 	_, rows := readCSVTable(t, filepath.Join(outDir, queryLatencyFile))
-	require.Len(t, rows, 3)
+	require.Len(t, rows, 4)
 	percentiles := func(r map[string]string) []string {
 		return []string{r["p50_ns"], r["p90_ns"], r["p99_ns"], r["max_ns"]}
 	}
 	assert.Equal(t, metricLatency, rows[0]["metric"])
 	assert.Equal(t, []string{"5000000", "9000000", "10000000", "10000000"}, percentiles(rows[0]))
-	assert.Equal(t, metricLatencyFromDue, rows[1]["metric"])
-	assert.Equal(t, []string{"15000000", "19000000", "20000000", "20000000"}, percentiles(rows[1]))
+	assert.Equal(t, metricHandlerLatency, rows[1]["metric"])
+	assert.Equal(t, []string{"5000", "9000", "10000", "10000"}, percentiles(rows[1]))
+	assert.Equal(t, metricLatencyFromDue, rows[2]["metric"])
+	assert.Equal(t, []string{"15000000", "19000000", "20000000", "20000000"}, percentiles(rows[2]))
 }
 
 // TestQueryReportScenarioRows: scenarios.csv has one row per scenario.
@@ -232,7 +250,7 @@ func TestQueryReportEmpty(t *testing.T) {
 func TestQueryReportAllDropped(t *testing.T) {
 	var q queryReport
 	q.add(scenarioReport{
-		queryType: "ledgers",
+		queryType: queryTypeLedgers,
 		targetRPS: 100,
 		result: scenarioResult{
 			scenarioRecord: scenarioRecord{

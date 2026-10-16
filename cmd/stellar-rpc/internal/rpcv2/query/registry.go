@@ -141,10 +141,8 @@ func OpenRegistry(
 	return r, nil
 }
 
-// NewRegistry binds a bare Registry to the catalog and retention policy: an empty
-// handle map and latest ledger zero. The daemon uses OpenRegistry; this is the
-// seam for tests, which publish their own state (the bench publishes into a
-// closingSink, not a Registry).
+// NewRegistry returns a Registry over the catalog and retention policy with no
+// published handles and latest ledger zero. The daemon uses OpenRegistry.
 func NewRegistry(cat *catalog.Catalog, retention geometry.Retention) *Registry {
 	r := &Registry{
 		catalog:     cat,

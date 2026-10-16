@@ -334,9 +334,8 @@ func TestRunHotFromPack(t *testing.T) {
 	// facto contract, and pace_lag belongs to --close-interval runs only.
 	assert.NotContains(t, driver, "pace_lag")
 
-	// A second run against the same hot root succeeds from a fixed (empty)
-	// starting state: the production create bracket wipes the leftover DB.
-	require.NoError(t, runHot(context.Background(), testLogger(), opts))
+	// A second run over the same range into the same dataset is refused.
+	require.ErrorContains(t, runHot(context.Background(), testLogger(), opts), "overlaps chunk")
 }
 
 // TestRunHotIncompleteStream asserts an undersized source is a hard error, not

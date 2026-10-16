@@ -7,11 +7,13 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
@@ -38,18 +40,16 @@ type coldOptions struct {
 	// index builds.
 	Workers int
 
-	// ColdRoot is the output root the artifacts land under, laid out by
-	// geometry.NewLayout. It is scratch: a re-run over the same range
-	// overwrites freely, but artifacts from other ranges are left in place and
-	// can look valid to later tooling, so point each run at a fresh dir.
+	// ColdRoot is the dataset root, laid out by geometry.NewLayout: the
+	// catalog and the artifacts. A run into an existing dataset appends the
+	// chunks after its last one.
 	ColdRoot string
-
-	// CatalogDir is the base dir the run-scoped scratch catalog is created
-	// under. Empty means ColdRoot.
-	CatalogDir string
 
 	// OutDir receives the CSV report.
 	OutDir string
+
+	// Settings receives the run settings that go into run.json; nil skips them.
+	Settings map[string]string
 }
 
 // validate checks the flags and chunk range before runCold touches the
@@ -84,12 +84,8 @@ func (o coldOptions) validate() error {
 	return nil
 }
 
-// runCold benchmarks the cold path: one backfill.RunBackfill over the
-// requested chunk range, against a fresh scratch catalog so the run is a clean
-// backfill from empty. As the backfill runs, the sink collects its per-stage
-// MetricSink timings and the scheduler's observability metrics. On success
-// runCold writes the CSV report and logs a summary, including the effective
-// chunk concurrency for multi-chunk runs.
+// runCold times the daemon's backfill of the requested chunk range into the
+// dataset under ColdRoot and writes the CSV report.
 func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) error {
 	if err := opts.validate(); err != nil {
 		return err
@@ -97,32 +93,38 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	// Create and fsync the write roots up front — the daemon's own root prep.
 	layout := geometry.NewLayout(opts.ColdRoot)
 	if err := config.PrepareRoots(
-		layout.LedgersRoot(), layout.EventsRoot(), layout.EventsIndexRoot(),
-		layout.TxHashRawRoot(), layout.TxHashIndexRoot(),
+		layout.CatalogPath(), layout.LedgersRoot(), layout.EventsRoot(), layout.EventsIndexRoot(),
+		layout.TxHashRawRoot(), layout.TxHashIndexRoot(), layout.HotRoot(),
 	); err != nil {
 		return fmt.Errorf("prepare --cold-out-dir write roots: %w", err)
 	}
-
-	catalogBase := opts.CatalogDir
-	if catalogBase == "" {
-		catalogBase = opts.ColdRoot
-	}
-	cat, releaseCat, err := openScratchCatalog(catalogBase, layout, logger)
+	cat, err := openDatasetCatalog(layout, logger)
 	if err != nil {
 		return err
 	}
-	defer releaseCat()
-
+	defer func() { _ = cat.Close() }()
+	// The source opens before prepareIngest, whose append discards the live
+	// chunk, so a source that fails to open leaves the dataset queryable.
 	backend, release, err := openSource(ctx, opts.Source)
 	if err != nil {
 		return err
 	}
 	defer release()
-
-	sink := newCSVSink()
 	//nolint:gosec // validate() proved StartChunk+NumChunks-1 <= maxChunkID
 	end := opts.StartChunk + chunk.ID(uint32(opts.NumChunks-1))
+	first, err := prepareIngest(cat, tierCold, opts.StartChunk, end)
+	if err != nil {
+		return fmt.Errorf("--cold-out-dir %s: %w", opts.ColdRoot, err)
+	}
 
+	// An append backfills from the dataset's first chunk, as the daemon does
+	// from its retention floor: frozen chunks are skipped and the tx-hash index
+	// is rebuilt over every chunk, so its timings differ from a fresh run's.
+	if opts.Settings != nil {
+		opts.Settings["datasetFirstChunk"] = strconv.FormatUint(uint64(first), 10)
+		opts.Settings["append"] = strconv.FormatBool(first < opts.StartChunk)
+	}
+	sink := newCSVSink()
 	start := time.Now()
 	err = backfill.RunBackfill(ctx, backfill.ExecConfig{
 		Catalog: cat,
@@ -133,10 +135,10 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		// Benchmarks measure one clean attempt; retries would fold failure +
 		// backoff time into the samples.
 		MaxRetries: 0,
-	}, opts.StartChunk, end)
+	}, first, end)
 	if err != nil {
 		writePartialCSVs(logger, sink, opts.OutDir)
-		return fmt.Errorf("backfill [%s,%s]: %w", opts.StartChunk, end, err)
+		return fmt.Errorf("backfill [%s,%s]: %w", first, end, err)
 	}
 	totalWall := time.Since(start)
 
@@ -147,6 +149,28 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		return err
 	}
 	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)
+	if err := destroyPruningTxHashIndexes(cat); err != nil {
+		return err
+	}
+	return finishIngest(cat, first, logger)
+}
+
+// destroyPruningTxHashIndexes removes the tx-hash index coverages the backfill
+// superseded, with the catalog destroy the daemon's prune scan uses. The
+// caller must hold no reader on the dataset.
+func destroyPruningTxHashIndexes(cat *catalog.Catalog) error {
+	covs, err := cat.AllTxHashIndexKeys()
+	if err != nil {
+		return fmt.Errorf("read tx-hash index keys: %w", err)
+	}
+	for _, cov := range covs {
+		if cov.State != geometry.StatePruning {
+			continue
+		}
+		if err := cat.DestroyTxHashIndexKey(cov); err != nil {
+			return fmt.Errorf("destroy superseded tx-hash index %s: %w", cov.Key, err)
+		}
+	}
 	return nil
 }
 

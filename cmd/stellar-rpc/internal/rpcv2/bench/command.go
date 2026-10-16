@@ -25,7 +25,7 @@ func NewCommand() *cobra.Command {
 		Use:   "bench",
 		Short: "Benchmark ingestion and reads",
 	}
-	cmd.AddCommand(newIngestCommand())
+	cmd.AddCommand(newIngestCommand(), newQueryCommand())
 	return cmd
 }
 
@@ -118,14 +118,20 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 	}
 }
 
-// newBenchCommand creates a `bench ingest` subcommand with shared flags,
-// profiling, run metadata, and signal-driven cancellation. validate runs before
-// the command touches --out, so a flag that validate rejects leaves nothing
-// behind; errors found later in the run are recorded in run.json as failed.
+// runEnv is what newBenchCommand hands a run. What the run puts in Settings
+// and SetupTimes goes into run.json.
+type runEnv struct {
+	OutDir     string
+	Settings   map[string]string
+	SetupTimes map[string]time.Duration
+}
+
+// newBenchCommand creates a bench subcommand with shared flags, profiling, run
+// metadata, and signal-driven cancellation.
 func newBenchCommand(
-	use, short string, src *sourceFlags, prof *profileFlags,
+	use, short string, prof *profileFlags,
 	validate func() error,
-	run func(ctx context.Context, logger *supportlog.Entry, outDir string) error,
+	run func(ctx context.Context, logger *supportlog.Entry, env runEnv) error,
 ) *cobra.Command {
 	var outDir string
 	cmd := &cobra.Command{
@@ -145,24 +151,29 @@ func newBenchCommand(
 			ctx, stop, logger := benchContext()
 			defer stop()
 			startedAt := time.Now().UTC()
+			env := runEnv{
+				OutDir:     outDir,
+				Settings:   map[string]string{},
+				SetupTimes: map[string]time.Duration{},
+			}
 			if err := requireEmptyOut(outDir); err != nil {
 				return err
 			}
-			if err := os.MkdirAll(outDir, 0o755); err != nil {
+			if err := os.MkdirAll(outDir, dirPerm); err != nil {
 				return fmt.Errorf("create --out dir %s: %w", outDir, err)
 			}
 			record := newRunRecord(cmd, captureFlags(cmd), startedAt)
 			if err := writeRunRecord(outDir, record); err != nil {
 				return err
 			}
-			runErr := prof.around(logger, func() error { return run(ctx, logger, outDir) })
+			runErr := prof.around(logger, func() error { return run(ctx, logger, env) })
 			peakRSS, rssErr := readPeakRSS()
 			if rssErr != nil {
 				logger.Warnf("peak RSS unavailable: %v", rssErr)
 			} else {
 				logger.Infof("peak RSS: %d bytes", peakRSS)
 			}
-			record.finish(time.Now().UTC(), peakRSS, runErr)
+			record.finish(time.Now().UTC(), env, peakRSS, runErr)
 			if err := writeRunRecord(outDir, record); err != nil {
 				if runErr == nil {
 					return err
@@ -174,7 +185,6 @@ func newBenchCommand(
 	}
 	cmd.Flags().StringVar(&outDir, "out", "bench-out",
 		"output dir for the CSV report and run.json; must be missing or empty")
-	src.bind(cmd)
 	prof.bind(cmd)
 	return cmd
 }
@@ -203,7 +213,6 @@ func newColdCommand() *cobra.Command {
 		numChunks  int
 		workers    int
 		coldOutDir string
-		catalogDir string
 		prof       profileFlags
 	)
 	opts := func() coldOptions {
@@ -213,27 +222,26 @@ func newColdCommand() *cobra.Command {
 			NumChunks:  numChunks,
 			Workers:    workers,
 			ColdRoot:   coldOutDir,
-			CatalogDir: catalogDir,
 		}
 	}
 	cmd := newBenchCommand("cold",
 		"Benchmark cold ingestion: the daemon's backfill (chunk freezes + txhash index builds) over a chunk range",
-		&src, &prof,
+		&prof,
 		func() error { return opts().validate() },
-		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
+		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			o := opts()
-			o.OutDir = outDir
+			o.OutDir = env.OutDir
+			o.Settings = env.Settings
 			return runCold(ctx, logger, o)
 		})
+	src.bind(cmd)
 	fs := cmd.Flags()
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to backfill (required)")
 	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to backfill starting at --start-chunk")
 	fs.IntVar(&workers, "workers", 1, "backfill worker-pool size, shared by chunk freezes and index builds")
 	fs.StringVar(&coldOutDir, "cold-out-dir", "",
-		"output root for cold artifacts (required; use a fresh dir — same-range "+
-			"re-runs overwrite, but leftovers from other ranges are never swept)")
-	fs.StringVar(&catalogDir, "catalog-dir", "",
-		"base dir for the run's scratch catalog; default: --cold-out-dir")
+		"dataset root for the catalog and the cold artifacts (required); a run into an existing "+
+			"dataset must start at the chunk after its last one")
 	markRequired(cmd, "start-chunk", "cold-out-dir")
 	return cmd
 }
@@ -245,7 +253,6 @@ func newHotCommand() *cobra.Command {
 		numChunks     int
 		numLedgers    uint32
 		hotDir        string
-		catalogDir    string
 		closeInterval time.Duration
 		prof          profileFlags
 	)
@@ -256,28 +263,27 @@ func newHotCommand() *cobra.Command {
 			NumChunks:     numChunks,
 			NumLedgers:    numLedgers,
 			HotRoot:       hotDir,
-			CatalogDir:    catalogDir,
 			CloseInterval: closeInterval,
 		}
 	}
 	cmd := newBenchCommand("hot",
 		"Benchmark hot ingestion: the daemon's live ingestion loop over a chunk range",
-		&src, &prof,
+		&prof,
 		func() error { return opts().validate() },
-		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
+		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			o := opts()
-			o.OutDir = outDir
+			o.OutDir = env.OutDir
 			return runHot(ctx, logger, o)
 		})
+	src.bind(cmd)
 	fs := cmd.Flags()
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to ingest (required)")
 	fs.IntVar(&numChunks, "num-chunks", 1,
 		"how many consecutive chunks to ingest starting at --start-chunk (>1 exercises the hot DB rotation)")
 	fs.Uint32Var(&numLedgers, "num-ledgers", 0, "cap on ledgers ingested from the range's start (0 = whole range)")
 	fs.StringVar(&hotDir, "hot-dir", "",
-		"scratch root for the hot RocksDBs (required; leftover chunk DBs are wiped for a fixed starting state)")
-	fs.StringVar(&catalogDir, "catalog-dir", "",
-		"base dir for the run's scratch catalog; default: --hot-dir")
+		"dataset root for the catalog and the hot chunk databases (required); a run into an existing "+
+			"dataset must start at the chunk after its last one")
 	fs.DurationVar(&closeInterval, "close-interval", 0,
 		"assumed time between ledger closes; >0 paces ingestion to that steady-state cadence "+
 			"and reports pace_lag (0 = ingest back-to-back, catch-up throughput)")

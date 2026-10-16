@@ -10,8 +10,8 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
-// profileFlags is the optional Go-profiling flag pair shared by both
-// subcommands.
+// profileFlags is the optional Go-profiling flag pair shared by every bench
+// command.
 type profileFlags struct {
 	cpuProfile string
 	memProfile string

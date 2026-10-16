@@ -60,6 +60,19 @@ type durationLimits struct {
 	logger             *log.Entry
 }
 
+// Bridge serves JSON-RPC 2.0 over HTTP POST as the daemon does, with no
+// duration limits, metrics or queue limiters. It runs at most one handler per
+// CPU and passes each request's context, values included, to its handler.
+type Bridge struct {
+	*bridge
+}
+
+// NewBridge returns a Bridge over methods. logger receives the stacks of
+// panics. The caller must Close it.
+func NewBridge(methods jrpc2.Assigner, logger *log.Entry) Bridge {
+	return Bridge{newBridge(methods, durationLimits{limit: network.RequestDurationLimiterNoLimit, logger: logger})}
+}
+
 func newBridge(methods jrpc2.Assigner, limits durationLimits) *bridge {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &bridge{

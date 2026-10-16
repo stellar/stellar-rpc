@@ -34,16 +34,11 @@ type hotOptions struct {
 	// cap below one chunk never reaches a boundary.
 	NumLedgers uint32
 
-	// HotRoot is the scratch root the hot RocksDBs are created under, at
-	// geometry.NewLayout(HotRoot).HotChunkPath(chunk). Each chunk's DB is
-	// opened through the production create bracket, which wipes any leftover
-	// dir, so every run starts from an empty DB (hot timings are only
-	// comparable from a fixed starting state).
+	// HotRoot is the dataset root, laid out by geometry.NewLayout: the catalog
+	// and the hot chunk databases. Each chunk's DB is created through the
+	// production create bracket, so every run writes into empty DBs. A run into
+	// an existing dataset appends the chunks after its last one.
 	HotRoot string
-
-	// CatalogDir is the base dir the run-scoped scratch catalog is created
-	// under. Empty means HotRoot.
-	CatalogDir string
 
 	// CloseInterval is the assumed time between ledger closes. When positive,
 	// the run gives each ledger a due time interval apart and waits out the
@@ -79,34 +74,24 @@ func (o hotOptions) validate() error {
 	return nil
 }
 
-// runHot benchmarks the hot path: the daemon's ingestion loop (via
-// rpcv2.RunBoundedIngestionLoop) over the range's ledgers, into fresh hot
-// DBs opened through a scratch catalog. A no-op boundary discards completed
-// chunks so no cold-path freeze runs, isolating the hot measurement. The sink
-// collects the loop's per-phase HotPhase timings; on success runHot records the
-// whole-run wall-clock and writes the CSV report.
-//
-// With --close-interval (opts.CloseInterval) set, the source is paced to that
-// close cadence: the run measures steady-state keep-up rather than catch-up
-// throughput, recording per-ledger pace_lag.
+// runHot times the daemon's ingestion loop over the range's ledgers into new
+// hot databases in the dataset under HotRoot, with no freeze, and writes the
+// CSV report. With CloseInterval set it measures keep-up at that close cadence
+// and records pace_lag.
 func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) error {
 	if err := opts.validate(); err != nil {
 		return err
 	}
 	layout := geometry.NewLayout(opts.HotRoot)
-	// Create + fsync the hot root up front — the daemon's own root prep.
-	if err := config.PrepareRoots(layout.HotRoot()); err != nil {
-		return fmt.Errorf("prepare --hot-dir hot root: %w", err)
+	// Create + fsync the roots up front — the daemon's own root prep.
+	if err := config.PrepareRoots(layout.CatalogPath(), layout.HotRoot()); err != nil {
+		return fmt.Errorf("prepare --hot-dir roots: %w", err)
 	}
-	catalogBase := opts.CatalogDir
-	if catalogBase == "" {
-		catalogBase = opts.HotRoot
-	}
-	cat, releaseCat, err := openScratchCatalog(catalogBase, layout, logger)
+	cat, err := openDatasetCatalog(layout, logger)
 	if err != nil {
 		return err
 	}
-	defer releaseCat()
+	defer func() { _ = cat.Close() }()
 
 	backend, release, err := openSource(ctx, opts.Source)
 	if err != nil {
@@ -121,6 +106,11 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	// a flag-supplied count to a ledger sequence.
 	if span := last - first + 1; opts.NumLedgers > 0 && opts.NumLedgers < span {
 		last = first + opts.NumLedgers - 1
+	}
+
+	datasetFirst, err := prepareIngest(cat, tierHot, opts.StartChunk, chunk.IDFromLedger(last))
+	if err != nil {
+		return fmt.Errorf("--hot-dir %s: %w", opts.HotRoot, err)
 	}
 
 	sink := newCSVSink()
@@ -153,7 +143,7 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		return err
 	}
 	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)
-	return nil
+	return finishIngest(cat, datasetFirst, logger)
 }
 
 // buildHotStream wraps backend for a bounded hot run. With closeInterval == 0

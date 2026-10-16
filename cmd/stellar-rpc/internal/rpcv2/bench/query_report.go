@@ -17,9 +17,23 @@ const (
 	queryScenariosFile = "scenarios.csv"
 )
 
+// Query types. Each is a --types value and a latency.csv query_type value.
+const (
+	// queryTypeLedgers is getLedgers' ledger read.
+	queryTypeLedgers = "ledgers"
+	// queryTypeTxPage is getTransactions' paged ledger read.
+	queryTypeTxPage = "txpage"
+)
+
+// allQueryTypes is every --types value, in the default --types order.
+//
+//nolint:gochecknoglobals // fixed vocabulary, read-only
+var allQueryTypes = []string{queryTypeLedgers, queryTypeTxPage}
+
 // latency.csv metric values.
 const (
 	metricLatency        = "latency"
+	metricHandlerLatency = "handler_latency"
 	metricLatencyFromDue = "latency_from_due"
 	metricStartDelay     = "start_delay"
 )
@@ -80,6 +94,7 @@ func (s scenarioReport) latencyRows() []latencyRow {
 		add(metric, &dist)
 	}
 	timingRow(metricLatency, func(t requestTiming) time.Duration { return t.latency })
+	timingRow(metricHandlerLatency, func(t requestTiming) time.Duration { return t.handlerLatency })
 	timingRow(metricLatencyFromDue, func(t requestTiming) time.Duration { return t.latencyFromDue })
 	startDelay := series{samples: make([]sample, 0, len(s.result.startDelays))}
 	for _, d := range s.result.startDelays {
@@ -123,11 +138,13 @@ type queryReport struct {
 	scenarios []scenarioSummary
 }
 
-// add aggregates s and keeps its summary, without its raw samples.
-func (q *queryReport) add(s scenarioReport) {
+// add aggregates s and keeps its summary, without its raw samples. It returns
+// the summary.
+func (q *queryReport) add(s scenarioReport) scenarioSummary {
 	sum := scenarioSummary{scenarioReport: s, succeeded: s.result.succeeded(), latency: s.latencyRows()}
 	sum.result.timings, sum.result.startDelays = nil, nil
 	q.scenarios = append(q.scenarios, sum)
+	return sum
 }
 
 // write writes latency.csv and scenarios.csv under outDir and returns the
