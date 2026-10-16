@@ -153,3 +153,18 @@ func TestOpenDatasetRequiresLiveChunk(t *testing.T) {
 	require.ErrorContains(t, err, "the dataset has no live chunk "+chunk.ID(1).String()+": "+unfinishedHint)
 	assert.Equal(t, before, dirNames(t, hotRoot))
 }
+
+// verifyServes checks the events store only when the types include events.
+func TestVerifyServesChecksEventsStore(t *testing.T) {
+	ds, release, err := openDataset(testLogger(), queryOptions{
+		DataDir: ingestColdChunk(t), Plan: testPlan(protocol.FormatBase64),
+	})
+	require.NoError(t, err)
+	defer release()
+	require.NoError(t, ds.catalog.DemoteChunkArtifacts([]catalog.ArtifactRef{
+		{Chunk: 0, Kind: geometry.KindEvents, State: geometry.StateFrozen},
+	}))
+	require.ErrorContains(t, ds.verifyServes([]string{queryTypeEvents}),
+		"chunk "+chunk.ID(0).String()+" has no servable events store")
+	require.NoError(t, ds.verifyServes([]string{queryTypeLedgers}))
+}

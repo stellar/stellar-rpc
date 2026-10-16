@@ -163,6 +163,7 @@ func openDataset(logger *supportlog.Entry, opts queryOptions) (*queryDataset, fu
 		return nil, nil, err
 	}
 	ds := &queryDataset{
+		catalog:     cat,
 		registry:    registry,
 		Passphrase:  opts.Plan.Passphrase,
 		Tier:        tier,
@@ -171,7 +172,7 @@ func openDataset(logger *supportlog.Entry, opts queryOptions) (*queryDataset, fu
 		LastLedger:  served,
 	}
 	release = ds.serveReads(logger, release)
-	if err := ds.verifyServes(); err != nil {
+	if err := ds.verifyServes(opts.Plan.Types); err != nil {
 		release()
 		return nil, nil, err
 	}
