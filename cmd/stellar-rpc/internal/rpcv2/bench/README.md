@@ -163,6 +163,44 @@ the end.
 | `eventsPool` | Labels of the events pool's filter sets, comma-joined, for example `unfiltered,frequent_contract,frequent_pair,rare_contract,no_match` |
 | `fixedReadRange` | Types whose requests read the same ledgers each time |
 
+### `bench.txt`
+
+`bench query` writes `bench.txt` for `benchstat` only when the run ends with
+`status` `ok`. It has one Go benchmark line for each scenario, in run order.
+For `txhash`, one line for each outcome follows. Its
+name ends with `/outcome=found` or `/outcome=not_found`, and it has no
+`dropped`.
+
+```
+BenchmarkQuery/tier=cold/type=ledgers/rps=10	600	812345 ns/op	790123 p50-ns	2345678 p99-ns	301234 handler-p50-ns	901234 handler-p99-ns	2400000 p99-from-due-ns	10 items/op	0 dropped
+```
+
+| Field | Value |
+|---|---|
+| Name | `tier` is `settings.tier`; `type` and `rps` are `query_type` and `target_rps` |
+| Iterations | `succeeded`, or `count` of the outcome; `planned` when no request succeeded |
+| `ns/op` | `total_ns / count` of `latency` |
+| `p50-ns`, `p99-ns` | `latency` percentiles |
+| `handler-p50-ns`, `handler-p99-ns` | `handler_latency` percentiles |
+| `p99-from-due-ns` | `latency_from_due` p99 |
+| `items/op` | `items / count` of `latency` |
+| `dropped` | `dropped`; the only field when no request succeeded |
+
+The `--cpuprofile` file of a scenario uses the same type and rate, for example
+`cpu.ledgers.10rps.pprof` for the line above.
+
+To compare two builds, run each build 6 times or more on the same host, with
+the same dataset and flags. Then:
+
+```
+cat old-*/bench.txt > old.txt
+cat new-*/bench.txt > new.txt
+benchstat -filter '/outcome:""' old.txt new.txt
+```
+
+The filter removes the `txhash` outcome lines. Examine `dropped` first. If it
+changed, the latency values compare different loads.
+
 ## Query types
 
 | Type | Request | `items` |

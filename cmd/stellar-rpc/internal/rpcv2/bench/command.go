@@ -121,11 +121,13 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 }
 
 // runEnv is what newBenchCommand hands a run. What the run puts in Settings
-// and SetupTimes goes into run.json.
+// and SetupTimes goes into run.json; what it puts in Staged gets its final name
+// only after run.json records the run as ok.
 type runEnv struct {
 	OutDir     string
 	Settings   map[string]string
 	SetupTimes map[string]time.Duration
+	Staged     *stagedFiles
 }
 
 // newBenchCommand creates a bench subcommand with shared flags, profiling, run
@@ -157,6 +159,7 @@ func newBenchCommand(
 				OutDir:     outDir,
 				Settings:   map[string]string{},
 				SetupTimes: map[string]time.Duration{},
+				Staged:     &stagedFiles{},
 			}
 			if err := requireEmptyDir("out", outDir); err != nil {
 				return err
@@ -177,12 +180,18 @@ func newBenchCommand(
 			}
 			record.finish(time.Now().UTC(), env, peakRSS, runErr)
 			if err := writeRunRecord(outDir, record); err != nil {
+				env.Staged.discard()
 				if runErr == nil {
 					return err
 				}
 				logger.Warnf("writing %s: %v", runRecordFile, err)
+				return runErr
 			}
-			return runErr
+			if runErr != nil {
+				env.Staged.discard()
+				return runErr
+			}
+			return env.Staged.publish()
 		},
 	}
 	cmd.Flags().StringVar(&outDir, "out", "bench-out",
