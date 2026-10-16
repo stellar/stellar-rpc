@@ -1,9 +1,6 @@
 package bench
 
 import (
-	"math"
-	"os"
-	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -14,9 +11,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/network"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 )
 
 func validQueryFlags() queryFlags {
@@ -106,70 +101,6 @@ func TestPlanRejectsUnrunnableScenarios(t *testing.T) {
 			f.duration = tc.duration
 			f.warmup = tc.warmup
 			_, err := f.plan()
-			require.ErrorContains(t, err, tc.want)
-		})
-	}
-}
-
-func TestColdQueryOptionsValidate(t *testing.T) {
-	root := t.TempDir()
-	missing := filepath.Join(root, "missing")
-	for _, tc := range []struct {
-		name string
-		opts coldQueryOptions
-		want string
-	}{
-		{"range ends below maxChunkID", coldQueryOptions{ColdRoot: root, StartChunk: maxChunkID - 1, NumChunks: 1}, ""},
-		{
-			"range ends at maxChunkID",
-			coldQueryOptions{ColdRoot: root, StartChunk: maxChunkID, NumChunks: 1},
-			"at or past the last valid chunk ID",
-		},
-		{
-			"range end past uint32",
-			coldQueryOptions{ColdRoot: root, StartChunk: maxChunkID - 1, NumChunks: math.MaxUint32},
-			"at or past the last valid chunk ID",
-		},
-		{"no --cold-dir", coldQueryOptions{NumChunks: 1}, "--cold-dir is required"},
-		{"no chunk", coldQueryOptions{ColdRoot: root}, "--num-chunks must be >= 1"},
-		{"missing --cold-dir", coldQueryOptions{ColdRoot: missing, NumChunks: 1}, "--cold-dir: stat " + missing},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.opts.validate()
-			if tc.want == "" {
-				require.NoError(t, err)
-				return
-			}
-			require.ErrorContains(t, err, tc.want)
-		})
-	}
-}
-
-func TestHotQueryOptionsValidate(t *testing.T) {
-	root := t.TempDir()
-	require.NoError(t, os.MkdirAll(geometry.NewLayout(root).HotChunkPath(maxChunkID), 0o755))
-	missing := filepath.Join(root, "missing")
-	for _, tc := range []struct {
-		name string
-		opts hotQueryOptions
-		want string
-	}{
-		{"chunk at maxChunkID", hotQueryOptions{HotRoot: root, Chunk: maxChunkID}, ""},
-		{"chunk past maxChunkID", hotQueryOptions{HotRoot: root, Chunk: maxChunkID + 1}, "past the last valid chunk ID"},
-		{"no --hot-dir", hotQueryOptions{}, "--hot-dir is required"},
-		{"missing --hot-dir", hotQueryOptions{HotRoot: missing}, "--hot-dir: stat " + missing},
-		{
-			"no chunk database",
-			hotQueryOptions{HotRoot: root},
-			"hot database for chunk " + chunk.ID(0).String() + ": stat " + geometry.NewLayout(root).HotChunkPath(0),
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.opts.validate()
-			if tc.want == "" {
-				require.NoError(t, err)
-				return
-			}
 			require.ErrorContains(t, err, tc.want)
 		})
 	}

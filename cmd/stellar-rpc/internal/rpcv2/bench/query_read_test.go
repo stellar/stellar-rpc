@@ -6,7 +6,6 @@ import (
 	"io"
 	"math/rand/v2"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,6 +14,7 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 )
 
 // executeQuery runs bench query with args and a new --out, and requires success.
@@ -25,14 +25,6 @@ func executeQuery(t *testing.T, args ...string) {
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs(append(args, "--out", filepath.Join(t.TempDir(), "out")))
 	require.NoError(t, cmd.Execute())
-}
-
-// requireNoScratchCatalog fails when dir holds a bench query scratch catalog.
-func requireNoScratchCatalog(t *testing.T, dir string) {
-	t.Helper()
-	for _, name := range dirNames(t, dir) {
-		require.False(t, strings.HasPrefix(name, scratchPrefixQuery), "%s holds %s", dir, name)
-	}
 }
 
 // newRequest is the constructor of one request type.
@@ -53,7 +45,7 @@ func requestItems(ds *queryDataset, p queryPlan, newReq newRequest, lo, hi uint3
 func TestQueryRequestReads(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
 	plan := testPlan(protocol.FormatBase64)
-	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{HotRoot: hotRoot, Chunk: 0, Plan: plan})
+	ds, release, err := openDataset(testLogger(), queryOptions{DataDir: hotRoot, Plan: plan})
 	require.NoError(t, err)
 	defer release()
 	// The first ledger of the fixture carries one transaction.
@@ -85,16 +77,17 @@ func TestQueryRequestReads(t *testing.T) {
 	})
 }
 
-// A successful hot run removes its scratch catalog from the dataset root.
-func TestQueryHotRunRemovesScratchCatalog(t *testing.T) {
+// A hot run creates no hot database in the dataset.
+func TestQueryHotRunAddsNoChunk(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
-	executeQuery(t, queryTierHot, "--chunk", "0", "--hot-dir", hotRoot,
+	before := dirNames(t, geometry.NewLayout(hotRoot).HotRoot())
+	executeQuery(t, "--data-dir", hotRoot,
 		"--types", queryTypeLedgers, "--target-rps", "1000", "--duration", "10ms")
-	requireNoScratchCatalog(t, hotRoot)
+	assert.Equal(t, before, dirNames(t, geometry.NewLayout(hotRoot).HotRoot()))
 }
 
-// A cold run over two chunks reads across the chunk border, and a successful
-// run removes its scratch catalog from the dataset root.
+// A cold run over two chunks reads across the chunk border and creates no hot
+// database in the dataset.
 func TestQueryColdTwoChunks(t *testing.T) {
 	srcRoot := t.TempDir()
 	packDir, _ := writeSourcePack(t, srcRoot, 0, chunk.LedgersPerChunk)
@@ -110,7 +103,7 @@ func TestQueryColdTwoChunks(t *testing.T) {
 	}))
 
 	plan := testPlan(protocol.FormatBase64)
-	ds, release, err := openColdDataset(testLogger(), coldQueryOptions{ColdRoot: coldRoot, NumChunks: 2, Plan: plan})
+	ds, release, err := openDataset(testLogger(), queryOptions{DataDir: coldRoot, Plan: plan})
 	require.NoError(t, err)
 	assert.Equal(t, chunk.ID(1).LastLedger(), ds.LastLedger)
 	// Five ledgers on each side of the border; only chunk 1's first ledger
@@ -125,8 +118,9 @@ func TestQueryColdTwoChunks(t *testing.T) {
 	assert.Equal(t, 1, items)
 	release()
 
-	executeQuery(t, queryTierCold, "--start-chunk", "0", "--num-chunks", "2", "--cold-dir", coldRoot,
+	before := dirNames(t, geometry.NewLayout(coldRoot).HotRoot())
+	executeQuery(t, "--data-dir", coldRoot,
 		"--types", queryTypeLedgers+","+queryTypeTxPage, "--target-rps", "1000", "--duration", "10ms",
 		"--format", protocol.FormatJSON)
-	requireNoScratchCatalog(t, coldRoot)
+	assert.Equal(t, before, dirNames(t, geometry.NewLayout(coldRoot).HotRoot()))
 }

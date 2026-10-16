@@ -213,7 +213,6 @@ func newColdCommand() *cobra.Command {
 		numChunks  int
 		workers    int
 		coldOutDir string
-		catalogDir string
 		prof       profileFlags
 	)
 	opts := func() coldOptions {
@@ -223,7 +222,6 @@ func newColdCommand() *cobra.Command {
 			NumChunks:  numChunks,
 			Workers:    workers,
 			ColdRoot:   coldOutDir,
-			CatalogDir: catalogDir,
 		}
 	}
 	cmd := newBenchCommand("cold",
@@ -241,10 +239,8 @@ func newColdCommand() *cobra.Command {
 	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to backfill starting at --start-chunk")
 	fs.IntVar(&workers, "workers", 1, "backfill worker-pool size, shared by chunk freezes and index builds")
 	fs.StringVar(&coldOutDir, "cold-out-dir", "",
-		"output root for cold artifacts (required; use a fresh dir — same-range "+
-			"re-runs overwrite, but leftovers from other ranges are never swept)")
-	fs.StringVar(&catalogDir, "catalog-dir", "",
-		"base dir for the run's scratch catalog; default: --cold-out-dir")
+		"dataset root for the catalog and the cold artifacts (required); a run into an existing "+
+			"dataset must start at the chunk after its last one")
 	markRequired(cmd, "start-chunk", "cold-out-dir")
 	return cmd
 }
@@ -256,7 +252,6 @@ func newHotCommand() *cobra.Command {
 		numChunks     int
 		numLedgers    uint32
 		hotDir        string
-		catalogDir    string
 		closeInterval time.Duration
 		prof          profileFlags
 	)
@@ -267,7 +262,6 @@ func newHotCommand() *cobra.Command {
 			NumChunks:     numChunks,
 			NumLedgers:    numLedgers,
 			HotRoot:       hotDir,
-			CatalogDir:    catalogDir,
 			CloseInterval: closeInterval,
 		}
 	}
@@ -287,9 +281,8 @@ func newHotCommand() *cobra.Command {
 		"how many consecutive chunks to ingest starting at --start-chunk (>1 exercises the hot DB rotation)")
 	fs.Uint32Var(&numLedgers, "num-ledgers", 0, "cap on ledgers ingested from the range's start (0 = whole range)")
 	fs.StringVar(&hotDir, "hot-dir", "",
-		"scratch root for the hot RocksDBs (required; leftover chunk DBs are wiped for a fixed starting state)")
-	fs.StringVar(&catalogDir, "catalog-dir", "",
-		"base dir for the run's scratch catalog; default: --hot-dir")
+		"dataset root for the catalog and the hot chunk databases (required); a run into an existing "+
+			"dataset must start at the chunk after its last one")
 	fs.DurationVar(&closeInterval, "close-interval", 0,
 		"assumed time between ledger closes; >0 paces ingestion to that steady-state cadence "+
 			"and reports pace_lag (0 = ingest back-to-back, catch-up throughput)")

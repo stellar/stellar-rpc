@@ -38,15 +38,10 @@ type coldOptions struct {
 	// index builds.
 	Workers int
 
-	// ColdRoot is the output root the artifacts land under, laid out by
-	// geometry.NewLayout. It is scratch: a re-run over the same range
-	// overwrites freely, but artifacts from other ranges are left in place and
-	// can look valid to later tooling, so point each run at a fresh dir.
+	// ColdRoot is the dataset root, laid out by geometry.NewLayout: the
+	// catalog and the artifacts. A run into an existing dataset appends the
+	// chunks after its last one.
 	ColdRoot string
-
-	// CatalogDir is the base dir the run-scoped scratch catalog is created
-	// under. Empty means ColdRoot.
-	CatalogDir string
 
 	// OutDir receives the CSV report.
 	OutDir string
@@ -85,11 +80,12 @@ func (o coldOptions) validate() error {
 }
 
 // runCold benchmarks the cold path: one backfill.RunBackfill over the
-// requested chunk range, against a fresh scratch catalog so the run is a clean
-// backfill from empty. As the backfill runs, the sink collects its per-stage
-// MetricSink timings and the scheduler's observability metrics. On success
-// runCold writes the CSV report and logs a summary, including the effective
-// chunk concurrency for multi-chunk runs.
+// requested chunk range into the dataset under ColdRoot, which keeps its
+// catalog. As the backfill runs, the sink collects its per-stage MetricSink
+// timings and the scheduler's observability metrics. On success runCold opens
+// the dataset for reads once, which creates its empty live chunk, writes the
+// CSV report and logs a summary, including the effective chunk concurrency for
+// multi-chunk runs.
 func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) error {
 	if err := opts.validate(); err != nil {
 		return err
@@ -97,21 +93,22 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	// Create and fsync the write roots up front — the daemon's own root prep.
 	layout := geometry.NewLayout(opts.ColdRoot)
 	if err := config.PrepareRoots(
-		layout.LedgersRoot(), layout.EventsRoot(), layout.EventsIndexRoot(),
-		layout.TxHashRawRoot(), layout.TxHashIndexRoot(),
+		layout.CatalogPath(), layout.LedgersRoot(), layout.EventsRoot(), layout.EventsIndexRoot(),
+		layout.TxHashRawRoot(), layout.TxHashIndexRoot(), layout.HotRoot(),
 	); err != nil {
 		return fmt.Errorf("prepare --cold-out-dir write roots: %w", err)
 	}
-
-	catalogBase := opts.CatalogDir
-	if catalogBase == "" {
-		catalogBase = opts.ColdRoot
-	}
-	cat, releaseCat, err := openScratchCatalog(catalogBase, scratchPrefixIngest, layout, logger)
+	cat, err := openDatasetCatalog(layout, logger)
 	if err != nil {
 		return err
 	}
-	defer releaseCat()
+	defer func() { _ = cat.Close() }()
+	//nolint:gosec // validate() proved StartChunk+NumChunks-1 <= maxChunkID
+	end := opts.StartChunk + chunk.ID(uint32(opts.NumChunks-1))
+	first, err := prepareIngest(cat, tierCold, opts.StartChunk, end)
+	if err != nil {
+		return fmt.Errorf("--cold-out-dir %s: %w", opts.ColdRoot, err)
+	}
 
 	backend, release, err := openSource(ctx, opts.Source)
 	if err != nil {
@@ -120,10 +117,10 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	defer release()
 
 	sink := newCSVSink()
-	//nolint:gosec // validate() proved StartChunk+NumChunks-1 <= maxChunkID
-	end := opts.StartChunk + chunk.ID(uint32(opts.NumChunks-1))
-
 	start := time.Now()
+	// The range starts at the dataset's first chunk, as the daemon's starts at
+	// the retention floor: frozen chunks are skipped, and an append extends the
+	// tx-hash index over every chunk instead of replacing it.
 	err = backfill.RunBackfill(ctx, backfill.ExecConfig{
 		Catalog: cat,
 		Logger:  logger,
@@ -133,12 +130,15 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		// Benchmarks measure one clean attempt; retries would fold failure +
 		// backoff time into the samples.
 		MaxRetries: 0,
-	}, opts.StartChunk, end)
+	}, first, end)
 	if err != nil {
 		writePartialCSVs(logger, sink, opts.OutDir)
-		return fmt.Errorf("backfill [%s,%s]: %w", opts.StartChunk, end, err)
+		return fmt.Errorf("backfill [%s,%s]: %w", first, end, err)
 	}
 	totalWall := time.Since(start)
+	if err := openServingOnce(cat, logger); err != nil {
+		return err
+	}
 
 	sink.logSummary(logger)
 	logColdWall(logger, sink, opts.NumChunks, totalWall)

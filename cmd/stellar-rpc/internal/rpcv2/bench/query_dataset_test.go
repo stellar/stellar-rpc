@@ -1,32 +1,21 @@
 package bench
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
-
-// treeEntries returns every path under root, relative to root.
-func treeEntries(t *testing.T, root string) []string {
-	t.Helper()
-	var entries []string
-	require.NoError(t, filepath.WalkDir(root, func(path string, _ os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, path)
-		entries = append(entries, rel)
-		return err
-	}))
-	return entries
-}
 
 // dirNames returns the names of dir's entries.
 func dirNames(t *testing.T, dir string) []string {
@@ -40,64 +29,112 @@ func dirNames(t *testing.T, dir string) []string {
 	return names
 }
 
-// touchFiles creates an empty file at each path.
-func touchFiles(t *testing.T, paths ...string) {
+// testCatalog opens an empty dataset catalog under a new root.
+func testCatalog(t *testing.T) *catalog.Catalog {
 	t.Helper()
-	for _, p := range paths {
-		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
-		require.NoError(t, os.WriteFile(p, nil, 0o600))
+	cat, err := openDatasetCatalog(geometry.NewLayout(t.TempDir()), testLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+	return cat
+}
+
+// freezeKeys marks kinds of chunk c frozen in cat, with no files behind them.
+func freezeKeys(t *testing.T, cat *catalog.Catalog, c chunk.ID, kinds ...geometry.Kind) {
+	t.Helper()
+	require.NoError(t, cat.MarkChunkFreezing(c, kinds...))
+	require.NoError(t, cat.FlipChunkFrozen(c, kinds...))
+}
+
+// markHotReady marks chunk c's hot key ready in cat, with no database behind it.
+func markHotReady(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
+	t.Helper()
+	require.NoError(t, cat.PutHotTransient(c))
+	require.NoError(t, cat.FlipHotReady(c))
+}
+
+// The tier comes from the store that serves each chunk; a chunk with no store,
+// one served both ways, and a range that mixes tiers are errors.
+func TestServedTier(t *testing.T) {
+	cat := testCatalog(t)
+	freezeKeys(t, cat, 0, geometry.KindLedgers)
+	freezeKeys(t, cat, 1, geometry.KindLedgers)
+	markHotReady(t, cat, 2)
+	markHotReady(t, cat, 3)
+	freezeKeys(t, cat, 4, geometry.KindLedgers)
+	markHotReady(t, cat, 4)
+
+	for _, tc := range []struct {
+		name       string
+		start, end chunk.ID
+		want, err  string
+	}{
+		{"frozen chunks", 0, 1, tierCold, ""},
+		{"hot chunks", 2, 3, tierHot, ""},
+		{"mixed", 1, 2, "", "mix cold and hot chunks (chunk " + chunk.ID(2).String() + " is hot)"},
+		{"both", 4, 4, "", "chunk " + chunk.ID(4).String() + " is both frozen and hot"},
+		{"no store", 5, 5, "", "chunk " + chunk.ID(5).String() + " has no ledger store"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tier, err := servedTier(cat, chunkRange(tc.start, tc.end))
+			if tc.err != "" {
+				require.ErrorContains(t, err, tc.err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, tier)
+		})
 	}
 }
 
-// An artifact kind counts as on disk only when every one of its files exists.
-func TestArtifactOnDisk(t *testing.T) {
-	layout := geometry.NewLayout(t.TempDir())
-	events := layout.EventsPaths(0)
-	touchFiles(t, layout.LedgerPackPath(0))
-	touchFiles(t, events[1:]...)
-
-	onDisk, err := artifactOnDisk(layout, 0, geometry.KindLedgers)
-	require.NoError(t, err)
-	assert.True(t, onDisk)
-
-	onDisk, err = artifactOnDisk(layout, 0, geometry.KindEvents)
-	require.NoError(t, err)
-	assert.False(t, onDisk, "%s is missing", events[0])
-}
-
-// openColdDataset fails on a chunk with no ledger pack, and leaves the input
-// tree as it found it.
-func TestOpenColdDatasetErrors(t *testing.T) {
-	t.Run("no ledger pack", func(t *testing.T) {
+// A catalog with no ingested dataset fails to open, and so does a
+// --start-chunk below the dataset's first chunk.
+func TestOpenDatasetErrors(t *testing.T) {
+	t.Run("no ingested dataset", func(t *testing.T) {
 		root := t.TempDir()
-		touchFiles(t, geometry.NewLayout(root).LedgerPackPath(0))
-		before := treeEntries(t, root)
-		_, _, err := openColdDataset(testLogger(), coldQueryOptions{ColdRoot: root, NumChunks: 2})
-		require.ErrorContains(t, err, "chunk "+chunk.ID(1).String()+" has no ledger pack")
-		assert.Equal(t, before, treeEntries(t, root))
+		require.NoError(t, os.MkdirAll(geometry.NewLayout(root).CatalogPath(), 0o755))
+		_, _, err := openDataset(testLogger(), queryOptions{DataDir: root})
+		require.ErrorContains(t, err, "holds no ingested dataset: ingest it with this version's bench ingest")
 	})
-}
-
-// openHotDataset fails on an empty database and another chunk's database, and
-// adds nothing to the input tree's root.
-func TestOpenHotDatasetErrors(t *testing.T) {
-	t.Run("empty database", func(t *testing.T) {
+	t.Run("--start-chunk below the dataset", func(t *testing.T) {
 		root := t.TempDir()
-		db, err := hotchunk.Open(geometry.NewLayout(root).HotChunkPath(0), 0, testLogger())
+		cat, err := openDatasetCatalog(geometry.NewLayout(root), testLogger())
 		require.NoError(t, err)
-		require.NoError(t, db.Close())
-		before := dirNames(t, root)
-		_, _, err = openHotDataset(testLogger(), hotQueryOptions{HotRoot: root})
-		require.ErrorContains(t, err, "holds no committed ledger")
-		assert.Equal(t, before, dirNames(t, root))
+		require.NoError(t, cat.PinEarliestLedger(chunk.ID(1).FirstLedger()))
+		require.NoError(t, cat.Close())
+		_, _, err = openDataset(testLogger(), queryOptions{DataDir: root, HasStartChunk: true})
+		require.ErrorContains(t, err, "--start-chunk=0 is below the dataset's first chunk 1")
 	})
-	t.Run("another chunk's database", func(t *testing.T) {
-		root := ingestHotChunk(t)
-		layout := geometry.NewLayout(root)
-		require.NoError(t, os.Rename(layout.HotChunkPath(0), layout.HotChunkPath(1)))
-		before := dirNames(t, root)
-		_, _, err := openHotDataset(testLogger(), hotQueryOptions{HotRoot: root, Chunk: 1})
-		require.ErrorContains(t, err, "open hot chunk "+chunk.ID(1).String())
-		assert.Equal(t, before, dirNames(t, root))
+}
+
+// --start-chunk and --sample-ledgers bound the served range of a cold dataset,
+// and the handlers serve no ledger past it.
+func TestOpenDatasetBounds(t *testing.T) {
+	srcRoot := t.TempDir()
+	packDir, _ := writeSourcePack(t, srcRoot, 0, chunk.LedgersPerChunk)
+	_, _ = writeSourcePack(t, srcRoot, 1, chunk.LedgersPerChunk)
+	coldRoot := t.TempDir()
+	require.NoError(t, runCold(context.Background(), testLogger(), coldOptions{
+		Source: sourceConfig{Kind: sourcePack, PackDir: packDir}, StartChunk: 0, NumChunks: 2, Workers: 2,
+		ColdRoot: coldRoot, OutDir: filepath.Join(t.TempDir(), "csv"),
+	}))
+
+	plan := testPlan(protocol.FormatBase64)
+	ds, release, err := openDataset(testLogger(), queryOptions{
+		DataDir: coldRoot, StartChunk: 1, HasStartChunk: true, SampleLedgers: 5, Plan: plan,
 	})
+	require.NoError(t, err)
+	defer release()
+	assert.Equal(t, tierCold, ds.Tier)
+	assert.Equal(t, []chunk.ID{1}, ds.Chunks)
+	assert.Equal(t, chunk.ID(1).FirstLedger(), ds.FirstLedger)
+	assert.Equal(t, chunk.ID(1).FirstLedger()+4, ds.LastLedger)
+
+	var latest protocol.GetLatestLedgerResponse
+	_, err = ds.server.call(context.Background(), protocol.GetLatestLedgerMethodName, nil, &latest)
+	require.NoError(t, err)
+	assert.Equal(t, ds.LastLedger, latest.Sequence)
+
+	_, err = requestItems(ds, plan, ledgersRequest, chunk.ID(0).LastLedger(), chunk.ID(0).LastLedger())
+	require.ErrorContains(t, err, "must be between the oldest ledger: "+
+		strconv.FormatUint(uint64(chunk.ID(1).FirstLedger()), 10), "a ledger below --start-chunk is outside the served range")
 }

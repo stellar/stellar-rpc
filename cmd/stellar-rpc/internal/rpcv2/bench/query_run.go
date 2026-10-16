@@ -126,7 +126,7 @@ func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan,
 	settings["fixedReadRange"] = strings.Join(fixed, ",")
 }
 
-// runQueryBench is the body both subcommands share: open the dataset, run the
+// runQueryBench is the bench query body: open the dataset, run the
 // scenarios, write the report. The open time goes into setupNs.storeOpen. A
 // failure after the dataset opens still writes the scenarios added so far,
 // logged as PARTIAL.
@@ -141,7 +141,8 @@ func runQueryBench(
 	}
 	defer release()
 	env.SetupTimes["storeOpen"] = time.Since(start)
-	logger.Infof("serving ledgers [%d, %d] over %d chunk(s)", ds.FirstLedger, ds.LastLedger, len(ds.Chunks))
+	logger.Infof("serving ledgers [%d, %d] over %d %s chunk(s)", ds.FirstLedger, ds.LastLedger, len(ds.Chunks), ds.Tier)
+	env.Settings["tier"] = ds.Tier
 	warnFixedReadRange(logger, ds, p, env.Settings)
 	env.Settings["format"] = p.Format
 	env.Settings["handlerConcurrency"] = strconv.Itoa(handlerConcurrency())

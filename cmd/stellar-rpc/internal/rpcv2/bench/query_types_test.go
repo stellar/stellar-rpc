@@ -50,8 +50,8 @@ func testPlan(format string) queryPlan {
 // timings, and stops with the context error once the context is done.
 func TestQueryRequests(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
-	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
-		HotRoot: hotRoot, Chunk: 0, Plan: testPlan(protocol.FormatBase64),
+	ds, release, err := openDataset(testLogger(), queryOptions{
+		DataDir: hotRoot, Plan: testPlan(protocol.FormatBase64),
 	})
 	require.NoError(t, err)
 	defer release()
@@ -91,8 +91,8 @@ func TestQueryRequests(t *testing.T) {
 // A txpage request returns at most --txpage-limit transactions.
 func TestTxPageRequestLimit(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
-	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
-		HotRoot: hotRoot, Chunk: 0, Plan: testPlan(protocol.FormatBase64),
+	ds, release, err := openDataset(testLogger(), queryOptions{
+		DataDir: hotRoot, Plan: testPlan(protocol.FormatBase64),
 	})
 	require.NoError(t, err)
 	defer release()
@@ -111,8 +111,8 @@ func TestTxPageRequestLimit(t *testing.T) {
 // last, and a txpage request reads no ledger past it.
 func TestHotDatasetSampleBoundsHandlers(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
-	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
-		HotRoot: hotRoot, Chunk: 0, SampleLedgers: 2, Plan: testPlan(protocol.FormatBase64),
+	ds, release, err := openDataset(testLogger(), queryOptions{
+		DataDir: hotRoot, SampleLedgers: 2, Plan: testPlan(protocol.FormatBase64),
 	})
 	require.NoError(t, err)
 	defer release()
@@ -136,8 +136,8 @@ func TestOpenHotDatasetSampleLedgers(t *testing.T) {
 	plan := queryPlan{Passphrase: network.PublicNetworkPassphrase}
 	committed := chunk.ID(0).FirstLedger() + 2*eventEvery - 1
 	for _, sample := range []uint32{2 * eventEvery, 2*eventEvery + 1} {
-		ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
-			HotRoot: hotRoot, Chunk: 0, SampleLedgers: sample, Plan: plan,
+		ds, release, err := openDataset(testLogger(), queryOptions{
+			DataDir: hotRoot, SampleLedgers: sample, Plan: plan,
 		})
 		require.NoError(t, err)
 		assert.Equal(t, committed, ds.LastLedger, "--sample-ledgers %d", sample)
@@ -168,8 +168,8 @@ func TestLedgersLimitWiderThanDataset(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
 	plan := testPlan(protocol.FormatBase64)
 	plan.Types = []string{queryTypeLedgers}
-	ds, release, err := openHotDataset(testLogger(), hotQueryOptions{
-		HotRoot: hotRoot, Chunk: 0, SampleLedgers: 5, Plan: plan,
+	ds, release, err := openDataset(testLogger(), queryOptions{
+		DataDir: hotRoot, SampleLedgers: 5, Plan: plan,
 	})
 	require.NoError(t, err)
 	defer release()

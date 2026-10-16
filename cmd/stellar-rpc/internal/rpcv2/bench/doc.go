@@ -7,10 +7,12 @@
 // backfill.RunBackfill, hot calls the production ingestion loop. Both report
 // their per-stage timings through the MetricSink and observability.Metrics
 // interfaces; a csvSink implements those interfaces, collects the signals, and
-// aggregates each run into percentile CSV reports.
+// aggregates each run into percentile CSV reports. Each dataset keeps its
+// catalog, so later runs can append chunks to it and bench query can open it.
 //
-// bench query measures read latency on the data that bench ingest wrote: cold
-// reads frozen artifacts, hot reads one hot chunk database. Each scenario runs
+// bench query measures read latency on the data that bench ingest wrote. It
+// opens the dataset the way daemon startup opens its data dir, and the catalog
+// tells whether the queried chunks are cold (frozen) or hot. Each scenario runs
 // one query type at one target rate. Each request calls the daemon's method
 // handler (rpcv2.ReadMethods) through the daemon's JSON-RPC bridge
 // (jsonrpc.NewBridge), in process, which runs one handler per CPU. An

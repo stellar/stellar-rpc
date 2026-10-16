@@ -186,53 +186,35 @@ func TestWarnFixedReadRange(t *testing.T) {
 }
 
 // A query command whose --out is not empty fails before it rewrites run.json
-// or opens the dataset: the datasets are empty, so reaching the run body would
-// fail with an error that names them.
-func TestQueryCommandsRefuseUsedOut(t *testing.T) {
-	coldRoot := t.TempDir()
-	hotRoot := t.TempDir()
-	require.NoError(t, os.MkdirAll(geometry.NewLayout(hotRoot).HotChunkPath(0), 0o755))
-	for _, tc := range []struct {
-		args  []string
-		input string
-	}{
-		{[]string{queryTierCold, "--start-chunk", "0", "--cold-dir", coldRoot}, coldRoot},
-		{[]string{queryTierHot, "--chunk", "0", "--hot-dir", hotRoot}, hotRoot},
-	} {
-		t.Run(tc.args[0], func(t *testing.T) {
-			requireRefusesUsedOut(t, newQueryCommand(), tc.args, tc.input)
-		})
-	}
+// or opens the dataset: the dataset's catalog is empty, so reaching the run
+// body would fail with an error that names it.
+func TestQueryCommandRefusesUsedOut(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(geometry.NewLayout(root).CatalogPath(), 0o755))
+	requireRefusesUsedOut(t, newQueryCommand(), []string{"--data-dir", root}, root)
 }
 
 // A bad flag or a wrong dataset path fails before the command creates --out.
 func TestQueryCommandsRejectBadInputsBeforeOut(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
-	hotRoot := t.TempDir()
+	noCatalog := t.TempDir()
 	for _, tc := range []struct {
 		name    string
 		args    []string
 		wantErr string
 	}{
+		{"bad --types", []string{"--data-dir", t.TempDir(), "--types", "bogus"}, "bogus"},
+		{"missing --data-dir", []string{"--data-dir", missing}, "--data-dir: stat " + missing},
 		{
-			"bad --types",
-			[]string{queryTierCold, "--start-chunk", "0", "--cold-dir", t.TempDir(), "--types", "bogus"},
-			"bogus",
+			"no catalog",
+			[]string{"--data-dir", noCatalog},
+			"--data-dir " + noCatalog + " has no dataset catalog at " + geometry.NewLayout(noCatalog).CatalogPath() +
+				": ingest it with this version's bench ingest",
 		},
 		{
-			"missing --cold-dir",
-			[]string{queryTierCold, "--start-chunk", "0", "--cold-dir", missing},
-			"--cold-dir: stat " + missing,
-		},
-		{
-			"missing --hot-dir",
-			[]string{queryTierHot, "--chunk", "0", "--hot-dir", missing},
-			"--hot-dir: stat " + missing,
-		},
-		{
-			"no chunk database",
-			[]string{queryTierHot, "--chunk", "0", "--hot-dir", hotRoot},
-			"hot database for chunk " + chunk.ID(0).String(),
+			"--start-chunk past maxChunkID",
+			[]string{"--data-dir", noCatalog, "--start-chunk", strconv.FormatUint(uint64(maxChunkID)+1, 10)},
+			"past the last valid chunk ID",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -263,7 +245,7 @@ func runQueryCommand(t *testing.T, args ...string) (runRecord, []map[string]stri
 	var record runRecord
 	require.NoError(t, json.Unmarshal(data, &record))
 	assert.Equal(t, runStatusOK, record.Status)
-	assert.Equal(t, "bench query "+args[0], record.Command)
+	assert.Equal(t, "bench query", record.Command)
 	assert.Positive(t, record.SetupNs["storeOpen"])
 	assert.FileExists(t, filepath.Join(out, queryLatencyFile))
 	_, rows := readCSVTable(t, filepath.Join(out, queryScenariosFile))
@@ -274,13 +256,14 @@ func runQueryCommand(t *testing.T, args ...string) (runRecord, []map[string]stri
 // concurrency.
 func TestQueryHotCommandRecordsRun(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
-	record, rows := runQueryCommand(t, queryTierHot, "--chunk", "0", "--hot-dir", hotRoot,
+	record, rows := runQueryCommand(t, "--data-dir", hotRoot,
 		"--types", queryTypeLedgers, "--target-rps", "1000", "--duration", "20ms", "--format", protocol.FormatJSON)
 	require.Len(t, rows, 1)
 	assert.Equal(t, queryTypeLedgers, rows[0]["query_type"])
 	assert.Equal(t, "20", rows[0]["planned"])
 	assert.NotContains(t, record.Settings, "fixedReadRange")
 	assert.Equal(t, protocol.FormatJSON, record.Settings["format"])
+	assert.Equal(t, tierHot, record.Settings["tier"])
 	assert.Equal(t, strconv.Itoa(runtime.NumCPU()), record.Settings["handlerConcurrency"])
 }
 
@@ -288,7 +271,7 @@ func TestQueryHotCommandRecordsRun(t *testing.T) {
 // settings.fixedReadRange in run.json.
 func TestQueryHotCommandRecordsFixedReadRange(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
-	record, _ := runQueryCommand(t, queryTierHot, "--chunk", "0", "--hot-dir", hotRoot, "--sample-ledgers", "10",
+	record, _ := runQueryCommand(t, "--data-dir", hotRoot, "--sample-ledgers", "10",
 		"--types", queryTypeLedgers, "--ledgers-limit", "10", "--target-rps", "1000", "--duration", "10ms")
 	assert.Equal(t, queryTypeLedgers, record.Settings["fixedReadRange"])
 }
@@ -310,12 +293,14 @@ func ingestColdChunk(t *testing.T) string {
 	return coldRoot
 }
 
-// A cold run records the store open time and adds one row per scenario.
+// A cold run records the store open time and the tier, and adds one row per
+// scenario.
 func TestQueryColdCommandRecordsRun(t *testing.T) {
 	coldRoot := ingestColdChunk(t)
-	_, rows := runQueryCommand(t, queryTierCold, "--start-chunk", "0", "--cold-dir", coldRoot,
+	record, rows := runQueryCommand(t, "--data-dir", coldRoot,
 		"--types", queryTypeLedgers+","+queryTypeTxPage, "--target-rps", "1000,2000", "--duration", "10ms")
 	require.Len(t, rows, 4)
+	assert.Equal(t, tierCold, record.Settings["tier"])
 }
 
 // A run that fails after a scenario is added still writes that scenario's
@@ -333,7 +318,7 @@ func TestQueryBenchWritesPartialReport(t *testing.T) {
 		Seed:         defaultSeed,
 	}
 	open := func() (*queryDataset, func(), error) {
-		return openHotDataset(testLogger(), hotQueryOptions{HotRoot: hotRoot, Chunk: 0, Plan: plan})
+		return openDataset(testLogger(), queryOptions{DataDir: hotRoot, Plan: plan})
 	}
 	logger, output := capturingLogger()
 	err := runQueryBench(context.Background(), logger, env, plan, open)

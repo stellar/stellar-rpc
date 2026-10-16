@@ -36,6 +36,9 @@ type queryDataset struct {
 	// signed under.
 	Passphrase string
 
+	// Tier is the tier of every benchmarked chunk: tierCold or tierHot.
+	Tier string
+
 	// Chunks is the benchmarked chunk range, ascending.
 	Chunks []chunk.ID
 
@@ -75,12 +78,12 @@ func (ds *queryDataset) verifyServes() error {
 	return nil
 }
 
-// chunkRange returns the ascending chunk IDs in [start, start+num). The caller
-// must ensure num >= 1 and start+num-1 <= maxChunkID.
-func chunkRange(start chunk.ID, num int) []chunk.ID {
-	chunks := make([]chunk.ID, 0, num)
-	for i := range uint32(num) { //nolint:gosec // num >= 1, bounded by validate()
-		chunks = append(chunks, start+chunk.ID(i))
+// chunkRange returns the ascending chunk IDs in [start, end]. The caller must
+// ensure start <= end.
+func chunkRange(start, end chunk.ID) []chunk.ID {
+	chunks := make([]chunk.ID, 0, end-start+1)
+	for c := start; c <= end; c++ {
+		chunks = append(chunks, c)
 	}
 	return chunks
 }
