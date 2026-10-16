@@ -44,9 +44,9 @@ func maxTxPageLimit() uint {
 func handlerConcurrency() int { return runtime.NumCPU() }
 
 // readServer serves the daemon's read methods through the daemon's JSON-RPC
-// bridge, in process and without HTTP. A call's latency covers the wait for a
-// handler slot, the handler and the response write; its handler time covers
-// the handler alone, read view included.
+// bridge, in process and without HTTP. A call's latency covers the bridge's
+// request parse, the wait for a handler slot, the handler and the response
+// write; its handler time covers the handler alone, read view included.
 type readServer struct {
 	bridge jsonrpc.Bridge
 }

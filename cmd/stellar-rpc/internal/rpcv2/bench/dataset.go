@@ -58,12 +58,15 @@ func datasetTier(cat *catalog.Catalog) (string, error) {
 	return "", nil
 }
 
+// unfinishedHint ends the errors for a dataset an earlier ingest left
+// unfinished.
+const unfinishedHint = "an earlier ingest into it did not finish; delete the dataset directory and ingest again"
+
 // prepareIngest readies cat for an ingest of tier over chunks [start, end] and
-// returns the dataset's first chunk. A new dataset pins start's first ledger as
-// its earliest ledger, as the daemon pins earliest_ledger on first start. An
-// existing dataset must be of the same tier and the range must start right
-// after its last committed ledger; the dataset's empty live chunk at start is
-// then discarded so the ingest can write that chunk.
+// returns the dataset's first chunk. An existing dataset must be of the same
+// tier and the range must start right after its last committed ledger; the
+// dataset's empty live chunk at start is then discarded so the ingest can
+// write that chunk.
 func prepareIngest(cat *catalog.Catalog, tier string, start, end chunk.ID) (chunk.ID, error) {
 	held, err := datasetTier(cat)
 	if err != nil {
@@ -78,10 +81,7 @@ func prepareIngest(cat *catalog.Catalog, tier string, start, end chunk.ID) (chun
 	}
 	if !pinned {
 		if held != "" {
-			return 0, errors.New("the dataset holds chunks but no earliest ledger; ingest into a new directory")
-		}
-		if err := cat.PinEarliestLedger(start.FirstLedger()); err != nil {
-			return 0, fmt.Errorf("pin the dataset's earliest ledger: %w", err)
+			return 0, errors.New("the dataset holds chunks but no earliest ledger: " + unfinishedHint)
 		}
 		return start, nil
 	}
@@ -122,7 +122,8 @@ func checkAppend(cat *catalog.Catalog, earliest uint32, start, end chunk.ID) err
 	}
 	for _, ref := range refs {
 		if ref.Chunk >= start && ref.Chunk <= end {
-			return fmt.Errorf("the dataset already holds a %s %s artifact for chunk %s", ref.State, ref.Kind, ref.Chunk)
+			return fmt.Errorf("the dataset already holds a %s %s artifact for chunk %s: %s",
+				ref.State, ref.Kind, ref.Chunk, unfinishedHint)
 		}
 	}
 	hot, err := cat.HotChunkKeys()
@@ -131,7 +132,7 @@ func checkAppend(cat *catalog.Catalog, earliest uint32, start, end chunk.ID) err
 	}
 	for _, c := range hot {
 		if c > start && c <= end {
-			return fmt.Errorf("the dataset already holds hot chunk %s", c)
+			return fmt.Errorf("the dataset already holds hot chunk %s: %s", c, unfinishedHint)
 		}
 	}
 	return nil
@@ -153,13 +154,21 @@ func discardLiveChunk(cat *catalog.Catalog, c chunk.ID) error {
 	return nil
 }
 
-// openServingOnce opens and closes the dataset's read registry the way bench
-// query and daemon startup open it. It creates the dataset's empty live chunk
-// when the dataset has none, so a later bench query writes nothing.
-func openServingOnce(cat *catalog.Catalog, logger *supportlog.Entry) error {
-	earliest, _, err := cat.EarliestLedger()
+// finishIngest completes a successful ingest whose dataset starts at first. A
+// new dataset pins first's first ledger as its earliest ledger, as the daemon
+// pins earliest_ledger on first start. The dataset's read registry is then
+// opened and closed the way bench query and daemon startup open it, which
+// creates the empty live chunk, so a later bench query writes nothing.
+func finishIngest(cat *catalog.Catalog, first chunk.ID, logger *supportlog.Entry) error {
+	earliest, pinned, err := cat.EarliestLedger()
 	if err != nil {
 		return err
+	}
+	if !pinned {
+		earliest = first.FirstLedger()
+		if err := cat.PinEarliestLedger(earliest); err != nil {
+			return fmt.Errorf("pin the dataset's earliest ledger: %w", err)
+		}
 	}
 	last, err := rpcv2.LastCommittedLedger(cat)
 	if err != nil {

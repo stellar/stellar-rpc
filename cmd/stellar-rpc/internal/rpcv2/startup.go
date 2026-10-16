@@ -84,22 +84,10 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// the live chunk's next un-committed ledger.
 	resumeLedger := lastCommitted + 1
 
-	// Open the resume chunk's hot DB and the serving registry BEFORE serving
-	// reads, so a broken hot tier (a "ready" key whose DB won't open) fails
-	// startup instead of serving behind a crash-looping ingestion loop. run()
-	// owns the DB close only until the loop takes over: loopOwnsDB flips true at
-	// the errgroup launch, after which the loop's deferred close owns it (and
-	// g.Wait joins before run returns, so there is no window where neither owns
-	// it). Restarts re-enter run() from the top, so this stays the single
-	// initial-open site; the loop still reopens at each boundary.
-	//
-	// The registry is serving-ready (ready handles published, the live chunk's
-	// handle and latest ledger seeded, both window edges' close times stamped),
-	// so a read view acquired before the first commit is correct. The ingestion
-	// loop advances the latest ledger and publishes handles from here, the
-	// freeze reads through them (HotHandle), and the lifecycle retires them at
-	// discard. Constructed per run — no query survives a restart; ServeReads
-	// below serves this run's reads from it.
+	// Open the resume chunk's hot DB and the serving registry before serving
+	// reads, so a broken hot tier fails startup. run() closes the DB only until
+	// loopOwnsDB flips at the errgroup launch; the loop's deferred close owns it
+	// from then on.
 	registry, hotDB, err := OpenServing(cat, cfg.Retention, lastCommitted, logger)
 	if err != nil {
 		return fmt.Errorf("startup %w", err)

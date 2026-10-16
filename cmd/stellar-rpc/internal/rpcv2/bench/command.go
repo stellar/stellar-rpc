@@ -231,6 +231,7 @@ func newColdCommand() *cobra.Command {
 		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			o := opts()
 			o.OutDir = env.OutDir
+			o.Settings = env.Settings
 			return runCold(ctx, logger, o)
 		})
 	src.bind(cmd)

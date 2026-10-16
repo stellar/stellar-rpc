@@ -138,3 +138,18 @@ func TestOpenDatasetBounds(t *testing.T) {
 	require.ErrorContains(t, err, "must be between the oldest ledger: "+
 		strconv.FormatUint(uint64(chunk.ID(1).FirstLedger()), 10), "a ledger below --start-chunk is outside the served range")
 }
+
+// A dataset without its live chunk is refused, so bench query creates nothing
+// in it.
+func TestOpenDatasetRequiresLiveChunk(t *testing.T) {
+	coldRoot := ingestColdChunk(t)
+	cat := reopenCatalog(t, coldRoot)
+	require.NoError(t, discardLiveChunk(cat, 1))
+	require.NoError(t, cat.Close())
+	hotRoot := geometry.NewLayout(coldRoot).HotRoot()
+	before := dirNames(t, hotRoot)
+
+	_, _, err := openDataset(testLogger(), queryOptions{DataDir: coldRoot, Plan: testPlan(protocol.FormatBase64)})
+	require.ErrorContains(t, err, "the dataset has no live chunk "+chunk.ID(1).String()+": "+unfinishedHint)
+	assert.Equal(t, before, dirNames(t, hotRoot))
+}

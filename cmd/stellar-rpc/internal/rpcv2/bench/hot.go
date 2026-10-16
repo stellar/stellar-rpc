@@ -74,17 +74,10 @@ func (o hotOptions) validate() error {
 	return nil
 }
 
-// runHot benchmarks the hot path: the daemon's ingestion loop (via
-// rpcv2.RunBoundedIngestionLoop) over the range's ledgers, into fresh hot DBs
-// in the dataset under HotRoot, which keeps its catalog. A no-op boundary
-// keeps completed chunks hot so no cold-path freeze runs, isolating the hot
-// measurement. The sink collects the loop's per-phase HotPhase timings; on
-// success runHot opens the dataset for reads once, records the whole-run
-// wall-clock and writes the CSV report.
-//
-// With --close-interval (opts.CloseInterval) set, the source is paced to that
-// close cadence: the run measures steady-state keep-up rather than catch-up
-// throughput, recording per-ledger pace_lag.
+// runHot times the daemon's ingestion loop over the range's ledgers into new
+// hot databases in the dataset under HotRoot, with no freeze, and writes the
+// CSV report. With CloseInterval set it measures keep-up at that close cadence
+// and records pace_lag.
 func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) error {
 	if err := opts.validate(); err != nil {
 		return err
@@ -115,7 +108,8 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		last = first + opts.NumLedgers - 1
 	}
 
-	if _, err := prepareIngest(cat, tierHot, opts.StartChunk, chunk.IDFromLedger(last)); err != nil {
+	datasetFirst, err := prepareIngest(cat, tierHot, opts.StartChunk, chunk.IDFromLedger(last))
+	if err != nil {
 		return fmt.Errorf("--hot-dir %s: %w", opts.HotRoot, err)
 	}
 
@@ -143,16 +137,13 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		return err
 	}
 	sink.observe(fileDriver, driverRunWall, time.Since(start), int(last-first+1))
-	if err := openServingOnce(cat, logger); err != nil {
-		return err
-	}
 	sink.logSummary(logger)
 	written, err := sink.writeCSVs(opts.OutDir)
 	if err != nil {
 		return err
 	}
 	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)
-	return nil
+	return finishIngest(cat, datasetFirst, logger)
 }
 
 // buildHotStream wraps backend for a bounded hot run. With closeInterval == 0

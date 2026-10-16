@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -45,6 +46,9 @@ type coldOptions struct {
 
 	// OutDir receives the CSV report.
 	OutDir string
+
+	// Settings receives the run settings that go into run.json; nil skips them.
+	Settings map[string]string
 }
 
 // validate checks the flags and chunk range before runCold touches the
@@ -79,13 +83,8 @@ func (o coldOptions) validate() error {
 	return nil
 }
 
-// runCold benchmarks the cold path: one backfill.RunBackfill over the
-// requested chunk range into the dataset under ColdRoot, which keeps its
-// catalog. As the backfill runs, the sink collects its per-stage MetricSink
-// timings and the scheduler's observability metrics. On success runCold opens
-// the dataset for reads once, which creates its empty live chunk, writes the
-// CSV report and logs a summary, including the effective chunk concurrency for
-// multi-chunk runs.
+// runCold times the daemon's backfill of the requested chunk range into the
+// dataset under ColdRoot and writes the CSV report.
 func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) error {
 	if err := opts.validate(); err != nil {
 		return err
@@ -116,11 +115,15 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	}
 	defer release()
 
+	// An append backfills from the dataset's first chunk, as the daemon does
+	// from its retention floor: frozen chunks are skipped and the tx-hash index
+	// is rebuilt over every chunk, so its timings differ from a fresh run's.
+	if opts.Settings != nil {
+		opts.Settings["datasetFirstChunk"] = strconv.FormatUint(uint64(first), 10)
+		opts.Settings["append"] = strconv.FormatBool(first < opts.StartChunk)
+	}
 	sink := newCSVSink()
 	start := time.Now()
-	// The range starts at the dataset's first chunk, as the daemon's starts at
-	// the retention floor: frozen chunks are skipped, and an append extends the
-	// tx-hash index over every chunk instead of replacing it.
 	err = backfill.RunBackfill(ctx, backfill.ExecConfig{
 		Catalog: cat,
 		Logger:  logger,
@@ -136,9 +139,6 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		return fmt.Errorf("backfill [%s,%s]: %w", first, end, err)
 	}
 	totalWall := time.Since(start)
-	if err := openServingOnce(cat, logger); err != nil {
-		return err
-	}
 
 	sink.logSummary(logger)
 	logColdWall(logger, sink, opts.NumChunks, totalWall)
@@ -147,7 +147,7 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		return err
 	}
 	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)
-	return nil
+	return finishIngest(cat, first, logger)
 }
 
 // logColdWall logs the run's total wall-clock and, for multi-chunk runs, the

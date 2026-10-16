@@ -9,23 +9,28 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 )
 
 // ingestCold runs bench ingest cold over one chunk of the source packs under
-// packDir into coldRoot.
-func ingestCold(t *testing.T, packDir, coldRoot string, c chunk.ID) error {
+// packDir into coldRoot and returns the run settings it recorded.
+func ingestCold(t *testing.T, packDir, coldRoot string, c chunk.ID) (map[string]string, error) {
 	t.Helper()
-	return runCold(context.Background(), testLogger(), coldOptions{
+	settings := map[string]string{}
+	err := runCold(context.Background(), testLogger(), coldOptions{
 		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
 		StartChunk: c,
 		NumChunks:  1,
 		Workers:    1,
 		ColdRoot:   coldRoot,
 		OutDir:     filepath.Join(t.TempDir(), "csv"),
+		Settings:   settings,
 	})
+	return settings, err
 }
 
 // reopenCatalog opens the dataset catalog under root for a test to inspect.
@@ -47,9 +52,13 @@ func TestColdIngestKeepsAndAppendsCatalog(t *testing.T) {
 	coldRoot := t.TempDir()
 	layout := geometry.NewLayout(coldRoot)
 
-	require.NoError(t, ingestCold(t, packDir, coldRoot, 0))
+	settings, err := ingestCold(t, packDir, coldRoot, 0)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"datasetFirstChunk": "0", "append": "false"}, settings)
 	require.DirExists(t, layout.HotChunkPath(1), "the live chunk")
-	require.NoError(t, ingestCold(t, packDir, coldRoot, 1))
+	settings, err = ingestCold(t, packDir, coldRoot, 1)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"datasetFirstChunk": "0", "append": "true"}, settings)
 	require.NoDirExists(t, layout.HotChunkPath(1), "the append discards the old live chunk")
 	require.DirExists(t, layout.HotChunkPath(2), "the new live chunk")
 
@@ -112,10 +121,9 @@ func TestPrepareIngest(t *testing.T) {
 		first, err := prepareIngest(cat, tierCold, 3, 4)
 		require.NoError(t, err)
 		assert.Equal(t, chunk.ID(3), first)
-		earliest, pinned, err := cat.EarliestLedger()
+		_, pinned, err := cat.EarliestLedger()
 		require.NoError(t, err)
-		assert.True(t, pinned)
-		assert.Equal(t, chunk.ID(3).FirstLedger(), earliest)
+		assert.False(t, pinned, "only a finished ingest pins the dataset")
 	})
 	t.Run("append", func(t *testing.T) {
 		first, err := prepareIngest(coldDataset(t), tierCold, 1, 1)
@@ -144,7 +152,8 @@ func TestPrepareIngest(t *testing.T) {
 		cat := coldDataset(t)
 		require.NoError(t, cat.MarkChunkFreezing(2, geometry.KindLedgers))
 		_, err := prepareIngest(cat, tierCold, 1, 2)
-		require.ErrorContains(t, err, "already holds a freezing ledgers artifact for chunk "+chunk.ID(2).String())
+		require.ErrorContains(t, err, "already holds a freezing ledgers artifact for chunk "+chunk.ID(2).String()+
+			": "+unfinishedHint)
 	})
 	t.Run("below the pin", func(t *testing.T) {
 		cat := testCatalog(t)
@@ -156,6 +165,57 @@ func TestPrepareIngest(t *testing.T) {
 		cat := testCatalog(t)
 		freezeKeys(t, cat, 0, geometry.KindLedgers)
 		_, err := prepareIngest(cat, tierCold, 1, 1)
-		require.ErrorContains(t, err, "holds chunks but no earliest ledger")
+		require.ErrorContains(t, err, "holds chunks but no earliest ledger: "+unfinishedHint)
 	})
+}
+
+// A first ingest that fails before it writes a chunk leaves the dataset
+// unpinned, so the next ingest into the same directory starts it afresh.
+func TestFailedFirstIngestLeavesDirectoryReusable(t *testing.T) {
+	packDir, _ := writeSourcePack(t, t.TempDir(), 0, chunk.LedgersPerChunk)
+	coldRoot := t.TempDir()
+	// An unknown datastore type fails the source open, which runs before the
+	// backfill writes any chunk key.
+	err := runCold(context.Background(), testLogger(), coldOptions{
+		Source:     sourceConfig{Kind: sourceBSB, BucketPath: "unused", DatastoreType: "unknown"},
+		StartChunk: 0, NumChunks: 1, Workers: 1,
+		ColdRoot: coldRoot, OutDir: filepath.Join(t.TempDir(), "csv"),
+	})
+	require.ErrorContains(t, err, "open BSB backend")
+	cat := reopenCatalog(t, coldRoot)
+	_, pinned, err := cat.EarliestLedger()
+	require.NoError(t, err)
+	assert.False(t, pinned)
+	tier, err := datasetTier(cat)
+	require.NoError(t, err)
+	assert.Empty(t, tier, "no chunk key was written")
+	require.NoError(t, cat.Close())
+
+	_, err = ingestCold(t, packDir, coldRoot, 0)
+	require.NoError(t, err)
+}
+
+// A hot append after a dataset that ends on a chunk's last ledger replaces the
+// empty live chunk, and bench query serves both chunks hot.
+func TestHotAppendAfterChunkBoundary(t *testing.T) {
+	srcRoot := t.TempDir()
+	packDir, _ := writeSourcePack(t, srcRoot, 0, chunk.LedgersPerChunk)
+	_, _ = writeSourcePack(t, srcRoot, 1, 10)
+	hotRoot := t.TempDir()
+	ingest := func(c chunk.ID, n uint32) error {
+		return runHot(context.Background(), testLogger(), hotOptions{
+			Source: sourceConfig{Kind: sourcePack, PackDir: packDir}, StartChunk: c, NumChunks: 1, NumLedgers: n,
+			HotRoot: hotRoot, OutDir: filepath.Join(t.TempDir(), "csv"),
+		})
+	}
+	require.NoError(t, ingest(0, chunk.LedgersPerChunk))
+	require.DirExists(t, geometry.NewLayout(hotRoot).HotChunkPath(1), "the empty live chunk")
+	require.NoError(t, ingest(1, 10))
+
+	ds, release, err := openDataset(testLogger(), queryOptions{DataDir: hotRoot, Plan: testPlan(protocol.FormatBase64)})
+	require.NoError(t, err)
+	defer release()
+	assert.Equal(t, tierHot, ds.Tier)
+	assert.Equal(t, []chunk.ID{0, 1}, ds.Chunks)
+	assert.Equal(t, chunk.ID(1).FirstLedger()+9, ds.LastLedger)
 }

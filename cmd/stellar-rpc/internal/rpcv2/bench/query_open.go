@@ -131,6 +131,9 @@ func openDataset(logger *supportlog.Entry, opts queryOptions) (*queryDataset, fu
 		return nil, nil, err
 	}
 	floor, last, err := servedBounds(cat, opts)
+	if err == nil {
+		err = requireLiveChunk(cat, last)
+	}
 	if err != nil {
 		_ = cat.Close()
 		return nil, nil, err
@@ -202,6 +205,20 @@ func servedBounds(cat *catalog.Catalog, opts queryOptions) (chunk.ID, uint32, er
 		return 0, 0, fmt.Errorf("the dataset ends at ledger %d, before chunk %s", last, floor)
 	}
 	return floor, last, nil
+}
+
+// requireLiveChunk checks that the dataset ending at last has its live chunk,
+// so opening it for reads creates nothing in the dataset.
+func requireLiveChunk(cat *catalog.Catalog, last uint32) error {
+	live := chunk.IDFromLedger(last + 1)
+	state, err := cat.HotState(live)
+	if err != nil {
+		return fmt.Errorf("read the dataset's live chunk %s: %w", live, err)
+	}
+	if state != geometry.HotReady {
+		return fmt.Errorf("the dataset has no live chunk %s: %s", live, unfinishedHint)
+	}
+	return nil
 }
 
 // sampleEnd returns the last served ledger: last, or the sample-th ledger
