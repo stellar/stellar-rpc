@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
-# Build libzstd 1.5.7 from source (shared lib) and install to PREFIX
-# (default /usr/local). From source on macOS so it can target a cross-compile
-# arch via MACOS_ARCH (e.g. "x86_64"), which brew can't do.
+# Build libzstd 1.5.7 from source as a static archive and install it to PREFIX
+# (default /usr/local). Static so the stellar-rpc binary carries it and the
+# Debian package stays a single file. From source on macOS so it can target a
+# cross-compile arch via MACOS_ARCH (e.g. "x86_64"), which brew can't do.
 #
 #   PREFIX=$HOME/.zstd ./scripts/install-zstd.sh
 #
@@ -10,6 +11,16 @@ set -euo pipefail
 
 ZSTD_VERSION=1.5.7
 PREFIX="${PREFIX:-/usr/local}"
+
+# apt-get as root where there is no sudo (the quickstart builder image), with
+# sudo everywhere else.
+apt_install() {
+  if [ "$(id -u)" = 0 ]; then
+    apt-get update -qq && apt-get install -y -qq "$@"
+  else
+    sudo apt-get update -qq && sudo apt-get install -y -qq "$@"
+  fi
+}
 
 # Per-OS: parallel jobs, cmake/ninja install, cross arch flag.
 ARCH_FLAG=""
@@ -22,14 +33,16 @@ case "$(uname -s)" in
     if [ -n "${MACOS_ARCH:-}" ]; then
       ARCH_FLAG="-DCMAKE_OSX_ARCHITECTURES=$MACOS_ARCH"
     fi
+    # Same floor as the Makefile's -mmacosx-version-min, so the archive and
+    # the Go link agree on the deployment target.
+    ARCH_FLAG="$ARCH_FLAG -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
     ;;
   Linux)
     JOBS="$(nproc)"
     # Bare-machine fallback; CI runners and the Docker image already ship
     # cmake/ninja, so this is skipped there.
     if command -v apt-get &>/dev/null && { ! command -v cmake &>/dev/null || ! command -v ninja &>/dev/null; }; then
-      sudo apt-get update -qq
-      sudo apt-get install -y -qq cmake ninja-build
+      apt_install cmake ninja-build
     fi
     ;;
   *)
@@ -51,10 +64,15 @@ cmake -S "$WORKDIR/zstd-${ZSTD_VERSION}/build/cmake" -B "$WORKDIR/build" \
   -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-  -DZSTD_BUILD_SHARED=ON \
-  -DZSTD_BUILD_STATIC=OFF \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DZSTD_BUILD_SHARED=OFF \
+  -DZSTD_BUILD_STATIC=ON \
   -DZSTD_BUILD_PROGRAMS=OFF \
   $ARCH_FLAG
 
 ninja -C "$WORKDIR/build" -j"$JOBS"
 ninja -C "$WORKDIR/build" install
+
+# A shared library left by an older install would win over the archive at
+# link time, and the binary would load it at run time.
+rm -f "$PREFIX"/lib/libzstd*.so* "$PREFIX"/lib/libzstd*.dylib
