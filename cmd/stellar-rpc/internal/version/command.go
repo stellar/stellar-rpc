@@ -8,9 +8,9 @@ import (
 	goxdr "github.com/stellar/go-stellar-sdk/xdr"
 )
 
-// NewCommand returns the `version` subcommand shared by both the stellar-rpc
-// and stellar-rpc-v2 binaries. Both intentionally print the same literal
-// "stellar-rpc" name string, so their outputs stay byte-identical.
+// NewCommand returns the `version` subcommand shared by both modes of the
+// stellar-rpc binary. The lines below are the same in both modes; the cli
+// appends one line that names the active mode.
 func NewCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",

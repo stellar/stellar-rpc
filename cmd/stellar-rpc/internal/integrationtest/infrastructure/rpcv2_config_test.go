@@ -16,7 +16,7 @@ import (
 // without the copy following it.
 func TestRPCv2ConfigParsesStrict(t *testing.T) {
 	testCfg := decodeConfigFile(t, filepath.Join("docker", rpcv2ConfigFilename))
-	sampleCfg := decodeConfigFile(t, filepath.Join("..", "..", "..", "rpcv2", "rpc-v2-sample-config.toml"))
+	sampleCfg := decodeConfigFile(t, filepath.Join("..", "..", "rpcv2", "config", "rpc-v2-sample-config.toml"))
 
 	sampleCfg.Backfill.DataStore = config.DataStoreConfig{}
 	enableDebug := true

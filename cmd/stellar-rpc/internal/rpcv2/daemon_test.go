@@ -840,10 +840,10 @@ history_archive_urls = [%q]
 }
 
 func TestNewLogger(t *testing.T) {
-	l, err := newLogger(config.LoggingConfig{Level: "warn", Format: "json"})
+	l, err := NewLogger(config.LoggingConfig{Level: "warn", Format: "json"})
 	require.NoError(t, err)
 	require.NotNil(t, l)
 
-	_, err = newLogger(config.LoggingConfig{Level: "bogus", Format: "text"})
+	_, err = NewLogger(config.LoggingConfig{Level: "bogus", Format: "text"})
 	require.Error(t, err)
 }

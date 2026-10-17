@@ -1,9 +1,9 @@
 # =============================================================================
-# stellar-rpc-v2 sample configuration
+# stellar-rpc rpcv2 sample configuration
 # =============================================================================
 #
-#   stellar-rpc-v2 --config rpc-v2.toml
-#   stellar-rpc-v2 --config rpc-v2.toml --print-runtime-config
+#   stellar-rpc --enable-rpcv2 --config-path rpc-v2.toml
+#   stellar-rpc --enable-rpcv2 --config-path rpc-v2.toml --print-runtime-config
 #
 # The second form prints the resolved configuration (this file, then flags,
 # then defaults) and exits.
@@ -11,8 +11,9 @@
 # Unknown keys are a startup error.
 #
 # Every key can also be set with a flag named after its TOML path, such as
-# --service.methods.getLedgers.queue_limit=500. There are no environment
-# variables. A flag overrides this file, but a more specific setting always
+# --service.methods.getLedgers.queue_limit=500. rpcv2 reads two environment
+# variables, STELLAR_RPC_ENABLE_RPCV2 and STELLAR_RPC_CONFIG_PATH, and no
+# other. A flag overrides this file, but a more specific setting always
 # wins: --service.methods.queue_limit does not override a queue_limit set in a
 # method's own table. A map flag such as
 # --backfill.datastore.params=region=us-east-1 sets one entry, and a list flag

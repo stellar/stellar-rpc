@@ -35,9 +35,11 @@ linters:
             - "**/cmd/stellar-rpc/internal/**"
             - "!**/cmd/stellar-rpc/internal/rpcv1/**"
             - "!**/cmd/stellar-rpc/internal/rpcv2/**"
-            # The integration-test harness boots either daemon, so it is the one
-            # shared package allowed to import both trees.
+            # The integration-test harness boots either daemon, and the cli
+            # package is the binary's entry that dispatches to either daemon,
+            # so these two shared packages may import both trees.
             - "!**/cmd/stellar-rpc/internal/integrationtest/**"
+            - "!**/cmd/stellar-rpc/internal/cli/**"
             - "!$test"
           deny:
             - pkg: github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1

@@ -1,4 +1,4 @@
-# Integration-test copy of cmd/stellar-rpc/rpcv2/rpc-v2-sample-config.toml with
+# Integration-test copy of cmd/stellar-rpc/internal/rpcv2/config/rpc-v2-sample-config.toml with
 # the comments stripped. Values differ from the sample in three places: no
 # [backfill.datastore*] tables, enable_debug = true, level = "debug". Per-test
 # values (ports, paths, archive URL) arrive as flag overrides from

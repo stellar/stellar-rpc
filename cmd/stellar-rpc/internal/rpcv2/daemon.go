@@ -54,6 +54,10 @@ type Options struct {
 	// Flags carries overrides registered by config.BindFlags; nil = none.
 	Flags config.FlagOverrides
 
+	// Config, when set, is the already loaded config. The daemon then does not
+	// read configPath again. nil loads it from configPath with Flags applied.
+	Config *config.Config
+
 	// OnListen, when set, is called once with the addresses the read server
 	// and the admin server bound. admin is nil when [service].admin_endpoint
 	// is empty. A caller that configured port 0 learns the chosen ports here.
@@ -67,7 +71,9 @@ func RunDaemonWithOptions(ctx context.Context, configPath string, opts Options) 
 	// sampling, core wiring) — runs on the signal-derived ctx, so a drain that
 	// lands mid-startup unwinds with ctx-shaped errors. Classify those as the
 	// clean shutdown they are; a nonzero exit must keep meaning failure.
-	err := runDaemonWith(ctx, configPath, daemonOptions{Logger: opts.Logger, Flags: opts.Flags, OnListen: opts.OnListen})
+	err := runDaemonWith(ctx, configPath, daemonOptions{
+		Logger: opts.Logger, Flags: opts.Flags, Config: opts.Config, OnListen: opts.OnListen,
+	})
 	if ctx.Err() == nil {
 		return err
 	}
@@ -111,6 +117,9 @@ type daemonOptions struct {
 	// Flags carries the CLI overrides registered by config.BindFlags; nil = none.
 	Flags config.FlagOverrides
 
+	// Config is the already loaded config (see Options.Config); nil ⇒ loaded from configPath.
+	Config *config.Config
+
 	// OnListen is called once both HTTP listeners are bound (see Options.OnListen); nil = nobody asked.
 	OnListen func(rpc, admin net.Addr)
 
@@ -130,7 +139,7 @@ type daemonOptions struct {
 //nolint:cyclop,funlen // linear startup sequence; each branch is one wiring step
 func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) error {
 	// --- Load + form-validate the config. ---
-	cfg, err := config.LoadConfigWithFlags(configPath, opts.Flags)
+	cfg, err := loadConfig(configPath, opts)
 	if err != nil {
 		return err
 	}
@@ -145,7 +154,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 
 	logger := opts.Logger
 	if logger == nil {
-		logger, err = newLogger(cfg.Logging)
+		logger, err = NewLogger(cfg.Logging)
 		if err != nil {
 			return err
 		}
@@ -742,8 +751,18 @@ func newArchivePool(ctx context.Context, urls []string, logger *supportlog.Entry
 	return pool, nil
 }
 
-// newLogger builds a daemon logger from the [logging] config.
-func newLogger(cfg config.LoggingConfig) (*supportlog.Entry, error) {
+// loadConfig returns opts.Config when the caller already loaded the file, so
+// the file is read once per process; otherwise it loads configPath.
+func loadConfig(configPath string, opts daemonOptions) (config.Config, error) {
+	if opts.Config != nil {
+		return *opts.Config, nil
+	}
+	return config.LoadConfigWithFlags(configPath, opts.Flags)
+}
+
+// NewLogger builds a daemon logger from the [logging] config. The cli builds
+// it before the daemon starts so its own startup lines use the same logger.
+func NewLogger(cfg config.LoggingConfig) (*supportlog.Entry, error) {
 	level, err := logrus.ParseLevel(cfg.Level)
 	if err != nil {
 		return nil, fmt.Errorf("invalid logging.level %q: %w", cfg.Level, err)
