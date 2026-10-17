@@ -7,7 +7,8 @@ typedef struct {
 
 conversion_result_t* xdr_to_json(
     const char* const typename,
-    xdr_t xdr
+    xdr_t xdr,
+    size_t max_len
 );
 
 void free_conversion_result(conversion_result_t*);

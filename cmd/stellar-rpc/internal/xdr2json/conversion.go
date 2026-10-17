@@ -15,8 +15,10 @@ package xdr2json
 import "C"
 
 import (
+	"bytes"
 	"encoding"
 	"encoding/json"
+	"math"
 	"reflect"
 	"unsafe"
 
@@ -34,12 +36,7 @@ import (
 // accept a string, but that would make mistakes likelier than passing the
 // structure itself (by reference).
 func ConvertBytes(xdr interface{}, field []byte) (json.RawMessage, error) {
-	if len(field) == 0 {
-		return []byte(""), nil
-	}
-
-	xdrTypeName := reflect.TypeOf(xdr).Name()
-	return convertAnyBytes(xdrTypeName, field)
+	return (*Budget)(nil).ConvertBytes(xdr, field)
 }
 
 // ConvertInterface takes a valid XDR object (`xdr`) and returns
@@ -49,16 +46,72 @@ func ConvertBytes(xdr interface{}, field []byte) (json.RawMessage, error) {
 // Unlike `ConvertBytes`, the value here needs to be valid and
 // serializable.
 func ConvertInterface(xdr encoding.BinaryMarshaler) (json.RawMessage, error) {
+	return (*Budget)(nil).ConvertInterface(xdr)
+}
+
+// Budget caps the total size of the JSON produced by a series of conversions.
+// A nil Budget has no cap.
+type Budget struct {
+	remaining int
+}
+
+// NewBudget returns a Budget that allows up to maxBytes of JSON in total.
+func NewBudget(maxBytes int) *Budget {
+	return &Budget{remaining: maxBytes}
+}
+
+// ConvertBytes is like the package-level ConvertBytes, but fails instead of
+// exceeding the budget.
+func (b *Budget) ConvertBytes(xdr any, field []byte) (json.RawMessage, error) {
+	if len(field) == 0 {
+		return []byte(""), nil
+	}
+
+	return b.convert(reflect.TypeOf(xdr).Name(), field)
+}
+
+// ConvertInterface is like the package-level ConvertInterface, but fails
+// instead of exceeding the budget.
+func (b *Budget) ConvertInterface(xdr encoding.BinaryMarshaler) (json.RawMessage, error) {
 	xdrTypeName := reflect.TypeOf(xdr).Name()
 	data, err := xdr.MarshalBinary()
 	if err != nil {
 		return []byte(""), errors.Wrapf(err, "failed to serialize XDR type '%s'", xdrTypeName)
 	}
 
-	return convertAnyBytes(xdrTypeName, data)
+	return b.convert(xdrTypeName, data)
 }
 
-func convertAnyBytes(xdrTypeName string, field []byte) (json.RawMessage, error) {
+func (b *Budget) convert(xdrTypeName string, field []byte) (json.RawMessage, error) {
+	if b == nil {
+		return convertAnyBytes(xdrTypeName, field, math.MaxInt)
+	}
+	js, err := convertAnyBytes(xdrTypeName, field, b.remaining)
+	if err != nil {
+		return js, err
+	}
+	n := escapedLen(js)
+	if n > b.remaining {
+		return nil, errors.Errorf("JSON output exceeds the %d bytes left in its budget once escaped", b.remaining)
+	}
+	b.remaining -= n
+	return js, nil
+}
+
+// escapedLen is the length of js in the response, where encoding/json escapes
+// <, > and & as \u00XX and U+2028 and U+2029 as \u202X.
+func escapedLen(js []byte) int {
+	n := len(js)
+	for _, c := range []string{"<", ">", "&"} {
+		n += 5 * bytes.Count(js, []byte(c))
+	}
+	for _, c := range []string{"\u2028", "\u2029"} {
+		n += 3 * bytes.Count(js, []byte(c))
+	}
+	return n
+}
+
+func convertAnyBytes(xdrTypeName string, field []byte, maxLen int) (json.RawMessage, error) {
 	var jsonStr, errStr string
 	goRawXdr := CXDR(field)
 	defer FreeGoXDR(goRawXdr)
@@ -66,7 +119,7 @@ func convertAnyBytes(xdrTypeName string, field []byte) (json.RawMessage, error) 
 	b := C.CString(xdrTypeName)
 	defer C.free(unsafe.Pointer(b))
 
-	result := C.xdr_to_json(b, goRawXdr)
+	result := C.xdr_to_json(b, goRawXdr, C.size_t(maxLen))
 	defer C.free_conversion_result(result)
 
 	jsonStr = C.GoString(result.json)

@@ -26,7 +26,9 @@ type PreflightGetter interface {
 
 var errMissingDiff = errors.New("no ledger difference found")
 
-func LedgerEntryChangeFromXDRDiff(diff preflight.XDRDiff, format string) (protocol.LedgerEntryChange, error) {
+func LedgerEntryChangeFromXDRDiff(
+	diff preflight.XDRDiff, format string, budget *xdr2json.Budget,
+) (protocol.LedgerEntryChange, error) {
 	if err := protocol.IsValidFormat(format); err != nil {
 		return protocol.LedgerEntryChange{}, err
 	}
@@ -72,7 +74,7 @@ func LedgerEntryChangeFromXDRDiff(diff preflight.XDRDiff, format string) (protoc
 
 	switch format {
 	case protocol.FormatJSON:
-		err = AddLedgerEntryChangeJSON(&result, diff, key)
+		err = AddLedgerEntryChangeJSON(&result, diff, key, budget)
 		if err != nil {
 			return protocol.LedgerEntryChange{}, err
 		}
@@ -99,25 +101,27 @@ func LedgerEntryChangeFromXDRDiff(diff preflight.XDRDiff, format string) (protoc
 	return result, nil
 }
 
-func AddLedgerEntryChangeJSON(l *protocol.LedgerEntryChange, diff preflight.XDRDiff, key xdr.LedgerKey) error {
+func AddLedgerEntryChangeJSON(
+	l *protocol.LedgerEntryChange, diff preflight.XDRDiff, key xdr.LedgerKey, budget *xdr2json.Budget,
+) error {
 	var err error
 	beforePresent := len(diff.Before) > 0
 	afterPresent := len(diff.After) > 0
 
-	l.KeyJSON, err = xdr2json.ConvertInterface(key)
+	l.KeyJSON, err = budget.ConvertInterface(key)
 	if err != nil {
 		return err
 	}
 
 	if beforePresent {
-		l.BeforeJSON, err = xdr2json.ConvertBytes(xdr.LedgerEntry{}, diff.Before)
+		l.BeforeJSON, err = budget.ConvertBytes(xdr.LedgerEntry{}, diff.Before)
 		if err != nil {
 			return err
 		}
 	}
 
 	if afterPresent {
-		l.AfterJSON, err = xdr2json.ConvertBytes(xdr.LedgerEntry{}, diff.After)
+		l.AfterJSON, err = budget.ConvertBytes(xdr.LedgerEntry{}, diff.After)
 		if err != nil {
 			return err
 		}
@@ -126,14 +130,16 @@ func AddLedgerEntryChangeJSON(l *protocol.LedgerEntryChange, diff preflight.XDRD
 	return nil
 }
 
-func getRestorePreamble(preflight preflight.Preflight, format string) (*protocol.RestorePreamble, error) {
+func getRestorePreamble(
+	preflight preflight.Preflight, format string, budget *xdr2json.Budget,
+) (*protocol.RestorePreamble, error) {
 	var restorePreamble *protocol.RestorePreamble
 	if len(preflight.PreRestoreTransactionData) == 0 {
 		return restorePreamble, nil
 	}
 	switch format {
 	case protocol.FormatJSON:
-		txDataJs, err := xdr2json.ConvertBytes(
+		txDataJs, err := budget.ConvertBytes(
 			xdr.SorobanTransactionData{},
 			preflight.PreRestoreTransactionData)
 		if err != nil {
@@ -154,19 +160,21 @@ func getRestorePreamble(preflight preflight.Preflight, format string) (*protocol
 	return restorePreamble, nil
 }
 
-func getSimulationResults(preflight preflight.Preflight, format string) ([]protocol.SimulateHostFunctionResult, error) {
+func getSimulationResults(
+	preflight preflight.Preflight, format string, budget *xdr2json.Budget,
+) ([]protocol.SimulateHostFunctionResult, error) {
 	var results []protocol.SimulateHostFunctionResult
 	if len(preflight.Result) == 0 {
 		return nil, nil
 	}
 	switch format {
 	case protocol.FormatJSON:
-		rvJs, err := xdr2json.ConvertBytes(xdr.ScVal{}, preflight.Result)
+		rvJs, err := budget.ConvertBytes(xdr.ScVal{}, preflight.Result)
 		if err != nil {
 			return nil, err
 		}
 
-		auths, err := jsonifySlice(xdr.SorobanAuthorizationEntry{}, preflight.Auth)
+		auths, err := jsonifySliceWithin(budget, xdr.SorobanAuthorizationEntry{}, preflight.Auth)
 		if err != nil {
 			return nil, err
 		}
@@ -191,22 +199,26 @@ func getSimulationResults(preflight preflight.Preflight, format string) ([]proto
 	return results, nil
 }
 
+// maxSimulationJSONBytes bounds the JSON converted from XDR for one simulateTransaction response.
+const maxSimulationJSONBytes = 32 * 1024 * 1024
+
 func formatResponse(preflight preflight.Preflight,
 	format string, latestLedger uint32,
 ) (protocol.SimulateTransactionResponse, error) {
-	results, err := getSimulationResults(preflight, format)
+	budget := xdr2json.NewBudget(maxSimulationJSONBytes)
+	results, err := getSimulationResults(preflight, format, budget)
 	if err != nil {
 		return protocol.SimulateTransactionResponse{}, err
 	}
 
-	restorePreamble, err := getRestorePreamble(preflight, format)
+	restorePreamble, err := getRestorePreamble(preflight, format, budget)
 	if err != nil {
 		return protocol.SimulateTransactionResponse{}, err
 	}
 
 	stateChanges := make([]protocol.LedgerEntryChange, 0, len(preflight.LedgerEntryDiff))
 	for _, entryDiff := range preflight.LedgerEntryDiff {
-		change, err := LedgerEntryChangeFromXDRDiff(entryDiff, format)
+		change, err := LedgerEntryChangeFromXDRDiff(entryDiff, format, budget)
 		// Intentionally ignore "no before and after" entries because they're
 		// possible but shouldn't result in a full failure.
 		if errors.Is(err, errMissingDiff) {
@@ -229,14 +241,14 @@ func formatResponse(preflight preflight.Preflight,
 
 	switch format {
 	case protocol.FormatJSON:
-		simResp.TransactionDataJSON, err = xdr2json.ConvertBytes(
+		simResp.TransactionDataJSON, err = budget.ConvertBytes(
 			xdr.SorobanTransactionData{},
 			preflight.TransactionData)
 		if err != nil {
 			return protocol.SimulateTransactionResponse{}, err
 		}
 
-		simResp.EventsJSON, err = jsonifySlice(xdr.DiagnosticEvent{}, preflight.Events)
+		simResp.EventsJSON, err = jsonifySliceWithin(budget, xdr.DiagnosticEvent{}, preflight.Events)
 		if err != nil {
 			return protocol.SimulateTransactionResponse{}, err
 		}

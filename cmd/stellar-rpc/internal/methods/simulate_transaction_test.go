@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -121,7 +122,7 @@ func TestLedgerEntryChange(t *testing.T) {
 		},
 	} {
 		var change protocol.LedgerEntryChange
-		change, err := LedgerEntryChangeFromXDRDiff(test.input, "")
+		change, err := LedgerEntryChangeFromXDRDiff(test.input, "", nil)
 		require.NoError(t, err, test.name)
 		require.Equal(t, test.expectedOutput, change)
 
@@ -133,7 +134,7 @@ func TestLedgerEntryChange(t *testing.T) {
 		require.Equal(t, change, change2, test.name)
 
 		// test JSON output
-		changeJs, err := LedgerEntryChangeFromXDRDiff(test.input, protocol.FormatJSON)
+		changeJs, err := LedgerEntryChangeFromXDRDiff(test.input, protocol.FormatJSON, nil)
 		require.NoError(t, err, test.name)
 
 		require.Equal(t, keyJs, changeJs.KeyJSON, test.name)
@@ -145,7 +146,7 @@ func TestLedgerEntryChange(t *testing.T) {
 	change, err := LedgerEntryChangeFromXDRDiff(preflight.XDRDiff{
 		Before: nil,
 		After:  nil,
-	}, "")
+	}, "", nil)
 	require.ErrorIs(t, err, errMissingDiff)
 	require.Equal(t, protocol.LedgerEntryChange{}, change)
 }
@@ -677,4 +678,37 @@ func TestSimulateTransactionThreadsUseUpgradedAuth(t *testing.T) {
 			require.Equal(t, tc.expected, getter.params.UseUpgradedAuth)
 		})
 	}
+}
+
+func TestSimulationJSONStaysWithinBudget(t *testing.T) {
+	result, err := xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: new(xdr.Uint32)}.MarshalBinary()
+	require.NoError(t, err)
+	p := preflight.Preflight{Result: result}
+
+	_, err = getSimulationResults(p, protocol.FormatJSON, xdr2json.NewBudget(4))
+	require.ErrorContains(t, err, "exceeds")
+
+	results, err := getSimulationResults(p, protocol.FormatJSON, nil)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"u32":0}`, string(results[0].ReturnValueJSON))
+}
+
+func TestSimulationEventsShareTheJSONBudget(t *testing.T) {
+	// Each "<" is six bytes in the response, so each value takes just over half the budget.
+	str := xdr.ScString(strings.Repeat("<", maxSimulationJSONBytes/12+1))
+	val := xdr.ScVal{Type: xdr.ScValTypeScvString, Str: &str}
+	result, err := val.MarshalBinary()
+	require.NoError(t, err)
+	event, err := xdr.DiagnosticEvent{Event: xdr.ContractEvent{
+		Type: xdr.ContractEventTypeDiagnostic,
+		Body: xdr.ContractEventBody{V0: &xdr.ContractEventV0{Data: val}},
+	}}.MarshalBinary()
+	require.NoError(t, err)
+
+	resp, err := formatResponse(preflight.Preflight{Events: [][]byte{event}}, protocol.FormatJSON, 0)
+	require.NoError(t, err)
+	require.Len(t, resp.EventsJSON, 1)
+
+	_, err = formatResponse(preflight.Preflight{Result: result, Events: [][]byte{event}}, protocol.FormatJSON, 0)
+	require.ErrorContains(t, err, "exceeds")
 }

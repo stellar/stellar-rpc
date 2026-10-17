@@ -45,3 +45,37 @@ func TestEmptyConversion(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, string(js))
 }
+
+func TestBudgetChargesEscapedLength(t *testing.T) {
+	str := xdr.ScString("<&>")
+	val := xdr.ScVal{Type: xdr.ScValTypeScvString, Str: &str}
+	js, err := ConvertInterface(val)
+	require.NoError(t, err)
+	escaped, err := json.Marshal(js)
+	require.NoError(t, err)
+	require.Greater(t, len(escaped), len(js))
+
+	_, err = NewBudget(len(escaped) - 1).ConvertInterface(val)
+	require.ErrorContains(t, err, "exceeds")
+	_, err = NewBudget(len(escaped)).ConvertInterface(val)
+	require.NoError(t, err)
+}
+
+func TestBudgetCapsTheConversion(t *testing.T) {
+	asset := xdr.MustNewCreditAsset("ABCD", keypair.MustRandom().Address())
+	_, err := NewBudget(0).ConvertInterface(asset)
+	// The Rust conversion stops at the cap, before Go checks the escaped length.
+	require.EqualError(t, err, "JSON output exceeds the 0 bytes left in its budget")
+}
+
+func TestBudgetIsSharedAcrossConversions(t *testing.T) {
+	asset := xdr.MustNewCreditAsset("ABCD", keypair.MustRandom().Address())
+	js, err := ConvertInterface(asset)
+	require.NoError(t, err)
+
+	budget := NewBudget(len(js))
+	_, err = budget.ConvertInterface(asset)
+	require.NoError(t, err)
+	_, err = budget.ConvertInterface(asset)
+	require.ErrorContains(t, err, "exceeds")
+}
