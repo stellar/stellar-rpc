@@ -3,7 +3,8 @@ all: check build test
 export RUSTFLAGS=-Dwarnings -Dclippy::all -Dclippy::pedantic
 
 # grocksdb's clean_link tag drops its default -lsnappy -llz4 -lz; our
-# librocksdb uses zstd only. CI sets the same via GOFLAGS in setup-go.
+# librocksdb uses zstd only. CI sets the same via GOFLAGS in setup-go. The
+# static link line lives in cmd/stellar-rpc/internal/rpcv2/rocksdb/link.go.
 export GOFLAGS := -tags=grocksdb_clean_link
 
 REPOSITORY_COMMIT_HASH := "$(shell git rev-parse HEAD)"
@@ -62,22 +63,20 @@ endif
 CARGO_BUILD_TARGET ?= $(shell rustc -vV | sed -n 's|host: ||p')
 
 # unchanged name: the Jenkins packager, apt packaging, and Dockerfile.release consume it
-STELLAR_RPC_V1_BINARY := stellar-rpc
-STELLAR_RPC_V2_BINARY := stellar-rpc-v2
+STELLAR_RPC_BINARY := stellar-rpc
+
+# Where the static zstd and RocksDB archives the binary links are installed.
+# The same two prefixes CI installs through .github/actions/setup-go.
+ZSTD_HOME ?= $(HOME)/.zstd
+ROCKSDB_HOME ?= $(HOME)/.rocksdb
 
 
 # update the Cargo.lock every time the Cargo.toml changes.
 Cargo.lock: Cargo.toml
 	cargo update --workspace
 
-# go install ./... would install binaries named after the package dirs (rpcv1,
-# rpcv2), so build each with -o to keep the installed names. INSTALL_BIN mirrors
-# go install's destination: GOBIN when set, GOPATH/bin otherwise.
-INSTALL_BIN := $(or $(shell go env GOBIN),$(shell go env GOPATH)/bin)
-
 install: build-libs
-	go build -ldflags="${GOLDFLAGS}" -o "$(INSTALL_BIN)/${STELLAR_RPC_V1_BINARY}" ./cmd/stellar-rpc/rpcv1
-	go build -ldflags="${GOLDFLAGS}" -o "$(INSTALL_BIN)/${STELLAR_RPC_V2_BINARY}" ./cmd/stellar-rpc/rpcv2
+	go install -ldflags="${GOLDFLAGS}" ./cmd/stellar-rpc
 
 build: build-libs
 	go build -ldflags="${GOLDFLAGS}" ./...
@@ -116,18 +115,26 @@ clean:
 	cargo clean
 	go clean ./...
 
-build-rpc-v1: build-libs
-	go build -ldflags="${GOLDFLAGS}" ${MACOS_MIN_VER} -o ${STELLAR_RPC_V1_BINARY} -trimpath -v ./cmd/stellar-rpc/rpcv1
+$(ZSTD_HOME)/lib/libzstd.a:
+	PREFIX="$(ZSTD_HOME)" ./scripts/install-zstd.sh
 
-# kept as an alias: the optimized build target invoked by name from
-# https://github.com/stellar/pipelines/blob/master/stellar-rpc/Jenkinsfile-stellar-rpc-package-builder
-# as part of the package building.
-build-stellar-rpc: build-rpc-v1
+$(ROCKSDB_HOME)/lib/librocksdb.a: $(ZSTD_HOME)/lib/libzstd.a
+	PREFIX="$(ROCKSDB_HOME)" ZSTD_HOME="$(ZSTD_HOME)" ./scripts/install-rocksdb.sh
 
-# build-libs is required: rpcv2 wires internal/preflight, which links the rust
-# preflight library through cgo (#884).
-build-rpc-v2: build-libs
-	go build -ldflags="${GOLDFLAGS}" ${MACOS_MIN_VER} -o ${STELLAR_RPC_V2_BINARY} -trimpath -v ./cmd/stellar-rpc/rpcv2
+# The two static archives, built once into ZSTD_HOME and ROCKSDB_HOME. A
+# prefix that already holds its archive is left alone, which is how the
+# Docker build stage reuses the archives its earlier stages installed.
+build-native-libs: $(ZSTD_HOME)/lib/libzstd.a $(ROCKSDB_HOME)/lib/librocksdb.a
+
+# The optimized build, invoked by name from the package builder
+# (stellar/pipelines, soroban-rpc/Jenkinsfile-soroban-rpc-package-builder,
+# through cmd/stellar-rpc/docker/Dockerfile) and from stellar/quickstart's
+# Dockerfile. Both run it in an image with only build-essential and jq, so it
+# brings the static archives and the Rust libraries itself.
+build-stellar-rpc: export CGO_CFLAGS := -I$(ZSTD_HOME)/include -I$(ROCKSDB_HOME)/include
+build-stellar-rpc: export CGO_LDFLAGS := -L$(ZSTD_HOME)/lib -L$(ROCKSDB_HOME)/lib
+build-stellar-rpc: build-libs build-native-libs
+	go build -ldflags="${GOLDFLAGS}" -o ${STELLAR_RPC_BINARY} -trimpath -v ./cmd/stellar-rpc
 
 # Override for feature branches, e.g. `make go-check-branch BASE=origin/feature/full-history`.
 BASE ?= origin/main
@@ -139,4 +146,4 @@ go-check:
 	golangci-lint run ./...
 
 # PHONY lists all the targets that aren't file names, so that make would skip the timestamp based check.
-.PHONY: all clean fmt watch bench test rust-test go-test check rust-check go-check go-check-branch install build build-stellar-rpc build-rpc-v1 build-rpc-v2 build-libs
+.PHONY: all clean fmt watch bench test rust-test go-test check rust-check go-check go-check-branch install build build-stellar-rpc build-native-libs build-libs
