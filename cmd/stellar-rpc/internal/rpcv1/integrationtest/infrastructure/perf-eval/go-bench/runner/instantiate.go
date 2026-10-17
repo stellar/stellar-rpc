@@ -37,7 +37,6 @@ var nativeLibRoots = []string{
 
 var v2Prefixes = []string{
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2",
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/rpcv2",
 }
 
 // instantiate is the instance half after the bootstrap, which runs the benches
