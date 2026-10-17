@@ -29,7 +29,8 @@ if grep -qE 'librocksdb|libzstd' <<<"$deps"; then
 fi
 
 if [ "$(uname -s)" = Linux ]; then
-  needed="$(objdump -T "$BINARY" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1)"
+  # Versions have two or three parts: GLIBC_2.2.5 on amd64, GLIBC_2.17 on arm64.
+  needed="$(objdump -T "$BINARY" | { grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' || true; } | sort -uV | tail -1)"
   needed="${needed#GLIBC_}"
   newest="$(printf '%s\n%s\n' "$needed" "$MAX_GLIBC" | sort -V | tail -1)"
   if [ "$newest" != "$MAX_GLIBC" ]; then

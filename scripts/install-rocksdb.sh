@@ -63,6 +63,17 @@ case "$(uname -s)" in
     ;;
 esac
 
+# A shared librocksdb in PREFIX/lib would win over the archive at link time, and
+# the binary would load it at run time. Refuse before the build rather than
+# delete: PREFIX may be a prefix other tools install into, such as /usr/local
+# under Homebrew.
+shared=$(ls "$PREFIX"/lib/librocksdb*.so* "$PREFIX"/lib/librocksdb*.dylib 2>/dev/null || true)
+if [ -n "$shared" ]; then
+  echo "error: shared librocksdb in $PREFIX/lib; remove it or pick another PREFIX:" >&2
+  echo "$shared" >&2
+  exit 1
+fi
+
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -110,7 +121,3 @@ if [ "$WITH_TOOLS" = 1 ]; then
   cp "$WORKDIR/build/tools/ldb" "$WORKDIR/build/tools/sst_dump" "$PREFIX/bin/"
   cp "$WORKDIR/build/db_bench" "$PREFIX/bin/"
 fi
-
-# A shared library left by an older install would win over the archive at
-# link time, and the binary would load it at run time.
-rm -f "$PREFIX"/lib/librocksdb*.so* "$PREFIX"/lib/librocksdb*.dylib

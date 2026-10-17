@@ -51,6 +51,17 @@ case "$(uname -s)" in
     ;;
 esac
 
+# A shared libzstd in PREFIX/lib would win over the archive at link time, and
+# the binary would load it at run time. Refuse before the build rather than
+# delete: PREFIX may be a prefix other tools install into, such as /usr/local
+# under Homebrew.
+shared=$(ls "$PREFIX"/lib/libzstd*.so* "$PREFIX"/lib/libzstd*.dylib 2>/dev/null || true)
+if [ -n "$shared" ]; then
+  echo "error: shared libzstd in $PREFIX/lib; remove it or pick another PREFIX:" >&2
+  echo "$shared" >&2
+  exit 1
+fi
+
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -72,7 +83,3 @@ cmake -S "$WORKDIR/zstd-${ZSTD_VERSION}/build/cmake" -B "$WORKDIR/build" \
 
 ninja -C "$WORKDIR/build" -j"$JOBS"
 ninja -C "$WORKDIR/build" install
-
-# A shared library left by an older install would win over the archive at
-# link time, and the binary would load it at run time.
-rm -f "$PREFIX"/lib/libzstd*.so* "$PREFIX"/lib/libzstd*.dylib
