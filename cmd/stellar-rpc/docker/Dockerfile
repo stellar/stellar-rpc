@@ -16,14 +16,8 @@ RUN apt update && apt install -y build-essential cmake ninja-build curl && apt c
 COPY scripts/install-zstd.sh /tmp/install-zstd.sh
 RUN PREFIX=/usr/local /tmp/install-zstd.sh
 
-# --- Stage 2: RocksDB (static archive + CLI tools) ---
-FROM ubuntu:22.04 AS rocksdb-build
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt update && apt install -y build-essential cmake ninja-build curl && apt clean
-
-COPY --from=zstd-build /usr/local/include/ /usr/local/include/
-COPY --from=zstd-build /usr/local/lib/libzstd.a /usr/local/lib/
-
+# --- Stage 2: RocksDB (static archive + CLI tools), on top of the zstd stage ---
+FROM zstd-build AS rocksdb-build
 COPY scripts/install-rocksdb.sh /tmp/install-rocksdb.sh
 RUN WITH_TOOLS=1 PREFIX=/usr/local ZSTD_HOME=/usr/local /tmp/install-rocksdb.sh
 
@@ -47,19 +41,18 @@ RUN curl -sSfL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architect
 # the preflight and xdr2json libraries the binary links through cgo.
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain $RUST_TOOLCHAIN_VERSION
 
-COPY --from=zstd-build /usr/local/include/ /usr/local/include/
-COPY --from=zstd-build /usr/local/lib/libzstd.a /usr/local/lib/
-COPY --from=rocksdb-build /usr/local/include/rocksdb /usr/local/include/rocksdb
-COPY --from=rocksdb-build /usr/local/lib/librocksdb.a /usr/local/lib/
+# The zstd and RocksDB headers and archives, both installed to /usr/local.
+COPY --from=rocksdb-build /usr/local/include/ /usr/local/include/
+COPY --from=rocksdb-build /usr/local/lib/libzstd.a /usr/local/lib/librocksdb.a /usr/local/lib/
 
 WORKDIR /go/src/github.com/stellar/stellar-rpc
 ADD . ./
 RUN git config --global --add safe.directory "/go/src/github.com/stellar/stellar-rpc" || true
 
 # The archives are already in /usr/local, so build-stellar-rpc links them and
-# does not rebuild them.
-RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} ZSTD_HOME=/usr/local ROCKSDB_HOME=/usr/local build-stellar-rpc
-RUN ./scripts/check-link.sh stellar-rpc
+# does not rebuild them. The target ends with scripts/check-link.sh, which
+# with MAX_GLIBC also holds the binary to this stage's glibc.
+RUN MAX_GLIBC=2.35 make REPOSITORY_VERSION=${REPOSITORY_VERSION} ZSTD_HOME=/usr/local ROCKSDB_HOME=/usr/local build-stellar-rpc
 RUN mv stellar-rpc /bin/stellar-rpc
 
 # --- Stage 4: Runtime ---
@@ -79,9 +72,8 @@ COPY scripts/install-stellar-core.sh /tmp/install-stellar-core.sh
 RUN CHANNELS="stable unstable" /tmp/install-stellar-core.sh "${STELLAR_CORE_VERSION}"
 RUN apt clean
 
-COPY --from=rocksdb-build /usr/local/bin/ldb /usr/local/bin/
-COPY --from=rocksdb-build /usr/local/bin/sst_dump /usr/local/bin/
-COPY --from=rocksdb-build /usr/local/bin/db_bench /usr/local/bin/
+# Each tool carries its own copy of RocksDB.
+COPY --from=rocksdb-build /usr/local/bin/ldb /usr/local/bin/sst_dump /usr/local/bin/db_bench /usr/local/bin/
 
 COPY --from=build /bin/stellar-rpc /usr/bin/stellar-rpc
 ENTRYPOINT ["/usr/bin/stellar-rpc"]

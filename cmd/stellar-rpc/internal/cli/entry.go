@@ -1,6 +1,6 @@
-// Package cli is the entry point shared by the stellar-rpc binary and the two
-// per-mode wrappers. It picks the mode, builds that mode's command tree, and
-// hands off to the daemon the way each mode's own main did before #1108.
+// Package cli is the entry point of the stellar-rpc binary. It picks the
+// mode, builds that mode's command tree, and hands off to the daemon the way
+// each mode's own main did before #1108.
 package cli
 
 import (
@@ -26,10 +26,6 @@ type Entry struct {
 	Stdout    io.Writer
 	Stderr    io.Writer
 
-	// ForcedMode skips the mode selection and hides --enable-rpcv2. Tests set
-	// it. Zero selects the mode from the arguments and the environment.
-	ForcedMode Mode
-
 	// Tests replace the two daemon launches with recorders.
 	startRPCv1 func(cfg *v1config.Config, logger *supportlog.Entry) error
 	startRPCv2 func(configPath string, opts rpcv2.Options) error
@@ -47,13 +43,10 @@ var errLogged = errors.New("startup refused")
 func (e *Entry) Run() int {
 	e.fillDefaults()
 
-	mode := e.ForcedMode
-	if mode == 0 {
-		var err error
-		if mode, err = SelectMode(e.Args, e.LookupEnv); err != nil {
-			fmt.Fprintln(e.Stderr, err)
-			return 1
-		}
+	mode, err := SelectMode(e.Args, e.LookupEnv)
+	if err != nil {
+		fmt.Fprintln(e.Stderr, err)
+		return 1
 	}
 
 	var runErr error
@@ -112,12 +105,10 @@ func (e *Entry) rootCommand(mode Mode, runErr *error) (*cobra.Command, error) {
 			return nil, err
 		}
 	}
-	if e.ForcedMode == 0 {
-		// SelectMode already read this flag from the raw arguments. It is
-		// registered here so cobra accepts it and --help lists it.
-		root.PersistentFlags().Bool(EnableRPCv2Flag, mode == ModeRPCv2,
-			"run the rpcv2 full-history daemon instead of rpcv1 ("+EnableRPCv2Env+")")
-	}
+	// SelectMode already read this flag from the raw arguments. It is
+	// registered here so cobra accepts it and --help lists it.
+	root.PersistentFlags().Bool(EnableRPCv2Flag, mode == ModeRPCv2,
+		"run the rpcv2 full-history daemon instead of rpcv1 ("+EnableRPCv2Env+")")
 	root.AddCommand(e.versionCommand(mode))
 	return root, nil
 }
@@ -131,11 +122,7 @@ func (e *Entry) versionCommand(mode Mode) *cobra.Command {
 }
 
 // switchHint tells an operator how to select the other mode, laid out with
-// format. It is empty when the mode was forced by a wrapper: the wrappers do
-// not register --enable-rpcv2, so the advice would fail there.
+// format.
 func (e *Entry) switchHint(mode Mode, format string) string {
-	if e.ForcedMode != 0 {
-		return ""
-	}
 	return fmt.Sprintf(format, mode.howToSwitch())
 }

@@ -66,9 +66,13 @@ CARGO_BUILD_TARGET ?= $(shell rustc -vV | sed -n 's|host: ||p')
 STELLAR_RPC_BINARY := stellar-rpc
 
 # Where the static zstd and RocksDB archives the binary links are installed.
-# The same two prefixes CI installs through .github/actions/setup-go.
+# The same two prefixes CI installs through .github/actions/setup-go. Every go
+# command in every target searches them first, ahead of whatever the shell
+# put in the two CGO variables.
 ZSTD_HOME ?= $(HOME)/.zstd
 ROCKSDB_HOME ?= $(HOME)/.rocksdb
+export CGO_CFLAGS := -I$(ZSTD_HOME)/include -I$(ROCKSDB_HOME)/include $(CGO_CFLAGS)
+export CGO_LDFLAGS := -L$(ZSTD_HOME)/lib -L$(ROCKSDB_HOME)/lib $(CGO_LDFLAGS)
 
 
 # update the Cargo.lock every time the Cargo.toml changes.
@@ -130,11 +134,11 @@ build-native-libs: $(ZSTD_HOME)/lib/libzstd.a $(ROCKSDB_HOME)/lib/librocksdb.a
 # (stellar/pipelines, soroban-rpc/Jenkinsfile-soroban-rpc-package-builder,
 # through cmd/stellar-rpc/docker/Dockerfile) and from stellar/quickstart's
 # Dockerfile. Both run it in an image with only build-essential and jq, so it
-# brings the static archives and the Rust libraries itself.
-build-stellar-rpc: export CGO_CFLAGS := -I$(ZSTD_HOME)/include -I$(ROCKSDB_HOME)/include
-build-stellar-rpc: export CGO_LDFLAGS := -L$(ZSTD_HOME)/lib -L$(ROCKSDB_HOME)/lib
+# brings the static archives and the Rust libraries itself, and it ends with
+# the link check so every caller gets it.
 build-stellar-rpc: build-libs build-native-libs
 	go build -ldflags="${GOLDFLAGS}" -o ${STELLAR_RPC_BINARY} -trimpath -v ./cmd/stellar-rpc
+	./scripts/check-link.sh ${STELLAR_RPC_BINARY}
 
 # Override for feature branches, e.g. `make go-check-branch BASE=origin/feature/full-history`.
 BASE ?= origin/main

@@ -16,6 +16,8 @@ ROCKSDB_VERSION=10.9.1
 PREFIX="${PREFIX:-/usr/local}"
 WITH_TOOLS="${WITH_TOOLS:-0}"
 
+# Shared with the other install script by copy, not by a sourced file: each
+# script is copied on its own into a Docker stage.
 # apt-get as root where there is no sudo (the quickstart builder image), with
 # sudo everywhere else.
 apt_install() {
@@ -26,11 +28,11 @@ apt_install() {
   fi
 }
 
-# Per-OS: parallel jobs, build deps, cross arch flag.
+# Per-OS: parallel jobs (JOBS overrides, for builders with little memory), build deps, cross arch flag.
 ARCH_FLAG=""
 case "$(uname -s)" in
   Darwin)
-    JOBS="$(sysctl -n hw.ncpu)"
+    JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
     command -v brew &>/dev/null || { echo "error: homebrew not found, install cmake/ninja manually" >&2; exit 1; }
     command -v cmake &>/dev/null || brew install cmake
     command -v ninja &>/dev/null || brew install ninja
@@ -42,7 +44,7 @@ case "$(uname -s)" in
     ARCH_FLAG="$ARCH_FLAG -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
     ;;
   Linux)
-    JOBS="$(nproc)"
+    JOBS="${JOBS:-$(nproc)}"
     # Bare-machine fallback: install only what's missing. CI runners and the
     # Docker image already ship cmake/ninja, and ZSTD_HOME supplies zstd, so
     # this is skipped there.
@@ -87,10 +89,14 @@ if [ -n "${ZSTD_HOME:-}" ] && [ -d "$ZSTD_HOME" ]; then
   ZSTD_PREFIX_FLAG="-DCMAKE_PREFIX_PATH=$ZSTD_HOME"
 fi
 
+# Only the named targets are built, so the flags matter for configuration
+# only. WITH_TRACE_TOOLS defaults ON and is never wanted.
 if [ "$WITH_TOOLS" = 1 ]; then
-  TOOLS_FLAGS=(-DWITH_TOOLS=ON -DWITH_CORE_TOOLS=ON -DWITH_BENCHMARK_TOOLS=ON)
+  TOOLS_FLAGS=(-DWITH_TOOLS=ON -DWITH_CORE_TOOLS=ON -DWITH_BENCHMARK_TOOLS=ON -DWITH_TRACE_TOOLS=OFF)
+  TARGETS=(rocksdb ldb sst_dump db_bench)
 else
-  TOOLS_FLAGS=(-DWITH_TOOLS=OFF -DWITH_CORE_TOOLS=OFF -DWITH_BENCHMARK_TOOLS=OFF)
+  TOOLS_FLAGS=(-DWITH_TOOLS=OFF -DWITH_CORE_TOOLS=OFF -DWITH_BENCHMARK_TOOLS=OFF -DWITH_TRACE_TOOLS=OFF)
+  TARGETS=(rocksdb)
 fi
 
 # zstd is the only codec (WITH_ZSTD=ON); snappy/lz4/zlib default OFF, so the
@@ -112,10 +118,10 @@ cmake -S "$WORKDIR/rocksdb-${ROCKSDB_VERSION}" -B "$WORKDIR/build" \
   $ZSTD_PREFIX_FLAG \
   $ARCH_FLAG
 
-ninja -C "$WORKDIR/build" -j"$JOBS"
+ninja -C "$WORKDIR/build" -j"$JOBS" "${TARGETS[@]}"
 # Installs librocksdb.a and the headers. The tools are not part of the install
 # target, so copy them out by hand.
-ninja -C "$WORKDIR/build" install
+cmake --install "$WORKDIR/build"
 if [ "$WITH_TOOLS" = 1 ]; then
   mkdir -p "$PREFIX/bin"
   cp "$WORKDIR/build/tools/ldb" "$WORKDIR/build/tools/sst_dump" "$PREFIX/bin/"

@@ -44,14 +44,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ubuntu-22.04, not 24.04: the Debian package is built on Ubuntu
-          # 22.04 so that one binary runs on jammy and noble, and the link
-          # check below holds this job to the same glibc 2.35 ceiling. A
-          # binary linked on 24.04 needs glibc 2.38 or newer.
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             rust_target: x86_64-unknown-linux-gnu
             go_arch: amd64
-          - os: ubuntu-22.04-arm
+          - os: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
             go_arch: arm64
           - os: macos-latest
@@ -87,8 +83,11 @@ jobs:
           CGO_ENABLED: 1
           GOARCH: ${{ matrix.go_arch }}
 
-      # librocksdb and libzstd must be inside the binary, and on Linux it must
-      # load on Ubuntu 22.04.
+      # librocksdb and libzstd must be inside the binary. The glibc ceiling
+      # (2.35, so that one Debian package runs on jammy and noble) is checked
+      # in the Dockerfile's build stage, which is what the package builder
+      # ships: a binary linked on these 24.04 runners needs glibc 2.38 or
+      # newer, and the 22.04 runner images retire in April 2027.
       - name: Check the link line
         run: ./scripts/check-link.sh stellar-rpc
 

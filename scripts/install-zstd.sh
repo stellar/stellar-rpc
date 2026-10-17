@@ -12,6 +12,8 @@ set -euo pipefail
 ZSTD_VERSION=1.5.7
 PREFIX="${PREFIX:-/usr/local}"
 
+# Shared with the other install script by copy, not by a sourced file: each
+# script is copied on its own into a Docker stage.
 # apt-get as root where there is no sudo (the quickstart builder image), with
 # sudo everywhere else.
 apt_install() {
@@ -22,11 +24,11 @@ apt_install() {
   fi
 }
 
-# Per-OS: parallel jobs, cmake/ninja install, cross arch flag.
+# Per-OS: parallel jobs (JOBS overrides, for builders with little memory), cmake/ninja install, cross arch flag.
 ARCH_FLAG=""
 case "$(uname -s)" in
   Darwin)
-    JOBS="$(sysctl -n hw.ncpu)"
+    JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
     command -v brew &>/dev/null || { echo "error: homebrew not found, install cmake/ninja manually" >&2; exit 1; }
     command -v cmake &>/dev/null || brew install cmake
     command -v ninja &>/dev/null || brew install ninja
@@ -38,7 +40,7 @@ case "$(uname -s)" in
     ARCH_FLAG="$ARCH_FLAG -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
     ;;
   Linux)
-    JOBS="$(nproc)"
+    JOBS="${JOBS:-$(nproc)}"
     # Bare-machine fallback; CI runners and the Docker image already ship
     # cmake/ninja, so this is skipped there.
     if command -v apt-get &>/dev/null && { ! command -v cmake &>/dev/null || ! command -v ninja &>/dev/null; }; then
