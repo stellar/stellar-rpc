@@ -35,6 +35,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ingest"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/util"
@@ -43,6 +44,7 @@ import (
 const (
 	defaultReadTimeout         = 5 * time.Second
 	defaultShutdownGracePeriod = 10 * time.Second
+	defaultResponseWriteTime   = 30 * time.Second // to deliver a response after the execution limit
 
 	// Since our default retention window will be 7 days (7*17,280 ledgers),
 	// choose a random 5-digit prime to have irregular logging intervals at each
@@ -403,6 +405,16 @@ func createJSONRPCHandler(cfg *config.Config, logger *supportlog.Entry, daemon *
 	return &rpcHandler
 }
 
+// writeTimeout is the request execution limit plus defaultResponseWriteTime,
+// or 0 (no timeout) when the sum would overflow. The request duration limiter
+// moves the deadline forward as it writes a response.
+func writeTimeout(maxExecution time.Duration) time.Duration {
+	if maxExecution > network.RequestDurationLimiterNoLimit-defaultResponseWriteTime {
+		return 0
+	}
+	return maxExecution + defaultResponseWriteTime
+}
+
 func (d *Daemon) setupHTTPServers(cfg *config.Config) {
 	var err error
 	var listenConfig net.ListenConfig
@@ -411,8 +423,9 @@ func (d *Daemon) setupHTTPServers(cfg *config.Config) {
 		d.logger.WithError(err).WithField("endpoint", cfg.Endpoint).Fatal("cannot listen on endpoint")
 	}
 	d.server = &http.Server{
-		Handler:     createHTTPHandler(d.logger, d.jsonRPCHandler),
-		ReadTimeout: defaultReadTimeout,
+		Handler:      createHTTPHandler(d.logger, d.jsonRPCHandler),
+		ReadTimeout:  defaultReadTimeout,
+		WriteTimeout: writeTimeout(cfg.MaxRequestExecutionDuration),
 	}
 
 	if cfg.AdminEndpoint != "" {

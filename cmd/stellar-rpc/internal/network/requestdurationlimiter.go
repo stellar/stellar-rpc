@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"reflect"
 	"runtime"
+	"slices"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -19,6 +20,14 @@ import (
 const maxDuration = time.Duration(math.MaxInt64)
 
 const RequestDurationLimiterNoLimit = maxDuration
+
+// WriteOut sends a response in chunks of responseChunkSize and gives each chunk
+// responseChunkTimeout, so a client that stops reading is dropped without
+// capping how long a large response may take.
+const (
+	responseChunkSize    = 1 << 20
+	responseChunkTimeout = 30 * time.Second
+)
 
 // The increasingCounter is a subset of prometheus.Counter, and it allows us to mock the
 // counter usage for testing purposes without requiring the implementation of the true
@@ -102,19 +111,18 @@ func (w *bufferedResponseWriter) WriteOut(ctx context.Context, rw http.ResponseW
 	}
 	maps.Copy(headers, w.header)
 
-	if len(w.buffer) == 0 {
-		if w.statusCode != 0 {
-			rw.WriteHeader(w.statusCode)
-		}
-		return
-	}
 	if w.statusCode != 0 {
 		rw.WriteHeader(w.statusCode)
 	}
-
-	if ctx.Err() == nil {
-		// the following return size/error won't help us much at this point. The request is already finalized.
-		rw.Write(w.buffer) //nolint:errcheck
+	if ctx.Err() != nil {
+		return
+	}
+	rc := http.NewResponseController(rw)
+	for chunk := range slices.Chunk(w.buffer, responseChunkSize) {
+		_ = rc.SetWriteDeadline(time.Now().Add(responseChunkTimeout))
+		if _, err := rw.Write(chunk); err != nil {
+			return
+		}
 	}
 }
 

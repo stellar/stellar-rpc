@@ -1,10 +1,12 @@
 package network
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -12,6 +14,8 @@ import (
 	"github.com/creachadair/jrpc2/handler"
 	"github.com/creachadair/jrpc2/jhttp"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/go-stellar-sdk/support/http/mutil"
 )
 
 type TestServerHandlerWrapper struct {
@@ -344,4 +348,36 @@ func TestHTTPRequestDurationLimiter_Panicing(t *testing.T) {
 	require.Equal(t, []byte{}, bytes)
 	require.Equal(t, [7]int{0, 0, 0, 7, 0, 0, 0}, logCounter.writtenLogEntries)
 	shutdown()
+}
+
+type chunkRecorder struct {
+	*httptest.ResponseRecorder
+
+	deadlines int
+	writes    []int
+}
+
+func (r *chunkRecorder) SetWriteDeadline(time.Time) error {
+	r.deadlines++
+	return nil
+}
+
+func (r *chunkRecorder) Write(b []byte) (int, error) {
+	r.writes = append(r.writes, len(b))
+	return r.ResponseRecorder.Write(b)
+}
+
+func TestWriteOutSetsADeadlinePerChunk(t *testing.T) {
+	body := bytes.Repeat([]byte("x"), 2*responseChunkSize+1)
+	rec := &chunkRecorder{ResponseRecorder: httptest.NewRecorder()}
+	bw := makeBufferedResponseWriter(rec)
+	_, err := bw.Write(body)
+	require.NoError(t, err)
+
+	// The logging middleware wraps the writer, so the deadline has to reach through it.
+	bw.WriteOut(t.Context(), mutil.WrapWriter(rec))
+
+	require.Equal(t, body, rec.Body.Bytes())
+	require.Equal(t, []int{responseChunkSize, responseChunkSize, 1}, rec.writes)
+	require.Equal(t, len(rec.writes), rec.deadlines)
 }
