@@ -55,6 +55,7 @@ type Config struct {
 	SorobanFeeStatsLedgerRetentionWindow           uint32
 	ClassicFeeStatsLedgerRetentionWindow           uint32
 	RequestBacklogGlobalQueueLimit                 uint
+	MaxRequestBatchSize                            uint
 	RequestBacklogGetHealthQueueLimit              uint
 	RequestBacklogGetEventsQueueLimit              uint
 	RequestBacklogGetNetworkQueueLimit             uint

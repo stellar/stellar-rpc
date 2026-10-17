@@ -152,6 +152,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			// bypass the handler allowlist and request limiters.
 			DisableBuiltin: true,
 		},
+		ParseRequest: network.MakeJSONRPCRequestParser(cfg.MaxRequestBatchSize),
 	}
 
 	retentionWindow := cfg.HistoryRetentionWindow
@@ -328,7 +329,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 	})
 
 	queueLimitedBridge := network.MakeHTTPBacklogQueueLimiter(
-		bridge,
+		network.RequireJSONPost(bridge),
 		globalQueueRequestBacklogLimiter,
 		uint64(cfg.RequestBacklogGlobalQueueLimit),
 		params.Logger)

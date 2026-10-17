@@ -435,6 +435,13 @@ func (cfg *Config) options() Options {
 			Validate:     positive,
 		},
 		{
+			TomlKey:      strutils.KebabToConstantCase("max-request-batch-size"),
+			Usage:        "Maximum number of calls in a JSON-RPC batch request",
+			ConfigKey:    &cfg.MaxRequestBatchSize,
+			DefaultValue: uint(10),
+			Validate:     positive,
+		},
+		{
 			TomlKey:      strutils.KebabToConstantCase("request-backlog-get-health-queue-limit"),
 			Usage:        "Maximum number of outstanding GetHealth requests",
 			ConfigKey:    &cfg.RequestBacklogGetHealthQueueLimit,

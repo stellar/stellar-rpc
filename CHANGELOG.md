@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Breaking Changes
+* JSON-RPC batches with more than `MAX_REQUEST_BATCH_SIZE` calls (default 10) are now rejected with one error, and none of their calls run. Notifications (calls without an `id`) now get an error instead of running.
 * `getEvents` no longer returns the `inSuccessfulContractCall` field, deprecated since protocol 23 ([#1050](https://github.com/stellar/stellar-rpc/pull/1050)).
 
 ### Added
