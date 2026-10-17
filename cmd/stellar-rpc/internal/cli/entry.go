@@ -26,9 +26,8 @@ type Entry struct {
 	Stdout    io.Writer
 	Stderr    io.Writer
 
-	// ForcedMode skips the mode selection and hides --enable-rpcv2. The two
-	// wrappers under cmd/stellar-rpc/rpcv1 and cmd/stellar-rpc/rpcv2 set it.
-	// Zero selects the mode from the arguments and the environment.
+	// ForcedMode skips the mode selection and hides --enable-rpcv2. Tests set
+	// it. Zero selects the mode from the arguments and the environment.
 	ForcedMode Mode
 
 	// Tests replace the two daemon launches with recorders.
