@@ -34,10 +34,10 @@ const (
 //   - IndexCF stores one (slab || routed term) -> bitmap entry per term of
 //     each sealed slab, loaded one sorted file per slab (see hotIndex).
 //     Auto compaction is off, and the files never overlap so it would have
-//     nothing to do; their index blocks sit in the block cache so a chunk's
-//     many files cost bounded memory. No bloom filter: it would be the
-//     largest thing in that cache, to save a few microseconds per slab on
-//     an absent term.
+//     nothing to do; their index and filter blocks sit in the block cache so
+//     a chunk's many files cost bounded memory. A lookup probes every sealed
+//     slab its window touches for every term, and the bloom filter answers
+//     a slab that lacks the term without reading a block.
 //   - OffsetsCF stores 8-byte (ledger_seq -> event_count) rows in
 //     the tens-of-thousands per chunk; small blocks waste less I/O per
 //     point read.
@@ -55,6 +55,7 @@ func hotStoreCFOptions() map[string]rocksdb.CFOptions {
 		},
 		IndexCF: {
 			BlockSize:                 indexCFBlockSize,
+			BloomFilterBitsPerKey:     10,
 			CacheIndexAndFilterBlocks: true,
 			DisableAutoCompactions:    true,
 		},
