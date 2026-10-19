@@ -100,7 +100,7 @@ func TestConfig_PerCFOptionRouting(t *testing.T) {
 	assert.True(t, perCF[event.IndexCF].CacheIndexAndFilterBlocks,
 		"events index CF keeps its files' index blocks in the block cache")
 	assert.True(t, perCF[event.IndexCF].DisableAutoCompactions, "events index CF keeps compaction off")
-	assert.Zero(t, perCF[event.IndexCF].BloomFilterBitsPerKey, "events index CF gets no bloom")
+	assert.Equal(t, 10, perCF[event.IndexCF].BloomFilterBitsPerKey, "events index CF keeps its bloom")
 }
 
 func TestConfig_DBWideTuningStaysShared(t *testing.T) {
