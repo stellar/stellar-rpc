@@ -205,12 +205,14 @@ func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.B
 // Implementation: validates eventIDs are sorted ascending with no
 // duplicates (returns wrapped ErrUnsortedEventIDs otherwise — same
 // shape as the cold side), encodes them to BE-uint32 keys, then
-// calls rocksdb.Store.BatchMultiGet once with sortedInput=true.
-// The batched API crosses CGO a single time regardless of key count
-// and enables async_io so the kernel can overlap SST page reads —
-// a meaningful win on EBS / high-random-latency storage. ctx is
-// honored at the top of the call; the underlying CGO call is not
-// cancellable mid-flight.
+// calls rocksdb.Store.BatchMultiGet once per matchBatchSize keys.
+// RocksDB pins every block a call touches until it returns, so the
+// slices bound what one request pins in the block cache. Event rows
+// never change once written, so the slices need no shared snapshot.
+// Each call crosses CGO once and enables async_io, so the kernel can
+// overlap SST page reads on EBS and other high-latency storage. ctx
+// is honored at the top of the call; the underlying CGO calls are
+// not cancellable mid-flight.
 //
 // A missing row is an error: every caller passes ids that name
 // stored events (see Reader.FetchEvents), implying RocksDB has
@@ -236,9 +238,14 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payloa
 	for i, id := range eventIDs {
 		keys[i] = encodeDataKey(id)
 	}
-	values, err := h.chunkStore.BatchMultiGet(DataCF, keys)
-	if err != nil {
-		return nil, fmt.Errorf("events: batch fetch from chunk %s: %w", h.chunkID, err)
+	step := max(1, matchBatchSize)
+	values := make([][]byte, 0, len(keys))
+	for lo := 0; lo < len(keys); lo += step {
+		batch, err := h.chunkStore.BatchMultiGet(DataCF, keys[lo:min(lo+step, len(keys))])
+		if err != nil {
+			return nil, fmt.Errorf("events: batch fetch from chunk %s: %w", h.chunkID, err)
+		}
+		values = append(values, batch...)
 	}
 	// BatchMultiGet guarantees len(values) == len(keys); the assertion
 	// keeps gosec quiet on the index reads below and surfaces any future
