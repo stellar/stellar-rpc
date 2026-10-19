@@ -33,7 +33,7 @@ func BenchmarkEventIndex_10M(b *testing.B) {
 			PerCFOptions:   CFOptions(),
 		})
 		require.NoError(b, err)
-		idx := newHotIndex(store, 0)
+		idx := newHotIndex(store, 0, testIndexSecret)
 
 		start := time.Now()
 		buildIndex10M(b, idx)

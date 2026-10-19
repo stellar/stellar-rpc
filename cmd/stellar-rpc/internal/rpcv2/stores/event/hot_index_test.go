@@ -126,7 +126,7 @@ func openIndexForTest(t *testing.T) (*hotIndex, *rocksdb.Store) {
 	t.Helper()
 	store := openRawHotChunkForTest(t, t.TempDir(), chunk.ID(0))
 	t.Cleanup(func() { _ = store.Close() })
-	return newHotIndex(store, 0), store
+	return newHotIndex(store, 0, testIndexSecret), store
 }
 
 func requireSealedSlabs(t *testing.T, store *rocksdb.Store, want uint32) {
@@ -204,7 +204,7 @@ func TestHotIndex_LookupReportsUnreadableSlabs(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 
 	garbled := randomTermKey(f.rng)
-	require.NoError(t, store.Put(IndexCF, hotIndexKey(0, garbled), []byte("not a bitmap")))
+	require.NoError(t, store.Put(IndexCF, hotIndexKey(0, routedKey(x.secret, garbled)), []byte("not a bitmap")))
 	_, _, err = x.lookup(context.Background(), []TermKey{garbled}, window)
 	require.ErrorContains(t, err, "decode events_index slab 0")
 
@@ -296,6 +296,33 @@ func TestHotStore_ReopenKeepsSealedSlabsAndIndexesTheRestAgain(t *testing.T) {
 	ingestCorpus(t, hot, corpus, 3*hotSlabEvents+100)
 	require.NoError(t, hot.index.settle())
 	requireSealedSlabs(t, raw, 3)
+	requireIndexed(t, hot, corpus)
+}
+
+// The hot index files each term under its cold key for the chunk,
+// routedKey(ColdIndexSecret(catalogSecret, chunkID), term): every sealed key
+// is one, and lookups still find every term in the sealed and live slabs.
+func TestHotStore_IndexKeysAreTheColdKeys(t *testing.T) {
+	const chunkID = chunk.ID(5)
+	hot, raw := openHotStoreForTestAt(t, t.TempDir(), chunkID)
+	corpus := newDiffCorpus(t, rand.New(rand.NewSource(5)), newDiffVocab(t), hotSlabEvents+100)
+	ingestCorpus(t, hot, corpus, hotSlabEvents+100)
+	require.NoError(t, hot.index.settle())
+	requireSealedSlabs(t, raw, 1)
+
+	secret := ColdIndexSecret(testCatalogSecret[:], chunkID)
+	want := map[string]bool{}
+	for k, ids := range corpus.index {
+		if ids.Minimum() < hotSlabEvents {
+			want[string(hotIndexKey(0, routedKey(secret, k)))] = true
+		}
+	}
+	got := map[string]bool{}
+	for entry, err := range raw.Iterate(IndexCF, nil) {
+		require.NoError(t, err)
+		got[string(entry.Key)] = true
+	}
+	require.Equal(t, want, got, "slab 0's keys must be its terms' cold keys")
 	requireIndexed(t, hot, corpus)
 }
 
