@@ -538,188 +538,6 @@ func TestReadRangeOutOfRange(t *testing.T) {
 	}
 }
 
-// --- content hash -----------------------------------------------------------
-
-func TestContentHashRoundTrip(t *testing.T) {
-	items := makeItems(500, 200)
-	path := writeTestPackfile(t, items, WriterOptions{ContentHash: true})
-
-	r := Open(path, ReaderOptions{})
-	defer r.Close()
-
-	hash, ok, err := r.ContentHash()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Fatal("expected content hash to be present")
-	}
-	if hash == ([32]byte{}) {
-		t.Fatal("expected non-zero hash")
-	}
-
-	if err := r.Verify(context.Background()); err != nil {
-		t.Fatalf("Verify: %v", err)
-	}
-}
-
-// TestContentHashExtractVerifyRoundTrip exercises the symmetric case:
-// items are written with ContentHashExtract (so the trailer hash covers
-// extract(item), not raw item), and Verify is configured with the matching
-// extract on the reader side. Before the reader-side option existed, this
-// test would have failed with ErrContentHashMismatch.
-func TestContentHashExtractVerifyRoundTrip(t *testing.T) {
-	items := makeItems(300, 64)
-	// Pre-xor the items so on-disk they are xor-encoded, and the writer's
-	// extract un-xors them back to the raw form for hashing. The reader's
-	// matching extract un-xors what it reads off disk; hashes match.
-	xorItems := make([][]byte, len(items))
-	for i, item := range items {
-		xorItems[i], _ = xorCompress(item)
-	}
-	path := writeTestPackfile(t, xorItems, WriterOptions{
-		ContentHash:        true,
-		ContentHashExtract: xorCompress,
-	})
-
-	r := Open(path, ReaderOptions{ContentHashExtract: xorCompress})
-	defer r.Close()
-
-	if err := r.Verify(context.Background()); err != nil {
-		t.Fatalf("Verify with matching ContentHashExtract: %v", err)
-	}
-}
-
-func TestContentHashDeterministic(t *testing.T) {
-	items := makeItems(500, 200)
-	path1 := writeTestPackfile(t, items, WriterOptions{ContentHash: true})
-	path2 := writeTestPackfile(t, items, WriterOptions{ContentHash: true})
-
-	r1 := Open(path1, ReaderOptions{})
-	defer r1.Close()
-	r2 := Open(path2, ReaderOptions{})
-	defer r2.Close()
-
-	hash1, _, err := r1.ContentHash()
-	if err != nil {
-		t.Fatal(err)
-	}
-	hash2, _, err := r2.ContentHash()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hash1 != hash2 {
-		t.Fatalf("hashes differ: %x vs %x", hash1, hash2)
-	}
-}
-
-func TestContentHashDisabled(t *testing.T) {
-	items := makeItems(100, 200)
-	path := writeTestPackfile(t, items, WriterOptions{})
-
-	r := Open(path, ReaderOptions{})
-	defer r.Close()
-
-	_, ok, err := r.ContentHash()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ok {
-		t.Fatal("expected no content hash when disabled")
-	}
-
-	if err := r.Verify(context.Background()); err != nil {
-		t.Fatalf("Verify should return nil when no hash stored: %v", err)
-	}
-}
-
-func TestContentHashCorruption(t *testing.T) {
-	items := makeItems(200, 200)
-	path := writeTestPackfile(t, items, WriterOptions{ContentHash: true})
-
-	r := Open(path, ReaderOptions{})
-	if err := r.Verify(context.Background()); err != nil {
-		t.Fatalf("Verify before corruption: %v", err)
-	}
-	r.Close()
-
-	// Flip a content-hash byte AND recompute the trailer CRC so the test
-	// exercises the hash-mismatch path, not the trailer-CRC path.
-	corruptedPath := corruptAt(t, path, true, func(data []byte) {
-		data[len(data)-trailerSize+tOffContentHash] ^= 0xFF
-	})
-
-	r = Open(corruptedPath, ReaderOptions{})
-	defer r.Close()
-
-	verifyErr := r.Verify(context.Background())
-	if verifyErr == nil {
-		t.Fatal("expected error from corrupted hash")
-	}
-	if !errors.Is(verifyErr, ErrContentHashMismatch) {
-		t.Fatalf("expected ErrContentHashMismatch, got: %v", verifyErr)
-	}
-}
-
-func TestContentHashWithConcurrency(t *testing.T) {
-	items := makeItems(500, 200)
-
-	serialPath := writeTestPackfile(t, items, WriterOptions{ContentHash: true})
-	parallelPath := writeTestPackfile(t, items, WriterOptions{ContentHash: true, Concurrency: 4})
-
-	r1 := Open(serialPath, ReaderOptions{})
-	defer r1.Close()
-	r2 := Open(parallelPath, ReaderOptions{})
-	defer r2.Close()
-
-	hash1, _, err := r1.ContentHash()
-	if err != nil {
-		t.Fatal(err)
-	}
-	hash2, _, err := r2.ContentHash()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hash1 != hash2 {
-		t.Fatalf("serial vs parallel hashes differ: %x vs %x", hash1, hash2)
-	}
-
-	if err := r2.Verify(context.Background()); err != nil {
-		t.Fatalf("Verify parallel: %v", err)
-	}
-}
-
-func TestContentHashNonDefaultItemsPerRecord(t *testing.T) {
-	items := makeItems(500, 200)
-
-	for _, itemsPerRecord := range []int{64, 256, 500} {
-		t.Run(fmt.Sprintf("ItemsPerRecord=%d", itemsPerRecord), func(t *testing.T) {
-			path := writeTestPackfile(t, items, WriterOptions{
-				ItemsPerRecord: itemsPerRecord,
-				ContentHash:    true,
-			})
-
-			r := Open(path, ReaderOptions{})
-			defer r.Close()
-
-			hash, ok, err := r.ContentHash()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !ok {
-				t.Fatal("expected content hash to be present")
-			}
-			if hash == ([32]byte{}) {
-				t.Fatal("expected non-zero hash")
-			}
-
-			if err := r.Verify(context.Background()); err != nil {
-				t.Fatalf("Verify: %v", err)
-			}
-		})
-	}
-}
-
 // --- trailer / app data -----------------------------------------------------
 
 func TestTrailer(t *testing.T) {
@@ -747,9 +565,6 @@ func TestTrailer(t *testing.T) {
 	}
 	if trailer.Format != 42 {
 		t.Fatalf("Format = %d, want 42", trailer.Format)
-	}
-	if trailer.HasContentHash {
-		t.Fatal("expected HasContentHash=false")
 	}
 }
 
@@ -849,100 +664,39 @@ func TestAppDataEmpty(t *testing.T) {
 
 // --- writer × reader matrix -------------------------------------------------
 
-// TestWriterReaderMatrix exercises codec × concurrency × hash × ItemsPerRecord
+// TestWriterReaderMatrix exercises codec × concurrency × ItemsPerRecord
 // combinations to confirm round-trip correctness across the supported axes.
-//
-//nolint:gocognit // 4-way nested matrix with sub-test bodies; flattening hurts clarity
 func TestWriterReaderMatrix(t *testing.T) {
 	items := makeItems(300, 200)
 	for _, codec := range allCodecs {
 		for _, conc := range []int{0, 4} {
-			for _, hash := range []bool{false, true} {
-				for _, rs := range []int{1, 128} {
-					name := fmt.Sprintf("%s/c%d/hash=%v/rs=%d", codec.name, conc, hash, rs)
-					t.Run(name, func(t *testing.T) {
-						wopts := WriterOptions{
-							NewRecordEncoder: codec.newEncoder,
-							Concurrency:      conc,
-							ContentHash:      hash,
-							ItemsPerRecord:   rs,
-						}
-						path := writeTestPackfile(t, items, wopts)
+			for _, rs := range []int{1, 128} {
+				name := fmt.Sprintf("%s/c%d/rs=%d", codec.name, conc, rs)
+				t.Run(name, func(t *testing.T) {
+					wopts := WriterOptions{
+						NewRecordEncoder: codec.newEncoder,
+						Concurrency:      conc,
+						ItemsPerRecord:   rs,
+					}
+					path := writeTestPackfile(t, items, wopts)
 
-						r := Open(path, ReaderOptions{RecordDecoder: codec.decoder})
-						defer r.Close()
+					r := Open(path, ReaderOptions{RecordDecoder: codec.decoder})
+					defer r.Close()
 
-						tc, err := r.TotalItems()
-						if err != nil {
-							t.Fatal(err)
+					tc, err := r.TotalItems()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if tc != len(items) {
+						t.Fatalf("TotalItems = %d, want %d", tc, len(items))
+					}
+					for i, want := range items {
+						if got := readItemCopy(t, r, i); !bytes.Equal(got, want) {
+							t.Fatalf("ReadItem(%d): data mismatch", i)
 						}
-						if tc != len(items) {
-							t.Fatalf("TotalItems = %d, want %d", tc, len(items))
-						}
-						for i, want := range items {
-							if got := readItemCopy(t, r, i); !bytes.Equal(got, want) {
-								t.Fatalf("ReadItem(%d): data mismatch", i)
-							}
-						}
-
-						storedHash, ok, err := r.ContentHash()
-						if err != nil {
-							t.Fatal(err)
-						}
-						if hash {
-							if !ok {
-								t.Fatal("expected content hash to be present")
-							}
-							if storedHash == ([32]byte{}) {
-								t.Fatal("expected non-zero hash")
-							}
-							if err := r.Verify(context.Background()); err != nil {
-								t.Fatalf("Verify: %v", err)
-							}
-						} else if ok {
-							t.Fatal("expected no content hash when disabled")
-						}
-					})
-				}
+					}
+				})
 			}
-		}
-	}
-}
-
-// TestContentHashCrossCodec verifies that the content hash is over the logical
-// item stream only — same items must produce the same hash regardless of codec
-// and concurrency.
-func TestContentHashCrossCodec(t *testing.T) {
-	items := makeItems(300, 200)
-	hashes := make([][32]byte, 0, 2*len(allCodecs))
-	labels := make([]string, 0, 2*len(allCodecs))
-
-	for _, codec := range allCodecs {
-		for _, conc := range []int{0, 4} {
-			opts := WriterOptions{
-				NewRecordEncoder: codec.newEncoder,
-				Concurrency:      conc,
-				ContentHash:      true,
-				ItemsPerRecord:   128,
-			}
-			path := writeTestPackfile(t, items, opts)
-			r := Open(path, ReaderOptions{RecordDecoder: codec.decoder})
-			h, ok, err := r.ContentHash()
-			r.Close()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !ok {
-				t.Fatal("expected content hash")
-			}
-			hashes = append(hashes, h)
-			labels = append(labels, fmt.Sprintf("%s/c%d", codec.name, conc))
-		}
-	}
-
-	for i := 1; i < len(hashes); i++ {
-		if hashes[i] != hashes[0] {
-			t.Fatalf("hash mismatch: %s (%x) != %s (%x)", labels[i], hashes[i], labels[0], hashes[0])
 		}
 	}
 }
@@ -957,7 +711,6 @@ func TestRecordWorkerRaceStress(t *testing.T) {
 				opts := WriterOptions{
 					NewRecordEncoder: codec.newEncoder,
 					Concurrency:      8,
-					ContentHash:      true,
 					ItemsPerRecord:   rs,
 				}
 				path := writeTestPackfile(t, items, opts)
@@ -972,8 +725,10 @@ func TestRecordWorkerRaceStress(t *testing.T) {
 				if tc != len(items) {
 					t.Fatalf("TotalItems = %d, want %d", tc, len(items))
 				}
-				if err := r.Verify(context.Background()); err != nil {
-					t.Fatalf("Verify: %v", err)
+				for i, want := range items {
+					if got := readItemCopy(t, r, i); !bytes.Equal(got, want) {
+						t.Fatalf("ReadItem(%d): data mismatch", i)
+					}
 				}
 			})
 		}

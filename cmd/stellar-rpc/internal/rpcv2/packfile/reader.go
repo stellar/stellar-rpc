@@ -39,7 +39,7 @@ var (
 
 // knownFlags is the bitmask of trailer flags this version of the reader
 // understands. Files with unknown bits set are rejected as corrupt.
-const knownFlags = flagContentHash | flagRecordChecksum
+const knownFlags = flagRecordChecksum
 
 // readBufPool is a process-wide pool of 1 MiB read buffers used to coalesce
 // consecutive record reads in ReadRange and ReadItems.
@@ -72,15 +72,6 @@ type ReaderOptions struct {
 	// the decoder's lifecycle; the library never calls anything beyond
 	// Decode on it.
 	RecordDecoder RecordDecoder
-
-	// ContentHashExtract mirrors WriterOptions.ContentHashExtract. When the
-	// file was written with an extract function, Verify must apply the same
-	// transformation before hashing or the recomputed digest will not match
-	// the stored one. Caller responsibility to keep this in sync with the
-	// writer-side option, same as for the codec itself.
-	//
-	// If nil, items are hashed as read from disk.
-	ContentHashExtract func(item []byte) ([]byte, error)
 
 	// Concurrency sets the max parallel goroutines for ReadItems. The
 	// zero value is normalized to 1 (serial): ReadItems still coalesces
@@ -130,7 +121,7 @@ var recordWorkspacePool = sync.Pool{
 
 // Reader provides random access to items in a packfile.
 //
-// Read methods (ReadItem, ReadRange, ReadItems, Verify, the metadata
+// Read methods (ReadItem, ReadRange, ReadItems, the metadata
 // accessors) are safe for concurrent use by multiple goroutines. Close is
 // NOT safe to call concurrently with any in-flight read: callers must
 // ensure every read has returned before invoking Close, otherwise an
@@ -153,11 +144,10 @@ type Reader struct {
 	// cold trailer struct because record.decode reads it per record.
 	recordChecksum bool
 
-	// Cold-ish state: populated by waitOpen, read on metadata accessors and
-	// Verify but not the per-record hot path.
-	trailer            Trailer
-	appData            []byte
-	contentHashExtract func([]byte) ([]byte, error)
+	// Cold-ish state: populated by waitOpen, read on metadata accessors
+	// but not the per-record hot path.
+	trailer Trailer
+	appData []byte
 
 	waitOpen func() error // blocks until background open completes
 
@@ -172,8 +162,7 @@ type Reader struct {
 // Close must always be called.
 func Open(path string, opts ReaderOptions) *Reader {
 	r := &Reader{
-		recordDecoder:      opts.RecordDecoder,
-		contentHashExtract: opts.ContentHashExtract,
+		recordDecoder: opts.RecordDecoder,
 	}
 
 	// Reject invalid options synchronously and stash the error so every
@@ -243,9 +232,6 @@ func doOpen(path string) openResult {
 	trailer, err := unmarshalTrailer(speculativeBuf)
 	if err != nil {
 		return openResult{err: err}
-	}
-	if !trailer.HasContentHash {
-		trailer.ContentHash = [32]byte{}
 	}
 	recordCount := int(trailer.RecordCount)
 	totalItems := int(trailer.TotalItems)
@@ -394,14 +380,6 @@ func (r *Reader) AppData() ([]byte, error) {
 		return nil, err
 	}
 	return r.appData, nil
-}
-
-// ContentHash returns the SHA-256 content hash stored in the trailer, if present.
-func (r *Reader) ContentHash() ([32]byte, bool, error) {
-	if err := r.waitOpen(); err != nil {
-		return [32]byte{}, false, err
-	}
-	return r.trailer.ContentHash, r.trailer.HasContentHash, nil
 }
 
 // ReadItem reads a single item by position and passes it to fn.
@@ -712,46 +690,6 @@ func (r *Reader) processBatch(
 		if err := fn(k, rec.item(localIdx)); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-// Verify recomputes the SHA-256 content hash by streaming all items and
-// compares it to the hash stored in the trailer. Returns nil if no hash is
-// stored or if the hash matches.
-func (r *Reader) Verify(ctx context.Context) error {
-	if err := r.waitOpen(); err != nil {
-		return err
-	}
-	if !r.trailer.HasContentHash {
-		return nil
-	}
-
-	hasher := newContentHasher(r.itemsPerRecord)
-	i := 0
-	for item, err := range r.ReadRange(0, r.totalItems) {
-		if err != nil {
-			return err
-		}
-		toHash := item
-		if r.contentHashExtract != nil {
-			toHash, err = r.contentHashExtract(item)
-			if err != nil {
-				return fmt.Errorf("packfile: Verify ContentHashExtract item %d: %w", i, err)
-			}
-		}
-		hasher.Add(toHash)
-		i++
-		if i%r.itemsPerRecord == 0 {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-		}
-	}
-	computed := hasher.Sum()
-	if computed != r.trailer.ContentHash {
-		return fmt.Errorf("%w: expected %x, got %x",
-			ErrContentHashMismatch, r.trailer.ContentHash, computed)
 	}
 	return nil
 }

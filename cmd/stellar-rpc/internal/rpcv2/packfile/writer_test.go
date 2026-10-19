@@ -29,7 +29,6 @@ type parsedTrailer struct {
 	indexGroupSize uint16
 	indexSize      uint32
 	appDataSize    uint32
-	contentHash    [32]byte
 	crc            uint32
 }
 
@@ -55,7 +54,6 @@ func readTrailer(t *testing.T, path string) (parsedTrailer, int64) {
 		appDataSize:    binary.LittleEndian.Uint32(buf[tOffAppDataSize:]),
 		crc:            binary.LittleEndian.Uint32(buf[tOffCRC:]),
 	}
-	copy(tr.contentHash[:], buf[tOffContentHash:tEndContentHash])
 	require.Equal(t, crc32c(buf[:trailerCRCEnd]), tr.crc, "trailer CRC")
 	return tr, int64(len(data))
 }
@@ -101,7 +99,7 @@ func xorTransform(dst, src []byte) []byte {
 }
 
 // xorCompress is a one-shot variant of xorTransform that allocates a fresh
-// slice. Used by ContentHashExtract in tests, which has a func(item) signature.
+// slice.
 func xorCompress(in []byte) ([]byte, error) { return xorTransform(nil, in), nil }
 
 type xorEncoder struct{}
@@ -256,11 +254,11 @@ func TestTrailerFields(t *testing.T) {
 			wantFormat:      5,
 		},
 		{
-			name:            "xor_with_hash",
-			opts:            WriterOptions{Format: 1, NewRecordEncoder: newXorEncoder, ContentHash: true},
+			name:            "xor",
+			opts:            WriterOptions{Format: 1, NewRecordEncoder: newXorEncoder},
 			numItems:        50,
 			itemSize:        32,
-			wantFlags:       flagContentHash,
+			wantFlags:       0,
 			wantItemsPerRec: defaultItemsPerRecord,
 			wantFormat:      1,
 		},
@@ -374,7 +372,7 @@ func TestOverwriteReplaces(t *testing.T) {
 	require.EqualValues(t, 50, tr.totalItems, "overwrite did not replace contents")
 }
 
-// --- passthrough and content-hash hook --------------------------------------
+// --- passthrough -------------------------------------------------------------
 
 // TestPassthroughStoresVerbatim verifies that with NewRecordEncoder == nil
 // each record's payload bytes on disk are exactly the items concatenated,
@@ -425,116 +423,6 @@ func TestPassthroughStoresVerbatim(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestContentHashExtract verifies that the extract hook is invoked and its
-// output is what's hashed. Writer A (xor encoder, no extract) hashes raw
-// items. Writer B (passthrough on already-xor'd input, extract un-xors)
-// should produce the same hash.
-func TestContentHashExtract(t *testing.T) {
-	items := mkItems(10, 20)
-
-	pathA := writePackfile(t, WriterOptions{
-		Format:           1,
-		NewRecordEncoder: newXorEncoder,
-		ContentHash:      true,
-	}, items)
-
-	xorItems := make([][]byte, len(items))
-	for i, item := range items {
-		out, _ := xorCompress(item)
-		xorItems[i] = out
-	}
-	pathB := writePackfile(t, WriterOptions{
-		Format:             1,
-		ContentHash:        true,
-		ContentHashExtract: xorCompress, // xor is its own inverse
-	}, xorItems)
-
-	trA, _ := readTrailer(t, pathA)
-	trB, _ := readTrailer(t, pathB)
-	require.Equal(t, trA.contentHash, trB.contentHash,
-		"extract hook did not produce same hash as encoder path")
-}
-
-// TestContentHashParity verifies that serial and concurrent modes produce
-// the same content hash over the same item stream.
-func TestContentHashParity(t *testing.T) {
-	items := mkItems(500, 64)
-
-	serialPath := writePackfile(t, WriterOptions{
-		Format: 1, NewRecordEncoder: newXorEncoder, ContentHash: true,
-	}, items)
-	concurrentPath := writePackfile(t, WriterOptions{
-		Format: 1, NewRecordEncoder: newXorEncoder, ContentHash: true, Concurrency: 4,
-	}, items)
-
-	sTr, _ := readTrailer(t, serialPath)
-	cTr, _ := readTrailer(t, concurrentPath)
-	require.Equal(t, sTr.contentHash, cTr.contentHash,
-		"content hash differs between serial and concurrent paths")
-
-	var zero [32]byte
-	require.NotEqual(t, zero, sTr.contentHash, "content hash is zero")
-}
-
-// TestContentHashExtractConcurrent verifies the concurrent path invokes
-// ContentHashExtract correctly: serial and concurrent produce the same hash
-// when items must first be un-xor'd by the extract hook.
-func TestContentHashExtractConcurrent(t *testing.T) {
-	items := mkItems(500, 64)
-	xorItems := make([][]byte, len(items))
-	for i, item := range items {
-		out, _ := xorCompress(item)
-		xorItems[i] = out
-	}
-
-	serialPath := writePackfile(t, WriterOptions{
-		Format: 1, ContentHash: true, ContentHashExtract: xorCompress,
-	}, xorItems)
-	concurrentPath := writePackfile(t, WriterOptions{
-		Format: 1, ContentHash: true, ContentHashExtract: xorCompress, Concurrency: 4,
-	}, xorItems)
-
-	sTr, _ := readTrailer(t, serialPath)
-	cTr, _ := readTrailer(t, concurrentPath)
-	require.Equal(t, sTr.contentHash, cTr.contentHash,
-		"extract hook produced different hashes between serial and concurrent paths")
-}
-
-// TestConcurrentContentHashExtractError verifies extract errors from worker
-// goroutines surface from AppendItem or Finish.
-func TestConcurrentContentHashExtractError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pack")
-	var calls atomic.Int64
-	w, err := Create(path, WriterOptions{
-		Format:      1,
-		ContentHash: true,
-		ContentHashExtract: func(item []byte) ([]byte, error) {
-			if calls.Add(1) > 50 {
-				return nil, errors.New("boom: extract fail")
-			}
-			return item, nil
-		},
-		ItemsPerRecord: 8,
-		Concurrency:    4,
-	})
-	require.NoError(t, err)
-	defer w.Close()
-
-	item := []byte("data")
-	var seenErr error
-	for range 10_000 {
-		if err := w.AppendItem(item); err != nil {
-			seenErr = err
-			break
-		}
-	}
-	if seenErr == nil {
-		seenErr = w.Finish(nil)
-	}
-	require.Error(t, seenErr)
-	require.Contains(t, seenErr.Error(), "boom")
 }
 
 // --- error propagation -------------------------------------------------------
@@ -684,7 +572,6 @@ func TestConcurrentWriteErrorSurfaces(t *testing.T) {
 	}
 	w := openDevFullWriter(t, WriterOptions{
 		Concurrency:      4,
-		ContentHash:      true,
 		NewRecordEncoder: newXorEncoder,
 	})
 	defer w.Close()

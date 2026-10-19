@@ -2,7 +2,6 @@ package packfile
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -175,36 +174,6 @@ func TestRecordChecksumVerifiesBeforeParsing(t *testing.T) {
 					err, tc.wantNotErr)
 			}
 		})
-	}
-}
-
-// TestRecordChecksumWithContentHash exercises the pipelined assembly site
-// (recordWorker), which only runs when an encoder or content hashing is on,
-// and confirms the two integrity mechanisms are independent: the record
-// checksum covers on-disk bytes, the content hash covers the logical items.
-func TestRecordChecksumWithContentHash(t *testing.T) {
-	items := makeItems(300, 137)
-	path := writePackfile(t, WriterOptions{
-		ItemsPerRecord:   32,
-		RecordChecksum:   ChecksumCRC32C,
-		NewRecordEncoder: newXorEncoder,
-		ContentHash:      true,
-		Concurrency:      4,
-	}, items)
-
-	r := Open(path, ReaderOptions{RecordDecoder: newXorDecoder()})
-	defer r.Close()
-
-	trailer, err := r.Trailer()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !trailer.HasRecordChecksum || !trailer.HasContentHash {
-		t.Fatalf("trailer flags: record checksum %v, content hash %v; want both set",
-			trailer.HasRecordChecksum, trailer.HasContentHash)
-	}
-	if err := r.Verify(context.Background()); err != nil {
-		t.Fatalf("Verify: %v", err)
 	}
 }
 

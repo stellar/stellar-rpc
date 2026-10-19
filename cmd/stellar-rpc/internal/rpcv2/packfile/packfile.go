@@ -2,7 +2,6 @@ package packfile
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 )
 
@@ -32,7 +31,7 @@ const (
 //	26:28 reserved
 //	28:32 indexSize       uint32
 //	32:36 appDataSize     uint32
-//	36:68 contentHash     [32]byte (zero when flagContentHash unset)
+//	36:68 reserved
 //	68:72 appDataCRC      uint32   (CRC32C of the app-data section)
 //	72:76 crc32c          uint32   (over trailer[:trailerCRCEnd])
 const (
@@ -46,8 +45,6 @@ const (
 	tOffIndexGroupSize = 24
 	tOffIndexSize      = 28
 	tOffAppDataSize    = 32
-	tOffContentHash    = 36
-	tEndContentHash    = 68
 	tOffAppDataCRC     = 68
 	tOffCRC            = 72
 	trailerCRCEnd      = tOffCRC // bytes [0:trailerCRCEnd] are CRC-covered
@@ -56,16 +53,11 @@ const (
 // On-disk flag bits (uint8 at trailer offset 5). The remaining bits are
 // reserved for future use.
 const (
-	flagContentHash uint8 = 1 << 0
 	// flagRecordChecksum widens the CRC32C in each record's last four bytes
 	// to cover the whole record instead of the FOR-encoded item sizes alone.
 	// See RecordChecksum for the two layouts.
 	flagRecordChecksum uint8 = 1 << 1
 )
-
-// ErrContentHashMismatch is returned when a file's content hash does not match
-// the hash stored in the trailer.
-var ErrContentHashMismatch = errors.New("packfile: content hash mismatch")
 
 // Trailer holds the parsed trailer fields of an open packfile. The fields
 // mirror the on-disk trailer: a caller can introspect the file's metadata
@@ -84,8 +76,6 @@ type Trailer struct {
 	IndexForGroupSize uint16
 	IndexSize         uint32
 	AppDataSize       uint32
-	ContentHash       [32]byte
-	HasContentHash    bool
 	HasRecordChecksum bool
 	AppDataCRC        uint32 // CRC32C over the app-data section; validated by doOpen
 	Checksum          uint32 // CRC32C over the leading bytes of the on-disk trailer; validated by unmarshalTrailer
@@ -96,9 +86,6 @@ type Trailer struct {
 // The Trailer's Checksum field is ignored — the on-disk CRC is recomputed.
 func (t Trailer) marshal(dst []byte) {
 	var flags uint8
-	if t.HasContentHash {
-		flags |= flagContentHash
-	}
 	if t.HasRecordChecksum {
 		flags |= flagRecordChecksum
 	}
@@ -112,7 +99,6 @@ func (t Trailer) marshal(dst []byte) {
 	binary.LittleEndian.PutUint16(dst[tOffIndexGroupSize:], t.IndexForGroupSize)
 	binary.LittleEndian.PutUint32(dst[tOffIndexSize:], t.IndexSize)
 	binary.LittleEndian.PutUint32(dst[tOffAppDataSize:], t.AppDataSize)
-	copy(dst[tOffContentHash:tEndContentHash], t.ContentHash[:])
 	binary.LittleEndian.PutUint32(dst[tOffAppDataCRC:], t.AppDataCRC)
 	binary.LittleEndian.PutUint32(dst[tOffCRC:], crc32c(dst[:trailerCRCEnd]))
 }
@@ -149,12 +135,6 @@ func unmarshalTrailer(src []byte) (Trailer, error) {
 			ErrCorrupt, indexGroupSize, groupSize)
 	}
 
-	hasContentHash := flags&flagContentHash != 0
-	var contentHash [32]byte
-	if hasContentHash {
-		copy(contentHash[:], tb[tOffContentHash:tEndContentHash])
-	}
-
 	return Trailer{
 		Version:           v,
 		Format:            Format(binary.LittleEndian.Uint32(tb[tOffFormat:])),
@@ -164,8 +144,6 @@ func unmarshalTrailer(src []byte) (Trailer, error) {
 		IndexForGroupSize: indexGroupSize,
 		IndexSize:         binary.LittleEndian.Uint32(tb[tOffIndexSize:]),
 		AppDataSize:       binary.LittleEndian.Uint32(tb[tOffAppDataSize:]),
-		ContentHash:       contentHash,
-		HasContentHash:    hasContentHash,
 		HasRecordChecksum: flags&flagRecordChecksum != 0,
 		AppDataCRC:        binary.LittleEndian.Uint32(tb[tOffAppDataCRC:]),
 		Checksum:          storedCRC,

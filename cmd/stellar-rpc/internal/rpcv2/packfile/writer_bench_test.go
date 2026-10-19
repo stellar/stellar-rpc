@@ -39,27 +39,22 @@ func BenchmarkWriter(b *testing.B) {
 		item[i] = byte((i * 73) ^ 0xA5)
 	}
 
-	zstdOpts := func(conc int, hash bool) WriterOptions {
+	zstdOpts := func(conc int) WriterOptions {
 		return WriterOptions{
 			Format:           benchFmt,
 			NewRecordEncoder: newZstdBenchEncoder,
 			Concurrency:      conc,
-			ContentHash:      hash,
 		}
 	}
 	configs := []struct {
 		name string
 		opts WriterOptions
 	}{
-		{"serial_compressed", zstdOpts(1, false)},
-		{"serial_compressed_hash", zstdOpts(1, true)},
-		{"c4_compressed", zstdOpts(4, false)},
-		{"c4_compressed_hash", zstdOpts(4, true)},
-		{"c8_compressed", zstdOpts(8, false)},
-		{"c8_compressed_hash", zstdOpts(8, true)},
+		{"serial_compressed", zstdOpts(1)},
+		{"c4_compressed", zstdOpts(4)},
+		{"c8_compressed", zstdOpts(8)},
 		// Passthrough — no caller encoder, items stored as-is.
 		{"serial_passthrough", WriterOptions{Format: benchFmt}},
-		{"serial_passthrough_hash", WriterOptions{Format: benchFmt, ContentHash: true}},
 	}
 
 	for _, cfg := range configs {

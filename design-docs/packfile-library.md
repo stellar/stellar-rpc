@@ -23,7 +23,7 @@ On disk, items are grouped into **records**. `ItemsPerRecord` controls how many 
 
 Record bytes are transformed on the way to and from disk by a **caller-supplied codec** — a pair of `RecordEncoder` / `RecordDecoder` implementations the caller plugs into `WriterOptions` and `ReaderOptions`. With a nil codec, records are passthrough (written and read verbatim). The package ships no built-in codec; the `zstd` subpackage provides `*zstd.Compressor` and `*zstd.Decompressor` that satisfy the interfaces directly, and callers are free to provide their own. Integrity is not a codec: a record's checksum is selected by `WriterOptions.RecordChecksum` and recorded in the trailer, so the library applies and verifies it itself.
 
-The trailer carries a caller-assigned `Format uint32` field. Readers dispatch on `Format` to pick the matching decoder (and any other decode-side choice such as the content-hash extract — see [Codec Contract](#codec-contract)). The library does not interpret `Format` values.
+The trailer carries a caller-assigned `Format uint32` field. Readers dispatch on `Format` to pick the matching decoder (see [Codec Contract](#codec-contract)). The library does not interpret `Format` values.
 
 The file ends with a compact **offset index** that maps each record to its byte position on disk. When a file is opened, the offset index is loaded into memory. After that, looking up any item is a single read to fetch the record containing it — no further index I/O. This is how packfile achieves the "one I/O on open, one I/O per lookup" goal.
 
@@ -35,8 +35,6 @@ The file ends with a compact **offset index** that maps each record to its byte 
 The offset index has `ceil(totalItems / ItemsPerRecord)` entries, at most 4 bytes each but typically much less — the entries are compressed, so when records are similar in size each entry is closer to 1-2 bytes. Use `4 * ceil(totalItems / ItemsPerRecord)` as a conservative upper bound.
 
 Choose `ItemsPerRecord` so the index fits within your I/O budget — for example, on storage where each I/O reads up to 256 KB, keep the index under 256 KB. You can check the actual index size of a written file via `Trailer().IndexSize`. See [Index Encoding](#index-encoding) for how the offset index is encoded.
-
-A packfile can optionally include a **content hash** — a SHA-256 digest computed over all items at write time — which can later be used to verify the file's integrity. See `ContentHash` in the API reference.
 
 ## Usage
 
@@ -51,8 +49,7 @@ w, _ := packfile.Create("output.pack", packfile.WriterOptions{
     NewRecordEncoder: func() packfile.RecordEncoder {   // per-worker encoder
         return zstd.NewCompressor()
     },
-    Concurrency:      4,                                // parallel encode/hash goroutines
-    ContentHash:      true,                             // compute SHA-256 content hash
+    Concurrency:      4,                                // parallel encode goroutines
 })
 defer w.Close() // removes file if Finish was not called
 
@@ -127,21 +124,6 @@ r.ReadItems(ctx, positions, func(idx int, data []byte) error {
 
 Returns `ErrPositionOutOfRange` if any position is outside `[0, TotalItems)` or `ErrPositionsUnsorted` if positions are not strictly sorted.
 
-### Content Hash Verification
-
-```go
-r := packfile.Open("output.pack", packfile.ReaderOptions{RecordDecoder: decoder})
-defer r.Close()
-
-hash, ok, _ := r.ContentHash() // stored SHA-256, if present
-if ok {
-    err := r.Verify(ctx) // recompute and compare
-}
-```
-
-If the file was written with `ContentHashExtract`, the reader must pass the matching `ReaderOptions.ContentHashExtract` or `Verify` will mismatch — see [Codec Contract](#codec-contract).
-
-
 ## API Reference
 
 ### Codec Contract
@@ -150,8 +132,7 @@ If the file was written with `ContentHashExtract`, the reader must pass the matc
 // Format is a caller-assigned identifier stored in the trailer. The packfile
 // library does not interpret Format values; readers use them to dispatch to
 // the matching decoder. Any change to the on-disk encoding — what goes in a
-// record, what bytes are hashed, which codec is used — requires a new Format
-// value.
+// record, which codec is used — requires a new Format value.
 type Format uint32
 
 // RecordEncoder transforms one record's payload before it is written. Encode
@@ -186,7 +167,7 @@ type WriterOptions struct {
     ItemsPerRecord int
 
     // Format is a caller-assigned identifier written to the trailer. Readers
-    // dispatch on it to pick the matching decoder + content-hash extract.
+    // dispatch on it to pick the matching decoder.
     Format Format
 
     // NewRecordEncoder, if non-nil, returns a per-worker RecordEncoder.
@@ -202,21 +183,10 @@ type WriterOptions struct {
     // there is no matching reader-side option.
     RecordChecksum RecordChecksum
 
-    // ContentHash enables SHA-256 content hashing over the logical item
-    // stream. The digest is stored in the trailer.
-    ContentHash bool
-
-    // ContentHashExtract, if non-nil, transforms each item into the bytes
-    // fed to the content hasher. Use it when items as received aren't the
-    // canonical hash input (e.g. to decompress pre-compressed items so the
-    // hash is stable across encoder versions). Must be safe for concurrent
-    // invocation. Readers must pass a matching ReaderOptions.ContentHashExtract.
-    ContentHashExtract func(item []byte) ([]byte, error)
-
-    // Concurrency sets the parallel worker count when an encoder or content
-    // hash is enabled. 0 defaults to 1. With no encoder and no content hash,
-    // ignored — records are written directly. Values above runtime.NumCPU()
-    // tend to hurt throughput; pick a value ≤ NumCPU.
+    // Concurrency sets the parallel worker count when an encoder is set.
+    // 0 defaults to 1. With no encoder, ignored — records are written
+    // directly. Values above runtime.NumCPU() tend to hurt throughput; pick
+    // a value ≤ NumCPU.
     Concurrency int
 
     // BytesPerSync initiates background writeback of dirty pages every N bytes
@@ -273,11 +243,6 @@ type ReaderOptions struct {
     // reads. Caller-owned; not closed by Reader.Close. nil means passthrough,
     // symmetric to the writer's nil NewRecordEncoder.
     RecordDecoder RecordDecoder
-
-    // ContentHashExtract mirrors WriterOptions.ContentHashExtract. If the
-    // file was written with an extract, Verify must apply the same
-    // transformation or the recomputed digest will not match the stored one.
-    ContentHashExtract func(item []byte) ([]byte, error)
 
     // Concurrency sets the max parallel goroutines for ReadItems. Zero
     // normalizes to 1 (serial). Negative values are rejected (deferred error
@@ -339,15 +304,6 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error]
 // positions are not strictly sorted, or fn's error verbatim if fn fails.
 func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int, data []byte) error) error
 
-// ContentHash returns the SHA-256 content hash stored in the trailer, if present.
-func (r *Reader) ContentHash() ([32]byte, bool, error)
-
-// Verify recomputes the SHA-256 content hash by streaming all items and
-// compares it to the hash stored in the trailer. Returns nil if no hash is
-// stored or if the hash matches. Applies ReaderOptions.ContentHashExtract if
-// set — must be the same transform as on the writer side.
-func (r *Reader) Verify(ctx context.Context) error
-
 // AppData returns the app data section, or nil if appDataSize == 0.
 func (r *Reader) AppData() ([]byte, error)
 
@@ -366,15 +322,14 @@ func (r *Reader) Close() error
 
 ```go
 var (
-    ErrCorrupt             = errors.New("packfile: corrupt file")
-    ErrMagic               = fmt.Errorf("%w: invalid magic number", ErrCorrupt)
-    ErrVersion             = fmt.Errorf("%w: unsupported version", ErrCorrupt)
-    ErrChecksum            = fmt.Errorf("%w: checksum mismatch", ErrCorrupt)
-    ErrSize                = fmt.Errorf("%w: file size inconsistent with trailer", ErrCorrupt)
-    ErrPositionOutOfRange  = errors.New("packfile: position out of range")
-    ErrPositionsUnsorted   = errors.New("packfile: positions not strictly sorted")
-    ErrContentHashMismatch = errors.New("packfile: content hash mismatch")
-    ErrWriterClosed        = errors.New("packfile: writer is closed")
+    ErrCorrupt            = errors.New("packfile: corrupt file")
+    ErrMagic              = fmt.Errorf("%w: invalid magic number", ErrCorrupt)
+    ErrVersion            = fmt.Errorf("%w: unsupported version", ErrCorrupt)
+    ErrChecksum           = fmt.Errorf("%w: checksum mismatch", ErrCorrupt)
+    ErrSize               = fmt.Errorf("%w: file size inconsistent with trailer", ErrCorrupt)
+    ErrPositionOutOfRange = errors.New("packfile: position out of range")
+    ErrPositionsUnsorted  = errors.New("packfile: positions not strictly sorted")
+    ErrWriterClosed       = errors.New("packfile: writer is closed")
 )
 ```
 
@@ -555,30 +510,6 @@ File layout:
 
 Key difference: with `ItemsPerRecord=2`, each multi-item record carries an item size index so the reader can find individual items inside the decompressed payload. With `ItemsPerRecord=1`, that disappears entirely — each read fetches exactly one item, no slicing needed. The tradeoff is 5 index entries instead of 3.
 
-### Content Hash
-
-When `ContentHash: true`, the writer computes a chunked SHA-256 over the logical item stream. Each record's items are hashed together into a per-record digest, then all per-record digests are hashed into the final hash:
-
-```
-// Example with ItemsPerRecord=128, no ContentHashExtract:
-record_0_digest = SHA-256([4B len][item_0][4B len][item_1]...[4B len][item_127])
-record_1_digest = SHA-256([4B len][item_128]...[4B len][item_255])
-...
-finalHash = SHA-256(record_0_digest || record_1_digest || ...)
-```
-
-The hash is independent of the record encoder — same items in the same order with the same `ItemsPerRecord` always produce the same hash regardless of which `RecordEncoder` is plugged in. Changing `ItemsPerRecord` changes the chunk boundaries and therefore the hash.
-
-**`ContentHashExtract`** lets the caller transform each item before it is fed to the hasher:
-
-```
-// With ContentHashExtract: each item is replaced by extract(item) in the hash input.
-hashed_item_i = ContentHashExtract(item_i)
-record_0_digest = SHA-256([4B len][hashed_item_0]...[4B len][hashed_item_127])
-```
-
-The extract is useful when items as received aren't the canonical hash input (e.g. items are pre-compressed and the hash should cover their decompressed form so it's stable across encoder versions). Verify requires a matching extract on the reader side; mismatched extracts produce `ErrContentHashMismatch` even on an intact file.
-
 ### Trailer (76 bytes at EOF)
 
 ```
@@ -595,13 +526,12 @@ Offset  Size  Type      Field
 26      2     —         reserved
 28      4     uint32    indexSize (offset index bytes + 4-byte CRC32C)
 32      4     uint32    appDataSize (0 if none)
-36      32    [32]byte  contentHash (zeroed if flagContentHash not set)
+36      32    —         reserved
 68      4     uint32    appDataCRC (CRC32C of the app data section)
 72      4     uint32    CRC32C of trailer[0:72]
 ```
 
 Flags (uint8):
-- Bit 0 (`flagContentHash`): trailer contains a 32-byte SHA-256 content hash
 - Bit 1 (`flagRecordChecksum`): each record's trailing CRC32C covers the whole record, not just its item size index
 
 All other bits are reserved. The reader validates flags against `knownFlags` and rejects files with unknown flag bits.
@@ -618,9 +548,7 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 
 **Trailer validation:** On open: flags against `knownFlags`, `itemsPerRecord > 0`, `ceil(totalItems / itemsPerRecord) == recordCount`.
 
-**Record checksum:** Each multi-item record carries a CRC32C in its last four bytes, verified on every record read, before the payload is passed to the decoder. `Verify` checks record CRCs only as a side effect of streaming the items for the content hash, and returns immediately when a file has no content hash; record CRCs are enforced on the read path, not by `Verify`. `WriterOptions.RecordChecksum` selects whether it covers the item size index alone or the whole record including the payload; the trailer records which. See [Records](#records).
-
-**Content hash verification:** `Verify(ctx)` recomputes the chunked SHA-256 by streaming all items (applying `ReaderOptions.ContentHashExtract` if set) and compares to the stored hash. Mismatched extract on read produces `ErrContentHashMismatch`.
+**Record checksum:** Each multi-item record carries a CRC32C in its last four bytes, verified on every record read, before the payload is passed to the decoder. `WriterOptions.RecordChecksum` selects whether it covers the item size index alone or the whole record including the payload; the trailer records which. See [Records](#records).
 
 ### Edge Cases
 
@@ -668,6 +596,6 @@ All of steps 2-5 are a single I/O operation. A `*record` workspace is borrowed f
 
 **Create.** Opens the file directly at `path` with `O_EXCL` (fails if exists, unless `Overwrite` is set). `Finish` writes remaining items, the offset index, app data, trailer, then fsyncs. `Close` without `Finish` removes the incomplete file.
 
-**Parallel Pipeline.** When either a `NewRecordEncoder` or `ContentHash` is set, the writer runs a streaming pipeline: `AppendItem` accumulates items → flush sends records to workers → `max(Concurrency, 1)` workers run the caller's encoder (one fresh `RecordEncoder` per worker via the factory) and compute the chunked SHA-256 digest in parallel → writer goroutine reorders by record ordinal and writes sequentially. With neither an encoder nor a content hash, records are written directly from the main goroutine and `Concurrency` is ignored.
+**Parallel Pipeline.** When a `NewRecordEncoder` is set, the writer runs a streaming pipeline: `AppendItem` accumulates items → flush sends records to workers → `max(Concurrency, 1)` workers run the caller's encoder (one fresh `RecordEncoder` per worker via the factory) → writer goroutine reorders by record ordinal and writes sequentially. With no encoder, records are written directly from the main goroutine and `Concurrency` is ignored.
 
 **BytesPerSync.** Optional background writeback via `sync_file_range(SYNC_FILE_RANGE_WRITE)` on Linux (no-op elsewhere). Spreads I/O so the final fsync has less to flush.
