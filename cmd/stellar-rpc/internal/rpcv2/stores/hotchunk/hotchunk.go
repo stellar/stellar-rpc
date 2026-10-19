@@ -101,8 +101,10 @@ func config(path string, logger *supportlog.Entry, readOnly, mustExist bool) roc
 // Open opens (or creates) the chunk's shared multi-CF hot DB read-WRITE
 // (ingestion's handle for a NEW chunk) and composes the three facades over it. On
 // any facade-construction failure the shared store is closed before returning.
-func Open(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, false, false)
+// catalogSecret is the catalog's secret, from which the events index derives the
+// chunk's cold index secret; every opener takes it.
+func Open(path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry) (*DB, error) {
+	return open(path, chunkID, catalogSecret, logger, false, false)
 }
 
 // OpenExisting opens an EXISTING hot DB read-WRITE with create-if-missing OFF —
@@ -110,8 +112,8 @@ func Open(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) 
 // A missing or gutted DB fails the open instead of silently fabricating a fresh
 // empty one (the "never auto-heal" rule); the caller treats that failure as an
 // ordinary run-failing error.
-func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, false, true)
+func OpenExisting(path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry) (*DB, error) {
+	return open(path, chunkID, catalogSecret, logger, false, true)
 }
 
 // OpenReadOnly opens an EXISTING hot DB read-only — the freeze source's view AND
@@ -130,22 +132,26 @@ func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB,
 // Close (#834). The skip is enforced structurally: a read-only DB has no events
 // facade, so Events() panics and IngestLedger errors rather than serving a cold,
 // unwarmed surface.
-func OpenReadOnly(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, true, false)
+func OpenReadOnly(path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry) (*DB, error) {
+	return open(path, chunkID, catalogSecret, logger, true, false)
 }
 
 // OpenReadyWrite opens a "ready" chunk's hot DB read-WRITE — ingestion's handle
 // for a resumed chunk (OpenExisting underneath). openReady enforces the ready-open
 // rule.
-func OpenReadyWrite(state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return openReady(state, path, chunkID, logger, false)
+func OpenReadyWrite(
+	state geometry.HotState, path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry,
+) (*DB, error) {
+	return openReady(state, path, chunkID, catalogSecret, logger, false)
 }
 
 // OpenReadyView opens a "ready" chunk's hot DB read-only — the freeze source's
 // and the last-committed refiner's view (OpenReadOnly underneath). openReady
 // enforces the ready-open rule.
-func OpenReadyView(state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return openReady(state, path, chunkID, logger, true)
+func OpenReadyView(
+	state geometry.HotState, path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry,
+) (*DB, error) {
+	return openReady(state, path, chunkID, catalogSecret, logger, true)
 }
 
 // openReady is the single enforcement site for the "ready key ⇒ must-exist,
@@ -156,7 +162,8 @@ func OpenReadyView(state geometry.HotState, path string, chunkID chunk.ID, logge
 // the open — never auto-healed into a fresh empty one — wrapped in the uniform
 // won't-open error so every ready-open site reports it identically.
 func openReady(
-	state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly bool,
+	state geometry.HotState, path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry,
+	readOnly bool,
 ) (*DB, error) {
 	if state != geometry.HotReady {
 		return nil, fmt.Errorf(
@@ -166,14 +173,16 @@ func openReady(
 	if readOnly {
 		openFn = OpenReadOnly
 	}
-	db, err := openFn(path, chunkID, logger)
+	db, err := openFn(path, chunkID, catalogSecret, logger)
 	if err != nil {
 		return nil, fmt.Errorf("chunk %s is %q but its hot DB won't open: %w", chunkID, geometry.HotReady, err)
 	}
 	return db, nil
 }
 
-func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mustExist bool) (*DB, error) {
+func open(
+	path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry, readOnly, mustExist bool,
+) (*DB, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
@@ -198,7 +207,7 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mus
 	if readOnly {
 		return db, nil
 	}
-	es, err := event.NewWithStore(store, chunkID)
+	es, err := event.NewWithStore(store, chunkID, catalogSecret)
 	if err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("compose events facade for chunk %s: %w", chunkID, err)
