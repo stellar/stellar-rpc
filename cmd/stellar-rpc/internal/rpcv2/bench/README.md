@@ -29,33 +29,20 @@ for `bench ingest hot`. `bench query` reads the same root through
 
 ### 1.2 Ingest
 
-An ingest run keeps the catalog in the dataset. The first successful run
-records the first ledger of its range as the earliest ledger of the dataset.
+Each ingest run writes a new dataset. The dataset root must not exist, or it
+must be an empty directory. `--out` must be outside the dataset root. The
+command checks these before it changes `--out`.
 
-A later run into the same root adds chunks to the dataset. The run must start
-at the chunk after the last committed ledger of the dataset. The run stops
-with an error, before it writes a chunk, when:
+At the end of a successful run, the ingest records the first ledger of
+`--start-chunk` as the earliest ledger of the dataset, as the daemon does on
+its first start. Then it opens the **live chunk** as daemon startup does: the
+chunk that holds the ledger after the last committed ledger. If the run ends
+at a chunk boundary, the live chunk is new and empty. If the run ends in a
+chunk (`bench ingest hot` with `--num-ledgers`), the live chunk is that chunk.
 
-- The dataset holds ledgers of the range (overlap).
-- The range starts after the next chunk (gap). If the dataset ends inside a
-  chunk, no chunk can follow it.
-- The range starts below the earliest ledger.
-- The dataset holds chunks of the other tier.
-- The catalog holds chunks from a run that did not finish. Delete the dataset
-  directory and ingest again.
-
-A cold run backfills from the first chunk of the dataset, as the daemon
-backfills from its retention floor. The run skips the frozen chunks and builds
-the tx-hash index again over all chunks. Then it deletes the index files that
-the new index replaces. Thus, the timings of a run that adds chunks are
-different from the timings of a run into an empty root. `settings.append` and
-`settings.datasetFirstChunk` in `run.json` record this.
-
-At the end of a successful run, the ingest opens the **live chunk** as daemon
-startup does: the chunk that holds the ledger after the last committed ledger.
-If the run ends at a chunk boundary, the live chunk is new and empty. If the
-run ends in a chunk, the live chunk is that chunk, and no run can add chunks
-to the dataset. A run that adds chunks removes the empty live chunk first.
+A run that fails, or that you cancel, records no earliest ledger.
+`bench query` cannot open its dataset. Delete the dataset directory and ingest
+again.
 
 ### 1.3 Query
 
@@ -63,7 +50,7 @@ to the dataset. A run that adds chunks removes the empty live chunk first.
 finds the last committed ledger, opens the live chunk and opens the read
 registry. It does not write chunks into the dataset. The run stops with an
 error when the dataset has no catalog, no earliest ledger or no live chunk.
-Ingest such a dataset again with this version.
+Delete such a dataset and ingest it again with this version.
 
 The **served range** starts at the first ledger of `--start-chunk`, or of the
 dataset when you do not set the flag. It ends at the last committed ledger.
@@ -195,8 +182,9 @@ latency_from_due(i) = response(i) − due(i)
 
 - `latency` contains the request parse of the bridge, the wait for a handler
   slot, the handler and the write of the response to memory. The run encodes
-  the request before the timer starts, and decodes the response after the
-  timer stops.
+  the request before the timer starts. The run does not decode the response
+  of a succeeded request: the handler gives the number of items. The run
+  decodes the response of a failed request after the timer stops.
 - `handler_latency` contains the handler only. The handler also gets the read
   view of the request.
 - `latency − handler_latency` is the cost of the bridge: the request parse,
@@ -347,15 +335,16 @@ percentiles as filtered-read latency, examine `items`.
 ### 9.1 Txhash pool
 
 The run builds the txhash pool before the first `txhash` scenario. The build
-reads the dataset directly, not through the handlers, and is not timed.
+reads the dataset directly, not through the handlers. Then it sends one
+`getTransaction` request for a pool hash. The build is not timed.
 
 - `--txhash-pool-size` sets the maximum number of hashes (default 512, 1 to
   1,000,000).
 - The build takes one random hash from each of a set of random ledgers. Each
   chunk supplies its share. A pool with fewer hashes than the maximum gives a
   warning. A pool with no hashes is an error.
-- The build fails if one pool hash does not pair with an envelope under
-  `--network-passphrase`, or if the tx-hash index does not find it.
+- The build fails if that pool hash does not pair with an envelope under
+  `--network-passphrase`, or if `getTransaction` does not find it.
 
 `--not-found-fraction` (default 0.12, 0 to 1) sets the fraction of lookups
 for 32 random bytes. `latency.csv` shows these lookups with the outcome
@@ -377,9 +366,10 @@ Each `events` request uses one set from the pool, at random.
 value that the run used.
 
 `--evict-page-cache` (default true) applies to a cold dataset only. On Linux,
-it requests OS page-cache eviction (`POSIX_FADV_DONTNEED`) of the frozen
-files that the catalog records, before each scenario. The kernel can keep
-some pages, so the run does not verify that the cache is cold.
+it requests OS page-cache eviction (`POSIX_FADV_DONTNEED`) before each
+scenario. The eviction applies to the frozen files that the catalog records
+for the served chunks, and to all frozen tx-hash index files. The kernel can
+keep some pages, so the run does not verify that the cache is cold.
 
 The pool builds read the dataset before the first scenario of their type.
 Without eviction, each scenario starts with the data that the open, the pool
@@ -411,7 +401,8 @@ eviction). `settings.pageCacheEviction` is `off`, `requested` or
 | `--network-passphrase` | The public network passphrase | The passphrase of the dataset. `txpage` and `txhash` use it. |
 | `--seed` | `1` | The seed of the random draws. |
 | `--out` | `bench-out` | The directory of the output files. |
-| `--cpuprofile`, `--memprofile` | Empty | Write a Go CPU or allocation profile to this path. |
+| `--cpuprofile` | Empty | Write one Go CPU profile for each scenario. The profile covers the measured iterations only. The file name is this path with `.<type>.<rate>rps` before the extension, for example `cpu.ledgers.10rps.pprof`. A scenario with no measured iteration writes no profile. |
+| `--memprofile` | Empty | Write a Go allocation profile to this path at the end of the run. |
 
 ## 12. Known limits
 
