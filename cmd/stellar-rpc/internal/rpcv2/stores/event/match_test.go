@@ -1749,6 +1749,46 @@ func TestCountDistinctTerms(t *testing.T) {
 	}), "topic-count buckets are not value terms and are not counted")
 }
 
+// TestTermPlansAtMostSevenTerms pins that no filter shape yields a plan of
+// more than seven terms (the contract id, the event type, every topic and one
+// topic-count bucket), so with the slab FastAnd never gets more than eight
+// inputs.
+func TestTermPlansAtMostSevenTerms(t *testing.T) {
+	const widest = 1 + 1 + protocol.MaxTopicCount + 1
+	system := xdr.ContractEventTypeSystem
+	sym := xdr.ScSymbol("alpha")
+	topic, err := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}.MarshalBinary()
+	require.NoError(t, err)
+	// Count 0 without Exact is the wildcard.
+	counts := make([]TopicCountFilter, 0, 2*(protocol.MaxTopicCount+1))
+	for c := range protocol.MaxTopicCount + 1 {
+		counts = append(counts, TopicCountFilter{Count: c}, TopicCountFilter{Count: c, Exact: true})
+	}
+	most := 0
+	for shape := range 1 << (2 + protocol.MaxTopicCount) {
+		for _, count := range counts {
+			f := Filter{TopicCount: count}
+			if shape&1 != 0 {
+				f.ContractID = bytes.Repeat([]byte{0x0a}, 32)
+			}
+			if shape&2 != 0 {
+				f.EventType = &system
+			}
+			for i := range protocol.MaxTopicCount {
+				if shape&(4<<i) != 0 {
+					f.Topics[i] = topic
+				}
+			}
+			require.NoError(t, ValidateFilters([]Filter{f}), "fixture: filter %+v", f)
+			for _, plan := range f.termPlans() {
+				require.LessOrEqual(t, len(plan), widest, "filter %+v", f)
+				most = max(most, len(plan))
+			}
+		}
+	}
+	require.Equal(t, widest, most, "fixture: no filter shape reached the widest plan")
+}
+
 // The first-batch hint contract: a positive hint sizes the first fetch in
 // full, since every caller passes a validated page size, and later batches
 // use the default.
