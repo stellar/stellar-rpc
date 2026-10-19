@@ -1,6 +1,6 @@
-// Package bench benchmarks ingestion and reads. The bench ingest command times
-// the cold backfill, which writes past ledgers to frozen artifacts at startup,
-// and the hot loop, which ingests new ledgers as they close.
+// Package bench benchmarks ingestion and reads. bench ingest
+// times the cold backfill that bulk-materializes past ledgers at startup, and
+// the hot loop that ingests the live stream as it advances.
 //
 // A bench ingest run drives the daemon's production ingestion code over a
 // benchmark-controlled ledger source and times it: cold calls
