@@ -278,10 +278,10 @@ func TestHotStore_FetchEventsErrorsOnMissingID(t *testing.T) {
 // path with enough keys to defeat any per-iteration optimization
 // the wrapper might hide. The serial-Get implementation passed this
 // trivially; the batched implementation must produce the same
-// positional alignment across ~hundreds of keys.
+// positional alignment across several matchBatchSize slices.
 func TestHotStore_FetchEventsLargeBatch(t *testing.T) {
 	const chunkID = chunk.ID(0)
-	const n = 256
+	const n = 1100
 	h := openHotStoreForTest(t, chunkID)
 
 	payloads := make([]Payload, n)
