@@ -14,6 +14,7 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 const (
@@ -152,6 +153,10 @@ type hotIndex struct {
 	store *rocksdb.Store
 	view  atomic.Pointer[hotIndexView]
 
+	// secret is the chunk's cold index secret. Every term is filed under
+	// routedKey(secret, term), so callers cannot pick a term's bucket.
+	secret [stores.SecretLen]byte
+
 	// sealed holds the outcome of the last seal once it is over. rotate takes
 	// it before it starts the next seal, so at most one seal is in flight.
 	sealed chan error
@@ -166,8 +171,8 @@ type hotIndexView struct {
 
 // newHotIndex returns the index of a chunk whose IndexCF holds the slabs
 // before sealed; its live slab is empty.
-func newHotIndex(store *rocksdb.Store, sealed uint32) *hotIndex {
-	x := &hotIndex{store: store, sealed: make(chan error, 1)}
+func newHotIndex(store *rocksdb.Store, sealed uint32, secret [stores.SecretLen]byte) *hotIndex {
+	x := &hotIndex{store: store, secret: secret, sealed: make(chan error, 1)}
 	x.view.Store(&hotIndexView{live: newHotSlab(sealed)})
 	x.sealed <- nil
 	return x
@@ -204,6 +209,7 @@ func (x *hotIndex) seal(s *hotSlab) error {
 }
 
 // sealedBitmap reads a term's event ids in a sealed slab, nil if it has none.
+// k is the term's routed key.
 func (x *hotIndex) sealedBitmap(slab uint32, k TermKey) (*roaring.Bitmap, error) {
 	val, found, err := x.store.Get(IndexCF, hotIndexKey(slab, k))
 	if err != nil || !found {
@@ -238,7 +244,7 @@ func (x *hotIndex) add(startID uint32, termKeys [][]TermKey) error {
 			}
 		}
 		for _, k := range keys {
-			live.add(k, id)
+			live.add(routedKey(x.secret, k), id)
 		}
 	}
 	return nil
@@ -287,6 +293,10 @@ func (x *hotIndex) lookup(ctx context.Context, keys []TermKey, window IDRange) (
 		covered.End = (last + 1) << indexSlabShift
 	}
 
+	routed := make([]TermKey, len(keys))
+	for i, k := range keys {
+		routed[i] = routedKey(x.secret, k)
+	}
 	v := x.view.Load()
 	for slab := first; slab <= min(last, v.live.slab); slab++ {
 		if err := ctx.Err(); err != nil {
@@ -299,7 +309,7 @@ func (x *hotIndex) lookup(ctx context.Context, keys []TermKey, window IDRange) (
 		case v.prev != nil && slab == v.prev.slab:
 			inMemory = v.prev
 		}
-		for i, k := range keys {
+		for i, k := range routed {
 			var bm *roaring.Bitmap
 			if inMemory != nil {
 				bm = inMemory.bitmap(k)
