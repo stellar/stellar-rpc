@@ -146,6 +146,8 @@ The exact storage backend for hot event data is an implementation detail (TODO: 
 
 The slab being filled lives in memory as an append-only posting list with per-bucket chains (a bucket is the term key's leading 16 bits); one goroutine appends and readers walk the chains without a lock. When a slab is full it is written as one sorted file of (slab ‖ term) → serialized bitmap and loaded into the index column family in the background while the next slab fills; a lookup reads a sealed slab's bitmaps from that column family. The writer waits for the previous seal before it starts the next one, so at most two slabs are in memory.
 
+The term in each key, and so its bucket, is the routed key: the term key blinded under the chunk secret, as in the cold index (Section 9.2).
+
 During ingestion, every ledger requires adding new event IDs to the relevant bitmaps (~4,000 adds per ledger assuming ~1,000 events with ~4 indexed fields each).
 
 If bitmaps lived on disk or in the embedded DB, each add would require deserializing the bitmap, updating it, and re-serializing it back. For dense terms like "transfer" that can grow to millions of entries, this serialize/deserialize cycle on every ledger would be far too slow.
