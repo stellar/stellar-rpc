@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -130,7 +132,7 @@ type runEnv struct {
 // metadata, and signal-driven cancellation.
 func newBenchCommand(
 	use, short string, prof *profileFlags,
-	validate func() error,
+	validate func(outDir string) error,
 	run func(ctx context.Context, logger *supportlog.Entry, env runEnv) error,
 ) *cobra.Command {
 	var outDir string
@@ -144,7 +146,7 @@ func newBenchCommand(
 			if err := cmd.ValidateRequiredFlags(); err != nil {
 				return err
 			}
-			return validate()
+			return validate(outDir)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
@@ -156,7 +158,7 @@ func newBenchCommand(
 				Settings:   map[string]string{},
 				SetupTimes: map[string]time.Duration{},
 			}
-			if err := requireEmptyOut(outDir); err != nil {
+			if err := requireEmptyDir("out", outDir); err != nil {
 				return err
 			}
 			if err := os.MkdirAll(outDir, dirPerm); err != nil {
@@ -189,19 +191,37 @@ func newBenchCommand(
 	return cmd
 }
 
-// requireEmptyOut fails unless outDir is missing or empty, so a run never
-// replaces the files of an earlier run.
-func requireEmptyOut(outDir string) error {
-	entries, err := os.ReadDir(outDir)
+// requireEmptyDir fails unless dir, the value of --flag, is missing or empty,
+// so a run never writes over the files of an earlier run.
+func requireEmptyDir(flag, dir string) error {
+	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("read --out dir %s: %w", outDir, err)
+		return fmt.Errorf("read --%s %s: %w", flag, dir, err)
 	}
 	if len(entries) > 0 {
-		return fmt.Errorf("--out dir %s is not empty (it holds %s); pass a missing or empty --out dir",
-			outDir, entries[0].Name())
+		return fmt.Errorf("--%s %s is not empty (it holds %s); pass a missing or empty directory",
+			flag, dir, entries[0].Name())
+	}
+	return nil
+}
+
+// requireOutOutside fails when out, the value of --out, is root, the value of
+// --rootFlag, or a path inside it.
+func requireOutOutside(rootFlag, root, out string) error {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolve --%s %s: %w", rootFlag, root, err)
+	}
+	absOut, err := filepath.Abs(out)
+	if err != nil {
+		return fmt.Errorf("resolve --out %s: %w", out, err)
+	}
+	rel, err := filepath.Rel(absRoot, absOut)
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("--out %s must be outside --%s %s", out, rootFlag, root)
 	}
 	return nil
 }
@@ -227,11 +247,14 @@ func newColdCommand() *cobra.Command {
 	cmd := newBenchCommand("cold",
 		"Benchmark cold ingestion: the daemon's backfill (chunk freezes + txhash index builds) over a chunk range",
 		&prof,
-		func() error { return opts().validate() },
+		func(outDir string) error {
+			o := opts()
+			o.OutDir = outDir
+			return o.validate()
+		},
 		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			o := opts()
 			o.OutDir = env.OutDir
-			o.Settings = env.Settings
 			return runCold(ctx, logger, o)
 		})
 	src.bind(cmd)
@@ -240,8 +263,7 @@ func newColdCommand() *cobra.Command {
 	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to backfill starting at --start-chunk")
 	fs.IntVar(&workers, "workers", 1, "backfill worker-pool size, shared by chunk freezes and index builds")
 	fs.StringVar(&coldOutDir, "cold-out-dir", "",
-		"dataset root for the catalog and the cold artifacts (required); a run into an existing "+
-			"dataset must start at the chunk after its last one")
+		"dataset root for the catalog and the cold artifacts (required); must be missing or empty")
 	markRequired(cmd, "start-chunk", "cold-out-dir")
 	return cmd
 }
@@ -269,7 +291,11 @@ func newHotCommand() *cobra.Command {
 	cmd := newBenchCommand("hot",
 		"Benchmark hot ingestion: the daemon's live ingestion loop over a chunk range",
 		&prof,
-		func() error { return opts().validate() },
+		func(outDir string) error {
+			o := opts()
+			o.OutDir = outDir
+			return o.validate()
+		},
 		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			o := opts()
 			o.OutDir = env.OutDir
@@ -282,8 +308,7 @@ func newHotCommand() *cobra.Command {
 		"how many consecutive chunks to ingest starting at --start-chunk (>1 exercises the hot DB rotation)")
 	fs.Uint32Var(&numLedgers, "num-ledgers", 0, "cap on ledgers ingested from the range's start (0 = whole range)")
 	fs.StringVar(&hotDir, "hot-dir", "",
-		"dataset root for the catalog and the hot chunk databases (required); a run into an existing "+
-			"dataset must start at the chunk after its last one")
+		"dataset root for the catalog and the hot chunk databases (required); must be missing or empty")
 	fs.DurationVar(&closeInterval, "close-interval", 0,
 		"assumed time between ledger closes; >0 paces ingestion to that steady-state cadence "+
 			"and reports pace_lag (0 = ingest back-to-back, catch-up throughput)")

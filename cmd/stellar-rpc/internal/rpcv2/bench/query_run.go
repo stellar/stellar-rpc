@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,6 +25,9 @@ type queryRun struct {
 	plan   queryPlan
 	report *queryReport
 	clock  scenarioClock
+	// cpuProfile, when set, is the --cpuprofile path that scenarioProfilePath
+	// derives each scenario's CPU profile path from.
+	cpuProfile string
 }
 
 // scenarios runs every type at every rate.
@@ -51,15 +55,27 @@ func (r *queryRun) scenarios(ctx context.Context) error {
 // A cancel after the first measured iteration adds the partial scenario to the
 // report, logs it PARTIAL and returns the context error. A cancel before it
 // adds nothing. A failed measured request fails the run after the scenario is
-// added.
+// added. With cpuProfile set, the measured iterations are CPU-profiled.
 func (r *queryRun) scenario(ctx context.Context, qtype string, rps float64, req queryRequest) error {
 	p := r.plan
 	sc := scenarioReport{queryType: qtype, targetRPS: rps}
 	r.logger.Infof("query %s at %s rps for %s, %d warmup iterations",
 		qtype, formatRPS(rps), p.Duration, p.Warmup)
-	res, err := runConstantArrivalRate(ctx, r.clock, rps, p.Duration, p.Warmup, scenarioSeed(p.Seed, qtype), req)
+	var prof *cpuProfile
+	var onMeasure func() error
+	if r.cpuProfile != "" {
+		prof = &cpuProfile{path: scenarioProfilePath(r.cpuProfile, qtype, rps)}
+		onMeasure = prof.start
+	}
+	res, err := runConstantArrivalRate(ctx, r.clock, rps, p.Duration, p.Warmup, scenarioSeed(p.Seed, qtype), req,
+		onMeasure)
+	if res.planned == 0 {
+		prof.discard(r.logger) // it covers no measured iteration
+	} else {
+		prof.stop(r.logger)
+	}
 	if err != nil && !isContextErr(err) {
-		return err // a bad argument leaves no result
+		return err // a bad argument or a profile that failed to start leaves no result
 	}
 	if err != nil && res.planned == 0 {
 		r.logger.Warnf("query %s at %s rps canceled before its first measured iteration; no rows added",
@@ -77,6 +93,13 @@ func (r *queryRun) scenario(ctx context.Context, qtype string, rps float64, req 
 		return fmt.Errorf("%d of %d requests failed: %w", m.failed, m.started, m.firstErr)
 	}
 	return nil
+}
+
+// scenarioProfilePath returns the CPU profile path of the qtype scenario at
+// rps: base with ".<qtype>.<rps>rps" inserted before its extension.
+func scenarioProfilePath(base, qtype string, rps float64) string {
+	ext := filepath.Ext(base)
+	return strings.TrimSuffix(base, ext) + "." + qtype + "." + formatRPS(rps) + "rps" + ext
 }
 
 // isContextErr reports whether err is a context cancel or deadline.
@@ -129,9 +152,10 @@ func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan,
 // runQueryBench is the bench query body: open the dataset, run the
 // scenarios, write the report. The open time goes into setupNs.storeOpen. A
 // failure after the dataset opens still writes the scenarios added so far,
-// logged as PARTIAL.
+// logged as PARTIAL. A non-empty cpuProfile writes one CPU profile per
+// scenario at the path scenarioProfilePath returns.
 func runQueryBench(
-	ctx context.Context, logger *supportlog.Entry, env runEnv, p queryPlan,
+	ctx context.Context, logger *supportlog.Entry, env runEnv, p queryPlan, cpuProfile string,
 	open func() (*queryDataset, func(), error),
 ) error {
 	start := time.Now()
@@ -145,10 +169,10 @@ func runQueryBench(
 	env.Settings["tier"] = ds.Tier
 	warnFixedReadRange(logger, ds, p, env.Settings)
 	env.Settings["format"] = p.Format
-	env.Settings["handlerConcurrency"] = strconv.Itoa(handlerConcurrency())
+	env.Settings["handlerConcurrency"] = strconv.Itoa(ds.server.bridge.MaxHandlers())
 
 	report := &queryReport{}
-	run := &queryRun{logger: logger, ds: ds, plan: p, report: report, clock: timerClock{}}
+	run := &queryRun{logger: logger, ds: ds, plan: p, report: report, clock: timerClock{}, cpuProfile: cpuProfile}
 	runErr := run.scenarios(ctx)
 	written, err := report.write(env.OutDir)
 	if runErr != nil {

@@ -88,14 +88,14 @@ func chunkRange(start, end chunk.ID) []chunk.ID {
 	return chunks
 }
 
-// checkInputDir checks that path, the input named by what, is a directory.
-func checkInputDir(what, path string) error {
-	info, err := os.Stat(path)
+// checkInputDir checks that dir, the value of --flag, is a directory.
+func checkInputDir(flag, dir string) error {
+	info, err := os.Stat(dir)
 	if err != nil {
-		return fmt.Errorf("%s: %w", what, err)
+		return fmt.Errorf("read --%s %s: %w", flag, dir, err)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("%s: %s is not a directory", what, path)
+		return fmt.Errorf("--%s %s is not a directory", flag, dir)
 	}
 	return nil
 }

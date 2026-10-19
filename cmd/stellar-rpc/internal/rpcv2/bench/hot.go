@@ -36,8 +36,8 @@ type hotOptions struct {
 
 	// HotRoot is the dataset root, laid out by geometry.NewLayout: the catalog
 	// and the hot chunk databases. Each chunk's DB is created through the
-	// production create bracket, so every run writes into empty DBs. A run into
-	// an existing dataset appends the chunks after its last one.
+	// production create bracket, so every run writes into empty DBs. It must be
+	// missing or empty.
 	HotRoot string
 
 	// CloseInterval is the assumed time between ledger closes. When positive,
@@ -60,6 +60,14 @@ func (o hotOptions) validate() error {
 	}
 	if o.HotRoot == "" {
 		return errors.New("--hot-dir is required")
+	}
+	if err := requireEmptyDir("hot-dir", o.HotRoot); err != nil {
+		return err
+	}
+	if o.OutDir != "" {
+		if err := requireOutOutside("hot-dir", o.HotRoot, o.OutDir); err != nil {
+			return err
+		}
 	}
 	if o.NumChunks < 1 {
 		return fmt.Errorf("--num-chunks must be >= 1, got %d", o.NumChunks)
@@ -108,11 +116,6 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		last = first + opts.NumLedgers - 1
 	}
 
-	datasetFirst, err := prepareIngest(cat, tierHot, opts.StartChunk, chunk.IDFromLedger(last))
-	if err != nil {
-		return fmt.Errorf("--hot-dir %s: %w", opts.HotRoot, err)
-	}
-
 	sink := newCSVSink()
 	stream, schedule := buildHotStream(backend, first, last, opts.CloseInterval)
 	sink.schedule = schedule
@@ -137,13 +140,16 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		return err
 	}
 	sink.observe(fileDriver, driverRunWall, time.Since(start), int(last-first+1))
+	if err := finishIngest(cat, opts.StartChunk, logger); err != nil {
+		return err
+	}
 	sink.logSummary(logger)
 	written, err := sink.writeCSVs(opts.OutDir)
 	if err != nil {
 		return err
 	}
 	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)
-	return finishIngest(cat, datasetFirst, logger)
+	return nil
 }
 
 // buildHotStream wraps backend for a bounded hot run. With closeInterval == 0

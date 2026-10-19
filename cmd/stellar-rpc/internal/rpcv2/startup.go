@@ -57,7 +57,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// highest ready hot DB before ingestion opens a writer; a read-only open
 	// replays any synced WAL from an ungraceful crash into memtables, so
 	// MaxCommittedSeq is correct.
-	lastCommitted, err := lastCommittedLedger(cat)
+	lastCommitted, err := LastCommittedLedger(cat)
 	if err != nil {
 		return fmt.Errorf("startup derive last-committed: %w", err)
 	}
@@ -213,18 +213,17 @@ func run(ctx context.Context, cfg StartConfig) error {
 	return g.Wait()
 }
 
-// OpenServing opens the read registry over cat's committed state the way
-// daemon startup does: it opens or creates the hot DB of the chunk after
-// lastCommitted, opens the registry with that DB as the live chunk, and stamps
-// both window edges' close times. On success the caller must close the
-// registry, which also closes the returned DB; on error nothing stays open.
+// OpenServing opens a read registry over catalog's committed state and a hot DB
+// for ledger lastCommitted+1, with close times for both serving-window edges.
+// When that ledger's chunk has no ready hot DB, OpenServing creates it and
+// records it in cat. The caller must close the registry, which also closes the
+// returned DB. On error, it closes any resources it opened.
 func OpenServing(
 	cat *catalog.Catalog, retention geometry.Retention, lastCommitted uint32, logger *supportlog.Entry,
 ) (*query.Registry, *hotchunk.DB, error) {
-	resume := lastCommitted + 1
-	hotDB, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), logger)
+	hotDB, err := openResumeHotDB(cat, lastCommitted, logger)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open resume hot tier for ledger %d: %w", resume, err)
+		return nil, nil, err
 	}
 	registry, err := query.OpenRegistry(cat, retention, hotDB, lastCommitted)
 	if err != nil {
@@ -242,21 +241,25 @@ func OpenServing(
 	return registry, hotDB, nil
 }
 
-// LastCommittedLedger returns the highest ledger cat's dataset holds durably,
-// as daemon startup derives it.
-func LastCommittedLedger(cat *catalog.Catalog) (uint32, error) {
-	return lastCommittedLedger(cat)
+// CreateLiveChunk opens, or creates, the hot DB of the chunk that holds ledger
+// lastCommitted+1, as daemon startup does, and closes it.
+func CreateLiveChunk(cat *catalog.Catalog, lastCommitted uint32, logger *supportlog.Entry) error {
+	hotDB, err := openResumeHotDB(cat, lastCommitted, logger)
+	if err != nil {
+		return err
+	}
+	return hotDB.Close()
 }
 
-// CreateLiveChunk opens or creates the hot DB of the chunk after lastCommitted,
-// as daemon startup does, and closes it.
-func CreateLiveChunk(cat *catalog.Catalog, lastCommitted uint32, logger *supportlog.Entry) error {
+// openResumeHotDB opens or creates the hot DB of the chunk that holds ledger
+// lastCommitted+1.
+func openResumeHotDB(cat *catalog.Catalog, lastCommitted uint32, logger *supportlog.Entry) (*hotchunk.DB, error) {
 	resume := lastCommitted + 1
 	hotDB, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), logger)
 	if err != nil {
-		return fmt.Errorf("open resume hot tier for ledger %d: %w", resume, err)
+		return nil, fmt.Errorf("open resume hot tier for ledger %d: %w", resume, err)
 	}
-	return hotDB.Close()
+	return hotDB, nil
 }
 
 // requirePinnedEarliest returns the pinned earliest_ledger, erroring when the pin

@@ -7,8 +7,9 @@
 // backfill.RunBackfill, hot calls the production ingestion loop. Both report
 // their per-stage timings through the MetricSink and observability.Metrics
 // interfaces; a csvSink implements those interfaces, collects the signals, and
-// aggregates each run into percentile CSV reports. Each dataset keeps its
-// catalog, so later runs can append chunks to it and bench query can open it.
+// aggregates each run into percentile CSV reports. Each run writes a new
+// dataset, with its catalog, into a missing or empty directory, and bench query
+// opens that dataset.
 //
 // bench query measures read latency on the data that bench ingest wrote. It
 // opens the dataset the way daemon startup opens its data dir, and the catalog

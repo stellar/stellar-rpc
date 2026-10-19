@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -39,16 +39,12 @@ func maxTxPageLimit() uint {
 	return *servingConfig().Service.Methods.GetTransactions.MaxItemsPerResponse
 }
 
-// handlerConcurrency is how many handlers the read server runs at once: the
-// daemon's bridge runs one per CPU.
-func handlerConcurrency() int { return runtime.NumCPU() }
-
 // readServer serves the daemon's read methods through the daemon's JSON-RPC
 // bridge, in process and without HTTP. A call's latency covers the bridge's
 // request parse, the wait for a handler slot, the handler and the response
 // write; its handler time covers the handler alone, read view included.
 type readServer struct {
-	bridge jsonrpc.Bridge
+	bridge *jsonrpc.Bridge
 }
 
 // newReadServer starts a read server over registry. The caller must close it
@@ -64,16 +60,16 @@ func newReadServer(registry *query.Registry, passphrase string, logger *supportl
 // close cancels the running handlers and waits for them.
 func (s *readServer) close() { s.bridge.Close() }
 
-// call sends one request and decodes its result into result. Only the bridge's
-// ServeHTTP is timed: the request is encoded before the timer starts and the
-// response is decoded after it stops. The timing has no items.
-func (s *readServer) call(ctx context.Context, method string, params, result any) (requestTiming, error) {
-	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: 1, Method: method, Params: params})
+// call sends one request and returns its timing and item count. Only the
+// bridge's ServeHTTP is timed. A successful response body is not decoded: the
+// handler reports its result's item count through the request context.
+func (s *readServer) call(ctx context.Context, method string, params any) (requestTiming, error) {
+	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: rpcRequestID, Method: method, Params: params})
 	if err != nil {
 		return requestTiming{}, fmt.Errorf("encode %s request: %w", method, err)
 	}
-	var handlerLatency time.Duration
-	req, err := http.NewRequestWithContext(context.WithValue(ctx, handlerTimeKey{}, &handlerLatency),
+	var res handlerResult
+	req, err := http.NewRequestWithContext(context.WithValue(ctx, handlerResultKey{}, &res),
 		http.MethodPost, "/", bytes.NewReader(body))
 	if err != nil {
 		return requestTiming{}, fmt.Errorf("build %s request: %w", method, err)
@@ -85,25 +81,41 @@ func (s *readServer) call(ctx context.Context, method string, params, result any
 	s.bridge.ServeHTTP(w, req)
 	latency := time.Since(start)
 
+	// The prefix check catches a response the bridge turned into an error
+	// after the handler returned, such as a result that failed to encode.
+	if w.status == http.StatusOK && res.ran && res.err == nil && bytes.HasPrefix(w.body.Bytes(), rpcSuccessPrefix) {
+		return requestTiming{latency: latency, handlerLatency: res.latency, items: res.items}, nil
+	}
+	return requestTiming{}, responseError(ctx, method, w)
+}
+
+// responseError returns the error that the failed response in w reports. A
+// canceled ctx returns ctx.Err().
+func responseError(ctx context.Context, method string, w *responseBuffer) error {
 	if w.status != http.StatusOK {
-		return requestTiming{}, fmt.Errorf("%s: HTTP status %d: %s", method, w.status, w.body.Bytes())
+		return fmt.Errorf("%s: HTTP status %d: %s", method, w.status, w.body.Bytes())
 	}
 	var rsp rpcResponse
 	if err := json.Unmarshal(w.body.Bytes(), &rsp); err != nil {
-		return requestTiming{}, fmt.Errorf("decode %s response: %w", method, err)
+		return fmt.Errorf("decode %s response: %w", method, err)
 	}
-	if rsp.Error != nil {
-		// The handler reports a canceled request as a JSON-RPC error.
-		if err := ctx.Err(); err != nil {
-			return requestTiming{}, err
-		}
-		return requestTiming{}, fmt.Errorf("%s: %w", method, rsp.Error)
+	if rsp.Error == nil {
+		return fmt.Errorf("%s: unexpected response: %.200s", method, w.body.Bytes())
 	}
-	if err := json.Unmarshal(rsp.Result, result); err != nil {
-		return requestTiming{}, fmt.Errorf("decode %s result: %w", method, err)
+	// The handler reports a canceled request as a JSON-RPC error.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return requestTiming{latency: latency, handlerLatency: handlerLatency}, nil
+	return fmt.Errorf("%s: %w", method, rsp.Error)
 }
+
+// rpcRequestID is the ID of every request call sends.
+const rpcRequestID = 1
+
+// rpcSuccessPrefix starts the bridge's response to a call that succeeded.
+//
+//nolint:gochecknoglobals // read-only
+var rpcSuccessPrefix = []byte(`{"jsonrpc":"2.0","id":` + strconv.Itoa(rpcRequestID) + `,"result":`)
 
 // rpcRequest is a JSON-RPC 2.0 request.
 type rpcRequest struct {
@@ -119,20 +131,41 @@ type rpcResponse struct {
 	Error  *jrpc2.Error    `json:"error"`
 }
 
-// handlerTimeKey keys the request context's handler time slot, a
-// *time.Duration that timeHandler sets.
-type handlerTimeKey struct{}
+// handlerResultKey keys the request context's handler result slot, a
+// *handlerResult that timeHandler fills.
+type handlerResultKey struct{}
 
-// timeHandler returns h, writing its run time into the request context's
-// handler time slot when the context has one.
+// handlerResult is what timeHandler records about one handler call.
+type handlerResult struct {
+	ran     bool
+	latency time.Duration
+	items   int
+	err     error
+}
+
+// timeHandler returns h, recording its run time, item count and error in the
+// request context's handler result slot when the context has one.
 func timeHandler(h jrpc2.Handler) jrpc2.Handler {
 	return func(ctx context.Context, req *jrpc2.Request) (any, error) {
 		start := time.Now()
 		res, err := h(ctx, req)
-		if slot, ok := ctx.Value(handlerTimeKey{}).(*time.Duration); ok {
-			*slot = time.Since(start)
+		if slot, ok := ctx.Value(handlerResultKey{}).(*handlerResult); ok {
+			*slot = handlerResult{ran: true, latency: time.Since(start), items: itemCount(res), err: err}
 		}
 		return res, err
+	}
+}
+
+// itemCount returns how many ledgers or transactions a getLedgers or
+// getTransactions result holds, and 0 for any other result.
+func itemCount(res any) int {
+	switch r := res.(type) {
+	case protocol.GetLedgersResponse:
+		return len(r.Ledgers)
+	case protocol.GetTransactionsResponse:
+		return len(r.Transactions)
+	default:
+		return 0
 	}
 }
 

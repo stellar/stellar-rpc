@@ -52,7 +52,7 @@ const (
 type Handler struct {
 	http.Handler
 
-	bridge   *bridge
+	bridge   *Bridge
 	inflight *sync.WaitGroup
 }
 

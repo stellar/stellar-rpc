@@ -52,6 +52,14 @@ func TestCommandRecordsFailedRun(t *testing.T) {
 	}
 }
 
+// nonEmptyDir returns a new directory that holds one file.
+func nonEmptyDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "leftover"), nil, 0o600))
+	return dir
+}
+
 // TestCommandRejectsBadFlagsBeforeOut checks that a flag error creates no --out.
 func TestCommandRejectsBadFlagsBeforeOut(t *testing.T) {
 	for _, tc := range []struct {
@@ -68,6 +76,12 @@ func TestCommandRejectsBadFlagsBeforeOut(t *testing.T) {
 			"--hot-dir", t.TempDir(),
 		}, "--source=bogus"},
 		{"hot missing required flags", []string{"hot"}, `required flag(s) "hot-dir", "start-chunk" not set`},
+		{"cold non-empty dataset dir", []string{
+			"cold", "--start-chunk", "0", "--cold-out-dir", nonEmptyDir(t), "--pack-dir", t.TempDir(),
+		}, "--cold-out-dir"},
+		{"hot non-empty dataset dir", []string{
+			"hot", "--start-chunk", "0", "--hot-dir", nonEmptyDir(t), "--pack-dir", t.TempDir(),
+		}, "--hot-dir"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			outDir := filepath.Join(t.TempDir(), "csv")
@@ -81,13 +95,41 @@ func TestCommandRejectsBadFlagsBeforeOut(t *testing.T) {
 	}
 }
 
+// TestIngestCommandsRefuseOutInDataset checks that cold and hot refuse an --out
+// that is the dataset dir or inside it, and create nothing.
+func TestIngestCommandsRefuseOutInDataset(t *testing.T) {
+	for _, tc := range []struct{ cmd, rootFlag string }{
+		{"cold", "cold-out-dir"},
+		{"hot", "hot-dir"},
+	} {
+		for _, place := range []string{"equal", "inside"} {
+			t.Run(tc.cmd+" "+place, func(t *testing.T) {
+				root := filepath.Join(t.TempDir(), "dataset")
+				out := root
+				if place == "inside" {
+					out = filepath.Join(root, "report")
+				}
+				cmd := newIngestCommand()
+				cmd.SetOut(io.Discard)
+				cmd.SetErr(io.Discard)
+				cmd.SetArgs([]string{
+					tc.cmd, "--start-chunk", "0", "--" + tc.rootFlag, root, "--pack-dir", t.TempDir(),
+					"--out", out,
+				})
+				require.ErrorContains(t, cmd.Execute(), "must be outside --"+tc.rootFlag)
+				require.NoDirExists(t, root)
+			})
+		}
+	}
+}
+
 // TestCommandRecordsSuccessfulRun checks run.json during and after a run.
 func TestCommandRecordsSuccessfulRun(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "csv")
 	var ran bool
 
 	cmd := newBenchCommand("probe", "", &profileFlags{},
-		func() error { return nil },
+		func(string) error { return nil },
 		func(_ context.Context, _ *supportlog.Entry, env runEnv) error {
 			ran = true
 			data, err := os.ReadFile(filepath.Join(env.OutDir, runRecordFile))
@@ -124,8 +166,8 @@ func TestCommandRecordsSuccessfulRun(t *testing.T) {
 	assert.NotContains(t, raw, "error")
 }
 
-// TestRequireEmptyOut checks which --out dirs requireEmptyOut accepts.
-func TestRequireEmptyOut(t *testing.T) {
+// TestRequireEmptyDir checks which dirs requireEmptyDir accepts.
+func TestRequireEmptyDir(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		files []string
@@ -149,7 +191,7 @@ func TestRequireEmptyOut(t *testing.T) {
 			for _, name := range tc.dirs {
 				require.NoError(t, os.Mkdir(filepath.Join(out, name), 0o700))
 			}
-			err := requireEmptyOut(out)
+			err := requireEmptyDir("out", out)
 			if tc.held == "" {
 				require.NoError(t, err)
 				return
@@ -162,7 +204,7 @@ func TestRequireEmptyOut(t *testing.T) {
 	t.Run("out is a file", func(t *testing.T) {
 		out := filepath.Join(t.TempDir(), "out")
 		require.NoError(t, os.WriteFile(out, nil, 0o600))
-		require.ErrorContains(t, requireEmptyOut(out), "read --out dir")
+		require.ErrorContains(t, requireEmptyDir("out", out), "read --out ")
 	})
 }
 

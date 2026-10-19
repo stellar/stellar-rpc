@@ -7,13 +7,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
@@ -41,15 +39,11 @@ type coldOptions struct {
 	Workers int
 
 	// ColdRoot is the dataset root, laid out by geometry.NewLayout: the
-	// catalog and the artifacts. A run into an existing dataset appends the
-	// chunks after its last one.
+	// catalog and the artifacts. It must be missing or empty.
 	ColdRoot string
 
 	// OutDir receives the CSV report.
 	OutDir string
-
-	// Settings receives the run settings that go into run.json; nil skips them.
-	Settings map[string]string
 }
 
 // validate checks the flags and chunk range before runCold touches the
@@ -71,6 +65,14 @@ func (o coldOptions) validate() error {
 	}
 	if o.ColdRoot == "" {
 		return errors.New("--cold-out-dir is required")
+	}
+	if err := requireEmptyDir("cold-out-dir", o.ColdRoot); err != nil {
+		return err
+	}
+	if o.OutDir != "" {
+		if err := requireOutOutside("cold-out-dir", o.ColdRoot, o.OutDir); err != nil {
+			return err
+		}
 	}
 	// Refuse re-packing a source pack tree in place: the backfill always
 	// materializes ledger packs, the cold ledger writer overwrites its
@@ -103,27 +105,15 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		return err
 	}
 	defer func() { _ = cat.Close() }()
-	// The source opens before prepareIngest, whose append discards the live
-	// chunk, so a source that fails to open leaves the dataset queryable.
 	backend, release, err := openSource(ctx, opts.Source)
 	if err != nil {
 		return err
 	}
 	defer release()
+	first := opts.StartChunk
 	//nolint:gosec // validate() proved StartChunk+NumChunks-1 <= maxChunkID
-	end := opts.StartChunk + chunk.ID(uint32(opts.NumChunks-1))
-	first, err := prepareIngest(cat, tierCold, opts.StartChunk, end)
-	if err != nil {
-		return fmt.Errorf("--cold-out-dir %s: %w", opts.ColdRoot, err)
-	}
+	end := first + chunk.ID(uint32(opts.NumChunks-1))
 
-	// An append backfills from the dataset's first chunk, as the daemon does
-	// from its retention floor: frozen chunks are skipped and the tx-hash index
-	// is rebuilt over every chunk, so its timings differ from a fresh run's.
-	if opts.Settings != nil {
-		opts.Settings["datasetFirstChunk"] = strconv.FormatUint(uint64(first), 10)
-		opts.Settings["append"] = strconv.FormatBool(first < opts.StartChunk)
-	}
 	sink := newCSVSink()
 	start := time.Now()
 	err = backfill.RunBackfill(ctx, backfill.ExecConfig{
@@ -142,6 +132,9 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	}
 	totalWall := time.Since(start)
 
+	if err := finishIngest(cat, first, logger); err != nil {
+		return err
+	}
 	sink.logSummary(logger)
 	logColdWall(logger, sink, opts.NumChunks, totalWall)
 	written, err := sink.writeCSVs(opts.OutDir)
@@ -149,28 +142,6 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		return err
 	}
 	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)
-	if err := destroyPruningTxHashIndexes(cat); err != nil {
-		return err
-	}
-	return finishIngest(cat, first, logger)
-}
-
-// destroyPruningTxHashIndexes removes the tx-hash index coverages the backfill
-// superseded, with the catalog destroy the daemon's prune scan uses. The
-// caller must hold no reader on the dataset.
-func destroyPruningTxHashIndexes(cat *catalog.Catalog) error {
-	covs, err := cat.AllTxHashIndexKeys()
-	if err != nil {
-		return fmt.Errorf("read tx-hash index keys: %w", err)
-	}
-	for _, cov := range covs {
-		if cov.State != geometry.StatePruning {
-			continue
-		}
-		if err := cat.DestroyTxHashIndexKey(cov); err != nil {
-			return fmt.Errorf("destroy superseded tx-hash index %s: %w", cov.Key, err)
-		}
-	}
 	return nil
 }
 

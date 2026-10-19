@@ -39,8 +39,8 @@ func TestScenarioSeedIsDistinctPerType(t *testing.T) {
 	assert.Len(t, seen, len(allQueryTypes))
 }
 
-func testQueryRun(logger *supportlog.Entry, ds *queryDataset, p queryPlan, clock scenarioClock) *queryRun {
-	return &queryRun{logger: logger, ds: ds, plan: p, report: &queryReport{}, clock: clock}
+func testQueryRun(logger *supportlog.Entry, p queryPlan, clock scenarioClock) *queryRun {
+	return &queryRun{logger: logger, plan: p, report: &queryReport{}, clock: clock}
 }
 
 // A measured request failure fails the run, and the scenario's counts and
@@ -57,7 +57,7 @@ func TestQueryScenarioKeepsRequestFailures(t *testing.T) {
 			}
 			logger, _ := capturingLogger()
 			clock := &fakeScenarioClock{}
-			run := testQueryRun(logger, nil, queryPlan{Duration: 4 * time.Millisecond}, clock)
+			run := testQueryRun(logger, queryPlan{Duration: 4 * time.Millisecond}, clock)
 			err := run.scenario(context.Background(), queryTypeLedgers, 1000, req)
 			require.ErrorContains(t, err, "requests failed")
 			require.ErrorContains(t, err, "read failed")
@@ -116,7 +116,7 @@ func TestQueryScenarioCanceled(t *testing.T) {
 			}
 			logger, output := capturingLogger()
 			p := queryPlan{Duration: time.Second, Warmup: tc.warmup}
-			run := testQueryRun(logger, nil, p, clock)
+			run := testQueryRun(logger, p, clock)
 			err := run.scenario(ctx, queryTypeLedgers, rps, req)
 			require.ErrorIs(t, err, context.Canceled)
 			if tc.planned == 0 {
@@ -204,7 +204,7 @@ func TestQueryCommandsRejectBadInputsBeforeOut(t *testing.T) {
 		wantErr string
 	}{
 		{"bad --types", []string{"--data-dir", t.TempDir(), "--types", "bogus"}, "bogus"},
-		{"missing --data-dir", []string{"--data-dir", missing}, "--data-dir: stat " + missing},
+		{"missing --data-dir", []string{"--data-dir", missing}, "read --data-dir " + missing},
 		{
 			"no catalog",
 			[]string{"--data-dir", noCatalog},
@@ -277,7 +277,7 @@ func TestQueryHotCommandRecordsFixedReadRange(t *testing.T) {
 }
 
 // ingestColdChunk runs bench ingest cold over one full fixture chunk 0 and
-// returns its --cold-dir.
+// returns its --cold-out-dir.
 func ingestColdChunk(t *testing.T) string {
 	t.Helper()
 	packDir, _ := writeSourcePack(t, t.TempDir(), 0, chunk.LedgersPerChunk)
@@ -321,7 +321,7 @@ func TestQueryBenchWritesPartialReport(t *testing.T) {
 		return openDataset(testLogger(), queryOptions{DataDir: hotRoot, Plan: plan})
 	}
 	logger, output := capturingLogger()
-	err := runQueryBench(context.Background(), logger, env, plan, open)
+	err := runQueryBench(context.Background(), logger, env, plan, "", open)
 	require.ErrorContains(t, err, "prepare the unknown benchmark")
 
 	_, rows := readCSVTable(t, filepath.Join(env.OutDir, queryScenariosFile))
@@ -329,4 +329,64 @@ func TestQueryBenchWritesPartialReport(t *testing.T) {
 	assert.Equal(t, queryTypeLedgers, rows[0]["query_type"])
 	assert.FileExists(t, filepath.Join(env.OutDir, queryLatencyFile))
 	assert.Contains(t, output.String(), "PARTIAL CSVs")
+}
+
+// --cpuprofile writes one non-empty CPU profile per type and rate, and none at
+// its own path.
+func TestQueryCommandCPUProfilePerScenario(t *testing.T) {
+	hotRoot := ingestHotChunk(t)
+	base := filepath.Join(t.TempDir(), "cpu.pprof")
+	_, rows := runQueryCommand(t, "--data-dir", hotRoot, "--cpuprofile", base,
+		"--types", queryTypeLedgers+","+queryTypeTxPage, "--target-rps", "1000,2000", "--duration", "20ms")
+	require.Len(t, rows, 4)
+	for _, qtype := range []string{queryTypeLedgers, queryTypeTxPage} {
+		for _, rps := range []string{"1000", "2000"} {
+			info, err := os.Stat(filepath.Join(filepath.Dir(base), "cpu."+qtype+"."+rps+"rps.pprof"))
+			require.NoError(t, err)
+			assert.Positive(t, info.Size())
+		}
+	}
+	assert.NoFileExists(t, base)
+}
+
+func TestScenarioProfilePath(t *testing.T) {
+	assert.Equal(t, "/p/cpu.ledgers.10rps.pprof", scenarioProfilePath("/p/cpu.pprof", queryTypeLedgers, 10))
+	assert.Equal(t, "/p.d/cpu.txpage.0.5rps", scenarioProfilePath("/p.d/cpu", queryTypeTxPage, 0.5))
+}
+
+// A CPU profile that cannot be created fails the scenario before any measured
+// request and adds no row.
+func TestQueryScenarioCPUProfileFailure(t *testing.T) {
+	logger, _ := capturingLogger()
+	run := testQueryRun(logger, queryPlan{Duration: 4 * time.Millisecond}, &fakeScenarioClock{})
+	run.cpuProfile = filepath.Join(t.TempDir(), "missing", "cpu.pprof")
+	var calls atomic.Int32
+	req := func(context.Context, *rand.Rand) (requestTiming, error) {
+		calls.Add(1)
+		return requestTiming{latency: time.Microsecond}, nil
+	}
+	err := run.scenario(t.Context(), queryTypeLedgers, 1000, req)
+	require.ErrorContains(t, err, "create CPU profile")
+	assert.Zero(t, calls.Load())
+	assert.Empty(t, run.report.scenarios)
+}
+
+// A cancel after the CPU profile starts but before the first measured request
+// leaves no profile file.
+func TestQueryScenarioCancelBeforeMeasureRemovesProfile(t *testing.T) {
+	const warmup = 2
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	logger, _ := capturingLogger()
+	clock := &fakeScenarioClock{onWait: cancelAtWait(cancel, warmup)}
+	run := testQueryRun(logger, queryPlan{Duration: 4 * time.Millisecond, Warmup: warmup}, clock)
+	run.cpuProfile = filepath.Join(t.TempDir(), "cpu.pprof")
+
+	err := run.scenario(ctx, queryTypeLedgers, 1000, okRequest)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, run.report.scenarios)
+	assert.NoFileExists(t, scenarioProfilePath(run.cpuProfile, queryTypeLedgers, 1000))
+	entries, readErr := os.ReadDir(filepath.Dir(run.cpuProfile))
+	require.NoError(t, readErr)
+	assert.Empty(t, entries)
 }

@@ -1,18 +1,25 @@
 package bench
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net/http"
 	"path/filepath"
 	"testing"
 
+	"github.com/creachadair/jrpc2"
+	"github.com/creachadair/jrpc2/handler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 )
@@ -25,6 +32,78 @@ func executeQuery(t *testing.T, args ...string) {
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs(append(args, "--out", filepath.Join(t.TempDir(), "out")))
 	require.NoError(t, cmd.Execute())
+}
+
+// callResult sends one request through s's bridge and decodes its result into
+// result.
+func callResult(t *testing.T, s *readServer, method string, params, result any) {
+	t.Helper()
+	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: rpcRequestID, Method: method, Params: params})
+	require.NoError(t, err)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "/", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	w := &responseBuffer{header: http.Header{}}
+	s.bridge.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.status, "%s", w.body.Bytes())
+	var rsp rpcResponse
+	require.NoError(t, json.Unmarshal(w.body.Bytes(), &rsp))
+	require.Nil(t, rsp.Error)
+	require.NoError(t, json.Unmarshal(rsp.Result, result))
+}
+
+// newTestReadServer serves methods through a bridge the way newReadServer
+// does.
+func newTestReadServer(t *testing.T, methods handler.Map) *readServer {
+	t.Helper()
+	for name, h := range methods {
+		methods[name] = timeHandler(h)
+	}
+	s := &readServer{bridge: jsonrpc.NewBridge(methods, testLogger())}
+	t.Cleanup(s.close)
+	return s
+}
+
+// fixedHandler is a jrpc2.Handler that returns v and err.
+func fixedHandler(v any, err error) jrpc2.Handler {
+	return func(context.Context, *jrpc2.Request) (any, error) { return v, err }
+}
+
+// call succeeds only when the handler returned no error and the bridge wrote
+// its result, and it counts the items of a getLedgers or getTransactions
+// result.
+func TestReadServerCall(t *testing.T) {
+	s := newTestReadServer(t, handler.Map{
+		protocol.GetLedgersMethodName: fixedHandler(
+			protocol.GetLedgersResponse{Ledgers: make([]protocol.LedgerInfo, 3)}, nil),
+		protocol.GetTransactionsMethodName: fixedHandler(
+			protocol.GetTransactionsResponse{Transactions: make([]protocol.TransactionInfo, 2)}, nil),
+		"other":       fixedHandler(7, nil),
+		"fails":       fixedHandler(nil, errors.New("boom")),
+		"unencodable": fixedHandler(func() {}, nil),
+	})
+
+	for method, want := range map[string]int{
+		protocol.GetLedgersMethodName: 3, protocol.GetTransactionsMethodName: 2, "other": 0,
+	} {
+		timing, err := s.call(t.Context(), method, nil)
+		require.NoError(t, err, method)
+		assert.Equal(t, want, timing.items, method)
+		assert.Positive(t, timing.latency, method)
+		assert.LessOrEqual(t, timing.handlerLatency, timing.latency, method)
+	}
+
+	_, err := s.call(t.Context(), "fails", nil)
+	require.ErrorContains(t, err, "boom")
+	_, err = s.call(t.Context(), "unencodable", nil)
+	require.ErrorContains(t, err, "unencodable:", "the bridge failed to encode the result")
+	_, err = s.call(t.Context(), "missing", nil)
+	require.ErrorContains(t, err, "missing:", "no handler ran")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = s.call(ctx, "fails", nil)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // newRequest is the constructor of one request type.

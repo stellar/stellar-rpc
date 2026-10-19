@@ -227,13 +227,17 @@ func validateScenario(rps float64, duration time.Duration, warmup int) (time.Dur
 // iterations per second and never waits for a response. The first warmup
 // iterations are not measured; a negative warmup counts as zero.
 //
+// onMeasure, when not nil, runs once before the wait for the first measured
+// iteration. Its error ends the scenario and is returned. A cancel during that
+// wait returns a result with no measured iteration.
+//
 // A failed request is counted and does not end the scenario. A bad argument
 // returns an error and an empty result. A cancel returns the context error and
 // a result that covers the iterations reached; running requests get the cancel
 // through ctx.
 func runConstantArrivalRate(
 	ctx context.Context, clock scenarioClock, rps float64, duration time.Duration, warmup int, seed int64,
-	req queryRequest,
+	req queryRequest, onMeasure func() error,
 ) (scenarioResult, error) {
 	warmup = max(warmup, 0)
 	interval, planned, err := validateScenario(rps, duration, warmup)
@@ -246,6 +250,13 @@ func runConstantArrivalRate(
 	due := func(i int) time.Time { return start.Add(time.Duration(i) * interval) }
 	var cpuAtFirstReach time.Duration
 	for i := range warmup + planned {
+		// onMeasure runs before the wait so its cost is not in the first
+		// measured start delay.
+		if i == warmup && onMeasure != nil {
+			if err = onMeasure(); err != nil {
+				break
+			}
+		}
 		if err = clock.waitUntil(ctx, due(i)); err != nil {
 			break
 		}

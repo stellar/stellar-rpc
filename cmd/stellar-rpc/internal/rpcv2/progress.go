@@ -14,9 +14,9 @@ import (
 // sentinel; chunk.LastLedgerOf is the chokepoint (the signed chunk↔ledger
 // maps live in geometry so there is one -1 convention across the daemon).
 
-// lastCommittedLedger is the single highest-durably-committed-ledger derivation.
-// It maxes three terms, each in the signed domain so a fresh/young store never
-// underflows to MaxUint32:
+// LastCommittedLedger returns the highest ledger cat's dataset holds durably,
+// as daemon startup derives it. It maxes three terms, each in the signed domain
+// so a fresh/young store never underflows to MaxUint32:
 //
 //   - COLD — highest chunk with all artifacts durable (highestDurableChunk; -1 on
 //     a fresh start). Leads at startup before any hot key exists.
@@ -29,8 +29,8 @@ import (
 //
 // The refinement's read-only open reuses the catalog's own logger
 // (hotchunk.OpenReadyView needs one), landing the design signature
-// lastCommittedLedger(cat).
-func lastCommittedLedger(cat *catalog.Catalog) (uint32, error) {
+// LastCommittedLedger(cat).
+func LastCommittedLedger(cat *catalog.Catalog) (uint32, error) {
 	cold, err := highestDurableChunk(cat)
 	if err != nil {
 		return 0, err

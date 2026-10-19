@@ -119,8 +119,7 @@ func TestHotDatasetSampleBoundsHandlers(t *testing.T) {
 	require.Equal(t, chunk.ID(0).FirstLedger()+1, ds.LastLedger)
 
 	var latest protocol.GetLatestLedgerResponse
-	_, err = ds.server.call(context.Background(), protocol.GetLatestLedgerMethodName, nil, &latest)
-	require.NoError(t, err)
+	callResult(t, ds.server, protocol.GetLatestLedgerMethodName, nil, &latest)
 	assert.Equal(t, ds.LastLedger, latest.Sequence)
 
 	ds.LastLedger = ds.FirstLedger

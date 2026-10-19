@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -22,7 +24,7 @@ import (
 func newQueryCommand() *cobra.Command {
 	var (
 		qf   queryFlags
-		prof profileFlags
+		prof = profileFlags{cpuPerScenario: true}
 		cmd  *cobra.Command
 
 		dataDir       string
@@ -40,12 +42,13 @@ func newQueryCommand() *cobra.Command {
 			HasStartChunk: cmd.Flags().Changed("start-chunk"),
 			SampleLedgers: sampleLedgers,
 			Plan:          plan,
+			CPUProfile:    prof.cpuProfile,
 		}, nil
 	}
 	cmd = newBenchCommand("query",
 		"Benchmark reads over a dataset that bench ingest cold or hot wrote",
 		&prof,
-		func() error {
+		func(string) error {
 			o, err := opts()
 			if err != nil {
 				return err
@@ -89,6 +92,9 @@ type queryOptions struct {
 
 	// Plan is the validated flags.
 	Plan queryPlan
+
+	// CPUProfile is the --cpuprofile path; see runQueryBench.
+	CPUProfile string
 }
 
 // validate checks the flags, and that --data-dir holds a catalog.
@@ -100,12 +106,17 @@ func (o queryOptions) validate() error {
 		return fmt.Errorf("--start-chunk=%d is past the last valid chunk ID %d",
 			uint32(o.StartChunk), uint32(maxChunkID))
 	}
-	if err := checkInputDir("--data-dir", o.DataDir); err != nil {
+	if err := checkInputDir("data-dir", o.DataDir); err != nil {
 		return err
 	}
-	if path := geometry.NewLayout(o.DataDir).CatalogPath(); checkInputDir("catalog", path) != nil {
+	path := geometry.NewLayout(o.DataDir).CatalogPath()
+	info, err := os.Stat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()):
 		return fmt.Errorf("--data-dir %s has no dataset catalog at %s: ingest it with this version's bench ingest",
 			o.DataDir, path)
+	case err != nil:
+		return fmt.Errorf("read --data-dir catalog %s: %w", path, err)
 	}
 	return nil
 }
@@ -115,7 +126,7 @@ func runQuery(ctx context.Context, logger *supportlog.Entry, env runEnv, opts qu
 	if err := opts.validate(); err != nil {
 		return err
 	}
-	return runQueryBench(ctx, logger, env, opts.Plan, func() (*queryDataset, func(), error) {
+	return runQueryBench(ctx, logger, env, opts.Plan, opts.CPUProfile, func() (*queryDataset, func(), error) {
 		return openDataset(logger, opts)
 	})
 }
@@ -186,8 +197,7 @@ func servedBounds(cat *catalog.Catalog, opts queryOptions) (chunk.ID, uint32, er
 		return 0, 0, fmt.Errorf("read the dataset's earliest ledger: %w", err)
 	}
 	if !pinned {
-		return 0, 0, fmt.Errorf("--data-dir %s holds no ingested dataset: ingest it with this version's bench ingest",
-			opts.DataDir)
+		return 0, 0, fmt.Errorf("--data-dir %s holds no ingested dataset: %s", opts.DataDir, unfinishedHint)
 	}
 	floor := chunk.IDFromLedger(earliest)
 	if opts.HasStartChunk {
@@ -208,7 +218,7 @@ func servedBounds(cat *catalog.Catalog, opts queryOptions) (chunk.ID, uint32, er
 }
 
 // requireLiveChunk checks that the dataset ending at last has its live chunk,
-// so opening it for reads creates nothing in the dataset.
+// so opening it for reads creates no catalog key and no hot DB.
 func requireLiveChunk(cat *catalog.Catalog, last uint32) error {
 	live := chunk.IDFromLedger(last + 1)
 	state, err := cat.HotState(live)

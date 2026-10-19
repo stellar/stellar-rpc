@@ -17,7 +17,6 @@ func newQueryRequest(ds *queryDataset, p queryPlan, qtype string) (queryRequest,
 	case queryTypeTxPage:
 		return txPageRequest(ds, p), nil
 	default:
-		// Unreachable: parseQueryTypes rejects anything else.
 		return nil, fmt.Errorf("unknown query type %q", qtype)
 	}
 }
@@ -29,20 +28,18 @@ func newQueryRequest(ds *queryDataset, p queryPlan, qtype string) (queryRequest,
 func ledgersRequest(ds *queryDataset, p queryPlan) queryRequest {
 	return func(ctx context.Context, rng *rand.Rand) (requestTiming, error) {
 		start := ds.pickStart(rng, p.LedgersLimit)
-		var resp protocol.GetLedgersResponse
 		timing, err := ds.server.call(ctx, protocol.GetLedgersMethodName, protocol.GetLedgersRequest{
 			StartLedger: start,
 			Pagination:  &protocol.LedgerPaginationOptions{Limit: uint(p.LedgersLimit)},
 			Format:      p.Format,
-		}, &resp)
+		})
 		if err != nil {
 			return requestTiming{}, err
 		}
-		if want := min(p.LedgersLimit, ds.LastLedger-start+1); len(resp.Ledgers) != int(want) {
+		if want := min(p.LedgersLimit, ds.LastLedger-start+1); timing.items != int(want) {
 			return requestTiming{}, fmt.Errorf("getLedgers returned %d of the %d ledgers from %d",
-				len(resp.Ledgers), want, start)
+				timing.items, want, start)
 		}
-		timing.items = len(resp.Ledgers)
 		return timing, nil
 	}
 }
@@ -51,17 +48,11 @@ func ledgersRequest(ds *queryDataset, p queryPlan) queryRequest {
 // transactions from a random start in the dataset's range.
 func txPageRequest(ds *queryDataset, p queryPlan) queryRequest {
 	return func(ctx context.Context, rng *rand.Rand) (requestTiming, error) {
-		var resp protocol.GetTransactionsResponse
-		timing, err := ds.server.call(ctx, protocol.GetTransactionsMethodName, protocol.GetTransactionsRequest{
+		return ds.server.call(ctx, protocol.GetTransactionsMethodName, protocol.GetTransactionsRequest{
 			StartLedger: ds.pickStart(rng, 1),
 			Pagination:  &protocol.LedgerPaginationOptions{Limit: uint(p.TxPageLimit)},
 			Format:      p.Format,
-		}, &resp)
-		if err != nil {
-			return requestTiming{}, err
-		}
-		timing.items = len(resp.Transactions)
-		return timing, nil
+		})
 	}
 }
 

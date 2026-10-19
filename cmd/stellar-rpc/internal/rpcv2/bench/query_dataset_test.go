@@ -93,7 +93,7 @@ func TestOpenDatasetErrors(t *testing.T) {
 		root := t.TempDir()
 		require.NoError(t, os.MkdirAll(geometry.NewLayout(root).CatalogPath(), 0o755))
 		_, _, err := openDataset(testLogger(), queryOptions{DataDir: root})
-		require.ErrorContains(t, err, "holds no ingested dataset: ingest it with this version's bench ingest")
+		require.ErrorContains(t, err, "holds no ingested dataset: "+unfinishedHint)
 	})
 	t.Run("--start-chunk below the dataset", func(t *testing.T) {
 		root := t.TempDir()
@@ -106,8 +106,9 @@ func TestOpenDatasetErrors(t *testing.T) {
 	})
 }
 
-// --start-chunk and --sample-ledgers bound the served range of a cold dataset,
-// and the handlers serve no ledger past it.
+// --start-chunk and --sample-ledgers bound the served range of a cold dataset:
+// the latest ledger is the range's last, and the handlers refuse a ledger
+// below its first.
 func TestOpenDatasetBounds(t *testing.T) {
 	srcRoot := t.TempDir()
 	packDir, _ := writeSourcePack(t, srcRoot, 0, chunk.LedgersPerChunk)
@@ -130,8 +131,7 @@ func TestOpenDatasetBounds(t *testing.T) {
 	assert.Equal(t, chunk.ID(1).FirstLedger()+4, ds.LastLedger)
 
 	var latest protocol.GetLatestLedgerResponse
-	_, err = ds.server.call(context.Background(), protocol.GetLatestLedgerMethodName, nil, &latest)
-	require.NoError(t, err)
+	callResult(t, ds.server, protocol.GetLatestLedgerMethodName, nil, &latest)
 	assert.Equal(t, ds.LastLedger, latest.Sequence)
 
 	_, err = requestItems(ds, plan, ledgersRequest, chunk.ID(0).LastLedger(), chunk.ID(0).LastLedger())
@@ -144,7 +144,8 @@ func TestOpenDatasetBounds(t *testing.T) {
 func TestOpenDatasetRequiresLiveChunk(t *testing.T) {
 	coldRoot := ingestColdChunk(t)
 	cat := reopenCatalog(t, coldRoot)
-	require.NoError(t, discardLiveChunk(cat, 1))
+	require.NoError(t, cat.PutHotTransient(1))
+	require.NoError(t, cat.DestroyHotChunk(1))
 	require.NoError(t, cat.Close())
 	hotRoot := geometry.NewLayout(coldRoot).HotRoot()
 	before := dirNames(t, hotRoot)
