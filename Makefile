@@ -67,12 +67,14 @@ STELLAR_RPC_BINARY := stellar-rpc
 
 # The static zstd and RocksDB archives, in the same prefixes CI installs via
 # .github/actions/setup-go. Prepended so they win over any CGO_* from the
-# shell or the make command line.
+# shell or the make command line. The include paths go in CGO_CPPFLAGS, not
+# CGO_CFLAGS: setting CGO_CFLAGS replaces Go's default "-O2 -g", and
+# go-sqlite3's bundled SQLite sets no -O of its own.
 ZSTD_HOME ?= $(HOME)/.zstd
 ROCKSDB_HOME ?= $(HOME)/.rocksdb
-override CGO_CFLAGS := -I$(ZSTD_HOME)/include -I$(ROCKSDB_HOME)/include $(CGO_CFLAGS)
+override CGO_CPPFLAGS := -I$(ZSTD_HOME)/include -I$(ROCKSDB_HOME)/include $(CGO_CPPFLAGS)
 override CGO_LDFLAGS := -L$(ZSTD_HOME)/lib -L$(ROCKSDB_HOME)/lib $(CGO_LDFLAGS)
-export CGO_CFLAGS CGO_LDFLAGS
+export CGO_CPPFLAGS CGO_LDFLAGS
 
 
 # update the Cargo.lock every time the Cargo.toml changes.

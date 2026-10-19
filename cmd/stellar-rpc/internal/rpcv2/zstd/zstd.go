@@ -15,7 +15,7 @@
 //     5x slower. macOS is immune (Mach-O two-level namespace).
 //
 // This wrapper links the libzstd.a that scripts/install-zstd.sh builds; the
-// Makefile and CI put its prefix in CGO_CFLAGS and CGO_LDFLAGS. No build tags,
+// Makefile and CI put its prefix in CGO_CPPFLAGS and CGO_LDFLAGS. No build tags,
 // no vendored code, no interposition risk. Requires libzstd >= 1.5.7
 // (enforced at runtime via checkVersion()).
 // Compressor is not safe for concurrent use — each goroutine should own
