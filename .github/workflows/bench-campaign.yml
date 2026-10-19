@@ -191,6 +191,32 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-duration-seconds: 1800
 
+      # The relay treats a 403 on the result key as a permanent fault, and S3
+      # answers 403 instead of 404 for a missing key when the role cannot list
+      # the prefix. Probe a key that never exists so that case fails here, in
+      # seconds, instead of after a box has launched.
+      - name: Preflight the result-key permissions
+        env:
+          PROBE_KEY: runs/${{ github.run_id }}/campaign/preflight-absent
+        run: |
+          set +e
+          out=$(aws s3api head-object --bucket "$BUCKET" --key "$PROBE_KEY" 2>&1)
+          rc=$?
+          set -e
+          case "$rc:$out" in
+            *"(404)"*|*"Not Found"*)
+              echo "missing key reads as 404 — the relay can tell a pending result from a fault" ;;
+            *"(403)"*|*Forbidden*)
+              echo "::error::gha-rpc-ci lacks s3:ListBucket on runs/*; a missing result key would read as a permanent fault"
+              exit 1 ;;
+            0:*)
+              echo "::error::s3://$BUCKET/$PROBE_KEY exists; the preflight key must be absent"
+              exit 1 ;;
+            *)
+              echo "::error::result-key preflight failed: $out"
+              exit 1 ;;
+          esac
+
       - name: Render user-data
         # The scripts ship verbatim; parameters travel in a preamble so the bytes
         # that run on the box match the bytes in git. Order is:
