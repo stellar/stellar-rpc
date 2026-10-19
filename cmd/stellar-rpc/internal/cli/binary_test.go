@@ -101,10 +101,9 @@ func TestBinaryRefusesRPCv2ConfigInRPCv1Mode(t *testing.T) {
 
 	code, out := runBinary(t, nil, "--config-path", path)
 	assert.Equal(t, 1, code, out)
-	line := findLine(t, out, "rpcv2 config")
-	assert.Contains(t, line, "level=error")
-	assert.Contains(t, line, "--enable-rpcv2")
-	assert.Contains(t, line, "storage")
+	assert.Contains(t, out, "rpcv2 config")
+	assert.Contains(t, out, "--enable-rpcv2")
+	assert.Contains(t, out, "[storage]")
 	assert.NotContains(t, out, "starting Stellar RPC", "the daemon must not start")
 
 	code, out = runBinary(t, []string{ConfigPathEnv + "=" + path})

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -98,18 +97,6 @@ func (o Option) getEnvKey() (string, bool) {
 		return o.EnvVar, true
 	}
 	return strutils.KebabToConstantCase(o.Name), true
-}
-
-// EnvVarNames lists every environment variable rpcv1 reads, sorted.
-func (cfg *Config) EnvVarNames() []string {
-	var names []string
-	for _, option := range cfg.options() {
-		if key, ok := option.getEnvKey(); ok {
-			names = append(names, key)
-		}
-	}
-	slices.Sort(names)
-	return names
 }
 
 // TODO: See if we can remove CustomSetValue into just SetValue/ParseValue

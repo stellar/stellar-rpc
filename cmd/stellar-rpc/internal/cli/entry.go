@@ -1,20 +1,17 @@
-// Package cli is the entry point of the stellar-rpc binary. It picks the
-// mode, builds that mode's command tree, and hands off to the daemon the way
-// each mode's own main did before #1108.
+// Package cli is the entry point of the stellar-rpc binary. It picks the mode,
+// builds that mode's command tree, and hands off to the daemon the way each
+// mode's own main did before #1108.
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
 
 	"github.com/spf13/cobra"
 
-	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-
 	v1config "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/config"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2"
+	v2config "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
@@ -27,16 +24,12 @@ type Entry struct {
 	Stderr    io.Writer
 
 	// Tests replace the two daemon launches with recorders.
-	startRPCv1 func(cfg *v1config.Config, logger *supportlog.Entry) error
-	startRPCv2 func(configPath string, opts rpcv2.Options) error
+	startRPCv1 func(cfg *v1config.Config) error
+	startRPCv2 func(configPath string, flags v2config.FlagOverrides) error
 }
 
 // genConfigFileUse is the subcommand that prints the mode's compiled defaults.
 const genConfigFileUse = "gen-config-file"
-
-// errLogged marks a failure that was already reported through the logger,
-// so Run does not print it a second time.
-var errLogged = errors.New("startup refused")
 
 // Run runs the command line and returns the process exit code: 0 after a
 // clean run or a signal, 1 on any failure.
@@ -63,9 +56,7 @@ func (e *Entry) Run() int {
 		return 1
 	}
 	if runErr != nil {
-		if !errors.Is(runErr, errLogged) {
-			fmt.Fprintln(e.Stderr, runErr)
-		}
+		fmt.Fprintln(e.Stderr, runErr)
 		return 1
 	}
 	return 0
@@ -109,20 +100,14 @@ func (e *Entry) rootCommand(mode Mode, runErr *error) (*cobra.Command, error) {
 	// registered here so cobra accepts it and --help lists it.
 	root.PersistentFlags().Bool(EnableRPCv2Flag, mode == ModeRPCv2,
 		"run the rpcv2 full-history daemon instead of rpcv1 ("+EnableRPCv2Env+")")
-	root.AddCommand(e.versionCommand(mode))
+	root.AddCommand(versionCommand(mode))
 	return root, nil
 }
 
-func (e *Entry) versionCommand(mode Mode) *cobra.Command {
+func versionCommand(mode Mode) *cobra.Command {
 	cmd := version.NewCommand()
 	cmd.PostRun = func(cmd *cobra.Command, _ []string) {
-		fmt.Fprintf(cmd.OutOrStdout(), "mode: %s%s\n", mode, e.switchHint(mode, " (%s)"))
+		fmt.Fprintf(cmd.OutOrStdout(), "mode: %s (%s)\n", mode, mode.howToSwitch())
 	}
 	return cmd
-}
-
-// switchHint tells an operator how to select the other mode, laid out with
-// format.
-func (e *Entry) switchHint(mode Mode, format string) string {
-	return fmt.Sprintf(format, mode.howToSwitch())
 }

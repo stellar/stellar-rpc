@@ -4,16 +4,12 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-
 	v1config "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/config"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2"
 	v2config "github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 )
 
@@ -75,23 +71,28 @@ type fakeEntry struct {
 	stdout, stderr bytes.Buffer
 	v1cfg          *v1config.Config
 	v2path         string
-	v2opts         rpcv2.Options
+	v2flags        v2config.FlagOverrides
 	v2calls        int
 }
 
 func (f *fakeEntry) run(args []string, env map[string]string) int {
+	// nil would fall through to the test binary's own os.Args, which breaks a
+	// subtest run alone from an IDE or dlv.
+	if args == nil {
+		args = []string{}
+	}
 	e := Entry{
 		Args:      args,
 		LookupEnv: envOf(env),
 		Stdout:    &f.stdout,
 		Stderr:    &f.stderr,
-		startRPCv1: func(cfg *v1config.Config, _ *supportlog.Entry) error {
+		startRPCv1: func(cfg *v1config.Config) error {
 			f.v1cfg = cfg
 			return nil
 		},
-		startRPCv2: func(configPath string, opts rpcv2.Options) error {
+		startRPCv2: func(configPath string, flags v2config.FlagOverrides) error {
 			f.v2path = configPath
-			f.v2opts = opts
+			f.v2flags = flags
 			f.v2calls++
 			return nil
 		},
@@ -141,7 +142,6 @@ func TestRPCv1ConfigPath(t *testing.T) {
 				assert.Equal(t, "from file", f.v1cfg.NetworkPassphrase)
 			}
 			assert.Equal(t, 0, f.v2calls)
-			assert.Contains(t, f.stderr.String(), "rpcv1 mode")
 		})
 	}
 }
@@ -164,10 +164,7 @@ func TestRPCv2ConfigPath(t *testing.T) {
 			assert.Equal(t, path, f.v2path)
 			assert.Equal(t, 1, f.v2calls)
 			assert.Nil(t, f.v1cfg)
-			assert.Contains(t, f.stderr.String(), "rpcv2 mode")
-			require.NotNil(t, f.v2opts.Config, "the daemon must get the config the cli loaded")
-			assert.Equal(t, "/tmp/x", f.v2opts.Config.Storage.DefaultDataDir)
-			assert.NotNil(t, f.v2opts.Logger, "the daemon must get the logger the cli built")
+			assert.NotNil(t, f.v2flags, "the daemon must get the flag overrides")
 		})
 	}
 }
@@ -183,42 +180,15 @@ func TestRPCv2RequiresConfigFile(t *testing.T) {
 func TestRPCv2IgnoresRPCv1EnvVars(t *testing.T) {
 	path := writeFile(t, "v2.toml", "[storage]\ndefault_data_dir = \"/tmp/x\"\n")
 	env := map[string]string{
-		ConfigPathEnv:         path,
-		legacyConfigPathEnv:   "/etc/old.toml",
-		"STELLAR_CORE_URL":    "http://localhost:11626",
-		"NETWORK_PASSPHRASE":  "x",
-		"ENDPOINT":            "localhost:8000",
-		"UNRELATED_VARIABLE":  "1",
-		"STELLAR_RPC_UNKNOWN": "1",
+		ConfigPathEnv:       path,
+		legacyConfigPathEnv: "/etc/old.toml",
+		"STELLAR_CORE_URL":  "http://localhost:11626",
+		"ENDPOINT":          "localhost:8000",
 	}
 
 	f := &fakeEntry{}
 	require.Equal(t, 0, f.run([]string{enableFlag}, env), f.stderr.String())
 	assert.Equal(t, path, f.v2path, "the old config path env var must not win in rpcv2 mode")
-
-	line := findLine(t, f.stderr.String(), "ignored")
-	assert.Contains(t, line, "level=info")
-	assert.Contains(t, line, "ENDPOINT NETWORK_PASSPHRASE SOROBAN_RPC_CONFIG_PATH STELLAR_CORE_URL")
-	assert.NotContains(t, line, "UNRELATED_VARIABLE")
-	assert.NotContains(t, line, "STELLAR_RPC_UNKNOWN")
-}
-
-func TestRPCv2WithoutRPCv1EnvVarsLogsNothingAboutThem(t *testing.T) {
-	path := writeFile(t, "v2.toml", "[storage]\ndefault_data_dir = \"/tmp/x\"\n")
-	f := &fakeEntry{}
-	require.Equal(t, 0, f.run([]string{enableFlag, configPathFlag, path}, nil), f.stderr.String())
-	assert.NotContains(t, f.stderr.String(), "ignored")
-}
-
-func findLine(t *testing.T, text, substr string) string {
-	t.Helper()
-	for line := range strings.SplitSeq(text, "\n") {
-		if strings.Contains(line, substr) {
-			return line
-		}
-	}
-	t.Fatalf("no line contains %q in:\n%s", substr, text)
-	return ""
 }
 
 func TestRPCv1RefusesRPCv2Config(t *testing.T) {
@@ -229,11 +199,11 @@ func TestRPCv1RefusesRPCv2Config(t *testing.T) {
 			require.Equal(t, 1, f.run([]string{configPathFlag, path}, nil))
 			assert.Nil(t, f.v1cfg, "rpcv1 must not start")
 
-			line := findLine(t, f.stderr.String(), "rpcv2 config")
-			assert.Contains(t, line, "level=error")
-			assert.Contains(t, line, enableFlag)
-			assert.Contains(t, line, table)
-			assert.Contains(t, line, path)
+			out := f.stderr.String()
+			assert.Contains(t, out, "rpcv2 config")
+			assert.Contains(t, out, enableFlag)
+			assert.Contains(t, out, "["+table+"]")
+			assert.Contains(t, out, path)
 		})
 	}
 
@@ -270,6 +240,17 @@ func TestRPCv1AcceptsItsOwnLowercaseAndUppercaseKeys(t *testing.T) {
 		require.NotNil(t, f.v1cfg)
 		assert.Equal(t, "GCS", f.v1cfg.DataStoreConfig.Type)
 	})
+}
+
+// The shape check is safe only because rpcv1 never uses the six names. Its
+// strict parser is the proof.
+func TestRPCv1RejectsEveryRPCv2Table(t *testing.T) {
+	for _, table := range rpcv2Tables() {
+		path := writeFile(t, "v.toml", "STRICT = true\n["+table+"]\n")
+		var cfg v1config.Config
+		err := cfg.SetValues(envOf(map[string]string{legacyConfigPathEnv: path}))
+		assert.ErrorContains(t, err, "unexpected entry", "rpcv1 accepts [%s]", table)
+	}
 }
 
 func TestOnlyTheSelectedModeFlagsExist(t *testing.T) {

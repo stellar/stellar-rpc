@@ -276,6 +276,7 @@ func setupLogger(cfg *config.Config, logger *supportlog.Entry) *supportlog.Entry
 	logger.WithFields(supportlog.F{
 		versionLabel: version.Version,
 		commitLabel:  version.CommitHash,
+		"mode":       "rpcv1",
 	}).Info("starting Stellar RPC")
 	return logger
 }

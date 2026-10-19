@@ -17,7 +17,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 )
 
-// Config is the on-disk --config TOML schema for the full-history daemon (design
+// Config is the on-disk --config-path TOML schema for the full-history daemon (design
 // "Configuration"). Optional scalars are pointers so an absent key is
 // distinguishable from an explicit zero; defaults applied in WithDefaults.
 // validateConfig turns it (plus the catalog's pins and a tip backend) into the
@@ -33,7 +33,7 @@ import (
 // Every leaf key is also settable from the command line as a flag named by its
 // dotted TOML path (--storage.default_data_dir, --service.methods.getLedgers.queue_limit);
 // see BindFlags/ApplyFlags in flags.go. Flags override the file; the file stays
-// the single source of truth and --config stays required.
+// the single source of truth and --config-path stays required.
 type Config struct {
 	Service   ServiceConfig   `toml:"service"`
 	Retention RetentionConfig `toml:"retention"`

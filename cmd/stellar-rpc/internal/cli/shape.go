@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"fmt"
+
 	"github.com/pelletier/go-toml"
 )
 
@@ -12,6 +14,23 @@ import (
 // either, because rpcv1 also has lowercase tables such as [datastore_config].
 func rpcv2Tables() []string {
 	return []string{"service", "retention", "storage", "backfill", "ingestion", "logging"}
+}
+
+// refuseRPCv2File returns an error when the TOML file at path has a rpcv2
+// table. An empty path means no file and is fine.
+func refuseRPCv2File(path string) error {
+	if path == "" {
+		return nil
+	}
+	tree, err := toml.LoadFile(path)
+	if err != nil {
+		return err
+	}
+	if table := rpcv2TableIn(tree); table != "" {
+		return fmt.Errorf("the config file %s is a rpcv2 config (it has a [%s] table); pass --%s to run rpcv2",
+			path, table, EnableRPCv2Flag)
+	}
+	return nil
 }
 
 // rpcv2TableIn returns the first rpcv2 table found among the top-level keys

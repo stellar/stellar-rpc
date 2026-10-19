@@ -19,14 +19,7 @@ func parseToml(r io.Reader, strict bool, cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return applyTree(tree, strict, cfg)
-}
 
-// applyTree takes the config values from a loaded toml tree. Strict mode
-// returns an error if there are any unknown toml variables set. Note,
-// strict-mode can also be set by putting `STRICT=true` in the config.toml file
-// itself.
-func applyTree(tree *toml.Tree, strict bool, cfg *Config) error {
 	validKeys := map[string]struct{}{}
 	for _, option := range cfg.options() {
 		key, ok := option.getTomlKey()

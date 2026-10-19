@@ -2,9 +2,9 @@
 package config
 
 import (
+	"os"
 	"time"
 
-	"github.com/pelletier/go-toml"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
 
@@ -128,16 +128,6 @@ func (cfg *Config) ExtendedUserAgent(extension string) string {
 }
 
 func (cfg *Config) SetValues(lookupEnv func(string) (string, bool)) error {
-	return cfg.SetValuesWithLoader(lookupEnv, toml.LoadFile)
-}
-
-// SetValuesWithLoader is SetValues with the config file read through loadTOML.
-// The caller can inspect the loaded tree before the config takes values from
-// it, so the file is read once.
-func (cfg *Config) SetValuesWithLoader(
-	lookupEnv func(string) (string, bool),
-	loadTOML func(path string) (*toml.Tree, error),
-) error {
 	// We start with the defaults
 	if err := cfg.loadDefaults(); err != nil {
 		return err
@@ -155,11 +145,7 @@ func (cfg *Config) SetValuesWithLoader(
 	// If we specified a config file, we load that
 	if cfg.ConfigPath != "" {
 		// Merge in the config file flags
-		tree, err := loadTOML(cfg.ConfigPath)
-		if err != nil {
-			return err
-		}
-		if err := applyTree(tree, cfg.Strict, cfg); err != nil {
+		if err := cfg.loadConfigPath(); err != nil {
 			return err
 		}
 
@@ -222,6 +208,19 @@ func (cfg *Config) loadFlags() error {
 		}
 	}
 	return nil
+}
+
+// loadConfigPath loads a new config from a toml file at the given path. Strict
+// mode will return an error if there are any unknown toml variables set. Note,
+// strict-mode can also be set by putting `STRICT=true` in the config.toml file
+// itself.
+func (cfg *Config) loadConfigPath() error {
+	file, err := os.Open(cfg.ConfigPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return parseToml(file, cfg.Strict, cfg)
 }
 
 func (cfg *Config) Validate() error {
