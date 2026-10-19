@@ -192,3 +192,9 @@ The pool builds are not timed.
   some pages.
 - Without eviction, a scenario starts with the pages that the dataset open, the
   pool builds and the earlier scenarios read.
+- Eviction runs once, before the scenario. During the scenario, a request can
+  read pages that earlier requests loaded, and this share grows with the rate.
+  `txhash` warms fastest, because its found lookups read only the pool's
+  ledgers. Thus a `cold-start` row is not cold-cache latency, and rows at
+  different rates differ in cache state as well as in load. Runs at the same
+  rate under the same conditions stay comparable.
