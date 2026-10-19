@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/zstd"
@@ -80,7 +82,7 @@ type coldHeader struct {
 // trailer + AppData read/validation (plus any open failure) surface
 // on the first method call. Uses the package-level coldPackDecoder,
 // shared across all readers in the process.
-func OpenColdReader(path string) (*ColdReader, error) {
+func OpenColdReader(path string, logger *supportlog.Entry) (*ColdReader, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
@@ -88,6 +90,7 @@ func OpenColdReader(path string) (*ColdReader, error) {
 		r: stores.OpenPack(path, packfile.ReaderOptions{
 			RecordDecoder: coldPackDecoder,
 			FirstRead:     func(int64) int { return coldFirstRead },
+			Logger:        logger,
 		}),
 		path: path,
 	}

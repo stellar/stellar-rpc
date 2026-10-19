@@ -6,6 +6,7 @@ import (
 	"iter"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
 // packStream is a ledgerbackend.LedgerStream backed by a single cold packfile.
@@ -14,7 +15,8 @@ import (
 // xdr.LedgerCloseMeta bytes for the requested range, and closes the reader when
 // iteration ends.
 type packStream struct {
-	path string
+	path   string
+	logger *supportlog.Entry
 }
 
 // NewPackStream returns a ledgerbackend.LedgerStream over a single cold packfile
@@ -23,8 +25,8 @@ type packStream struct {
 // the ledgers are already on disk. Because it speaks the same streaming currency
 // as the external backends (BufferedStorageStream, CaptiveCoreStream), the cold
 // materializer never learns which source it drank from.
-func NewPackStream(path string) ledgerbackend.LedgerStream {
-	return &packStream{path: path}
+func NewPackStream(path string, logger *supportlog.Entry) ledgerbackend.LedgerStream {
+	return &packStream{path: path, logger: logger}
 }
 
 var _ ledgerbackend.LedgerStream = (*packStream)(nil)
@@ -40,7 +42,7 @@ func (p *packStream) RawLedgers(
 	ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
 ) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
-		cr, err := OpenColdReader(p.path)
+		cr, err := OpenColdReader(p.path, p.logger)
 		if err != nil {
 			yield(nil, fmt.Errorf("OpenColdReader %s: %w", p.path, err))
 			return

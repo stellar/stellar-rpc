@@ -401,7 +401,7 @@ func TestHotToColdMigration(t *testing.T) {
 	require.NoError(t, w.Commit())
 
 	// Read back from cold; must byte-equal the original raws.
-	c, err := OpenColdReader(coldPath)
+	c, err := OpenColdReader(coldPath, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	for i := range n {

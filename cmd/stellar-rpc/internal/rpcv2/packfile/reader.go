@@ -8,11 +8,14 @@ import (
 	"io"
 	"iter"
 	"os"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
+
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
 const (
@@ -39,6 +42,24 @@ var (
 	// strictly ascending (duplicates or out-of-order entries).
 	ErrPositionsUnsorted = errors.New("packfile: positions not strictly sorted")
 )
+
+// PanicError stands in for a panic recovered in the open or in a read's
+// worker. Its message is plain, since read errors can reach clients;
+// NewPanicError logs the panic's value and stack.
+type PanicError struct {
+	Op string
+}
+
+// NewPanicError logs p, a panic recovered in op, with its stack to logger, or to supportlog.DefaultLogger if nil.
+func NewPanicError(logger *supportlog.Entry, op string, p any) *PanicError {
+	if logger == nil {
+		logger = supportlog.DefaultLogger
+	}
+	logger.WithField("panic", fmt.Sprint(p)).WithField("stack", string(debug.Stack())).Error(op + " panicked")
+	return &PanicError{Op: op}
+}
+
+func (e *PanicError) Error() string { return e.Op + " panicked" }
 
 // knownFlags is the bitmask of trailer flags this version of the reader
 // understands. Files with unknown bits set are rejected as corrupt.
@@ -75,6 +96,9 @@ type ReaderOptions struct {
 	// file size] and shortened to start on a page boundary; a tail that does
 	// not fit takes one more read for the rest.
 	FirstRead func(fileSize int64) int
+
+	// Logger logs a panic the open or a read recovers; nil means supportlog.DefaultLogger.
+	Logger *supportlog.Entry
 }
 
 // openResult is the transient result produced by doOpen and consumed once
@@ -133,6 +157,7 @@ type Reader struct {
 	// but not the per-record hot path.
 	trailer Trailer
 	appData []byte
+	logger  *supportlog.Entry
 
 	waitOpen func() error // blocks until background open completes
 
@@ -148,6 +173,7 @@ type Reader struct {
 func Open(path string, opts ReaderOptions) *Reader {
 	r := &Reader{
 		recordDecoder: opts.RecordDecoder,
+		logger:        opts.Logger,
 	}
 
 	// Reject invalid options synchronously and stash the error so every
@@ -160,7 +186,12 @@ func Open(path string, opts ReaderOptions) *Reader {
 	}
 	r.concurrency = max(opts.Concurrency, 1)
 
-	r.waitOpen = sync.OnceValue(func() error {
+	r.waitOpen = sync.OnceValue(func() (err error) {
+		defer func() {
+			if p := recover(); p != nil {
+				err = NewPanicError(opts.Logger, "packfile: open", p)
+			}
+		}()
 		res := doOpen(path, opts.FirstRead)
 		if res.err != nil {
 			return res.err
@@ -173,7 +204,8 @@ func Open(path string, opts ReaderOptions) *Reader {
 		return nil
 	})
 	// Drive the open from a background goroutine; later waitOpen() calls
-	// (one at the head of each public method) get the cached result.
+	// (one at the head of each public method) get the cached result, which is
+	// a PanicError if the open panicked.
 	go func() { _ = r.waitOpen() }()
 	return r
 }
@@ -454,6 +486,10 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 // share one read and decode, and adjacent records merge into reads that touch
 // at most 256 KiB of pages.
 //
+// A panic in fn on a worker goroutine (two or more reads with Concurrency
+// above 1) returns a *PanicError; on the calling goroutine it panics to the
+// caller as usual.
+//
 // positions must be sorted ascending with no duplicates. Returns
 // ErrPositionOutOfRange if any position is outside [0, TotalItems) or
 // ErrPositionsUnsorted if positions are not strictly sorted.
@@ -530,9 +566,14 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 	var nextRun atomic.Int64
 	g, gctx := errgroup.WithContext(ctx)
 	for range numWorkers {
-		g.Go(func() error {
+		g.Go(func() (err error) {
 			rec := r.getRecord()
 			defer r.putRecord(rec)
+			defer func() {
+				if p := recover(); p != nil {
+					err = NewPanicError(r.logger, "packfile: read", p)
+				}
+			}()
 			for {
 				i := int(nextRun.Add(1)) - 1
 				if i >= len(runs) {

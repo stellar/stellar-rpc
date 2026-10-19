@@ -198,7 +198,7 @@ func backfillSource(
 		packPath := layout.LedgerPackPath(chunkID)
 		if _, serr := os.Stat(packPath); serr == nil {
 			logger.WithField("source", "frozen pack").Info("chunk build started")
-			return ledger.NewPackStream(packPath), noClose, nil
+			return ledger.NewPackStream(packPath, logger), noClose, nil
 		}
 		// frozen ⇒ file exists; a missing pack is a bug, not a re-download trigger.
 		return nil, noClose, fmt.Errorf(

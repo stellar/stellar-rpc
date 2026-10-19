@@ -23,14 +23,14 @@ import (
 
 func newTestColdReader(t *testing.T, path string) *ColdReader {
 	t.Helper()
-	c, err := OpenColdReader(path)
+	c, err := OpenColdReader(path, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
 
 func TestOpenColdReader_ValidatesInputs(t *testing.T) {
-	_, err := OpenColdReader("")
+	_, err := OpenColdReader("", nil)
 	require.ErrorIs(t, err, stores.ErrInvalidConfig)
 }
 
@@ -166,7 +166,7 @@ func TestColdReader_IterateLedgersBreakMidWalk(t *testing.T) {
 // succeeds (no I/O); the failure surfaces only on the first
 // method call.
 func TestColdReader_LazyOpen(t *testing.T) {
-	c, err := OpenColdReader(filepath.Join(t.TempDir(), "does-not-exist.pack"))
+	c, err := OpenColdReader(filepath.Join(t.TempDir(), "does-not-exist.pack"), nil)
 	require.NoError(t, err, "OpenColdReader must not do I/O")
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -196,7 +196,7 @@ func TestColdReader_RejectsWrongAppDataSize(t *testing.T) {
 			require.NoError(t, pw.AppendItem([]byte("v")))
 			require.NoError(t, pw.Finish(tc.ad))
 
-			c, err := OpenColdReader(path)
+			c, err := OpenColdReader(path, nil)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = c.Close() })
 			_, err = c.LastSeq()
@@ -218,7 +218,7 @@ func TestColdReader_RejectsNewerAppDataVersion(t *testing.T) {
 	// problem, not a size mismatch.
 	require.NoError(t, pw.Finish([]byte{coldAppDataVersion + 1, 0, 0, 0, 2, 9}))
 
-	c, err := OpenColdReader(path)
+	c, err := OpenColdReader(path, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	_, err = c.LastSeq()
@@ -236,7 +236,7 @@ func TestColdReader_RejectsWrongFormat(t *testing.T) {
 	require.NoError(t, pw.AppendItem([]byte("v")))
 	require.NoError(t, pw.Finish(make([]byte, 4)))
 
-	c, err := OpenColdReader(path)
+	c, err := OpenColdReader(path, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	_, err = c.LastSeq()
@@ -246,7 +246,7 @@ func TestColdReader_RejectsWrongFormat(t *testing.T) {
 
 func TestColdReader_CloseIsIdempotent(t *testing.T) {
 	path, _ := writeFixturePack(t, 1, 1)
-	c, err := OpenColdReader(path)
+	c, err := OpenColdReader(path, nil)
 	require.NoError(t, err)
 	require.NoError(t, c.Close())
 	require.NoError(t, c.Close())
@@ -272,7 +272,7 @@ func TestColdReader_LastSeqOverflowRejected(t *testing.T) {
 	binary.BigEndian.PutUint32(ad[1:], math.MaxUint32-1) // firstSeq = MaxUint32-1, items=3 → overflow
 	require.NoError(t, pw.Finish(ad[:]))
 
-	c, err := OpenColdReader(path)
+	c, err := OpenColdReader(path, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	_, err = c.LastSeq()
@@ -284,7 +284,7 @@ func TestColdReader_ConcurrentReadsRaceFree(t *testing.T) {
 	const firstSeq uint32 = 0
 	const n = 50
 	path, _ := writeFixturePack(t, firstSeq, n)
-	c, err := OpenColdReader(path)
+	c, err := OpenColdReader(path, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -321,11 +321,11 @@ func TestColdReader_SharedDecompressorAcrossPacks(t *testing.T) {
 	pathA, rawA := writeFixturePack(t, 1_000, 5)
 	pathB, rawB := writeFixturePack(t, 9_000, 5)
 
-	cA, err := OpenColdReader(pathA)
+	cA, err := OpenColdReader(pathA, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cA.Close() })
 
-	cB, err := OpenColdReader(pathB)
+	cB, err := OpenColdReader(pathB, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cB.Close() })
 
@@ -346,7 +346,7 @@ func TestColdReader_SharedDecompressorAcrossPacks(t *testing.T) {
 }
 
 func TestMissingPackOpens_CountsAbsentFile(t *testing.T) {
-	c, err := OpenColdReader(filepath.Join(t.TempDir(), "gone.pack"))
+	c, err := OpenColdReader(filepath.Join(t.TempDir(), "gone.pack"), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 

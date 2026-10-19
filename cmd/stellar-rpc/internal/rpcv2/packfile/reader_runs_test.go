@@ -9,8 +9,11 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
 // writeSizedRecords writes each item as its own passthrough record.
@@ -209,6 +212,49 @@ func TestReadItemsCallbackError(t *testing.T) {
 			require.ErrorIs(t, err, boom)
 		})
 	}
+}
+
+// A panic on a worker fails the read with a plain error instead of ending the
+// process, the panic and its stack go to the reader's log, and the reader
+// keeps serving.
+func TestReadItemsWorkerPanicIsAnError(t *testing.T) {
+	path, items := writeSizedRecords(t, 1000, 1000, 1000, 1000)
+	logger := supportlog.New()
+	logged := logger.StartTest(logrus.ErrorLevel)
+	r := Open(path, ReaderOptions{Concurrency: 2, Logger: logger})
+	defer r.Close()
+
+	// Records 0 and 2: two reads, one per worker.
+	err := r.ReadItems(context.Background(), []int{0, 2}, func(idx int, _ []byte) error {
+		if idx == 1 {
+			panic("boom")
+		}
+		return nil
+	})
+	require.EqualError(t, err, "packfile: read panicked", "read errors can reach clients, so the message stays plain")
+	require.ErrorAs(t, err, new(*PanicError))
+	requirePanicLogged(t, logged(), "TestReadItemsWorkerPanicIsAnError.func")
+	checkReadItems(t, r, items, []int{0, 2})
+}
+
+func TestOpenPanicIsAnError(t *testing.T) {
+	path, _ := writeSizedRecords(t, 1000)
+	logger := supportlog.New()
+	logged := logger.StartTest(logrus.ErrorLevel)
+	r := Open(path, ReaderOptions{FirstRead: func(int64) int { panic("boom") }, Logger: logger})
+
+	err := r.ReadItem(0, func([]byte) error { return nil })
+	require.EqualError(t, err, "packfile: open panicked")
+	require.ErrorAs(t, err, new(*PanicError))
+	require.ErrorAs(t, r.Close(), new(*PanicError))
+	requirePanicLogged(t, logged(), "TestOpenPanicIsAnError.func")
+}
+
+func requirePanicLogged(t *testing.T, entries []logrus.Entry, frame string) {
+	t.Helper()
+	require.Len(t, entries, 1)
+	require.Equal(t, "boom", entries[0].Data["panic"])
+	require.Contains(t, entries[0].Data["stack"], frame)
 }
 
 func TestReadItemsCanceledContext(t *testing.T) {
