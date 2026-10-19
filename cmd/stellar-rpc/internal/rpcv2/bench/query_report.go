@@ -11,7 +11,7 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 )
 
-// Query report files. See README.md for every column.
+// Query report files.
 const (
 	queryLatencyFile   = "latency.csv"
 	queryScenariosFile = "scenarios.csv"
