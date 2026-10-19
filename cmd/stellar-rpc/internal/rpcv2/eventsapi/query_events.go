@@ -24,6 +24,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
@@ -337,8 +338,18 @@ func responseError(err error, oldest, latest uint32, logger *supportlog.Entry) e
 	// cursor this server minted and cannot re-encode, or a store failure.
 	// The client gets the message; an operator needs it in the log too,
 	// since the response is gone the moment it is sent.
-	logger.WithError(err).Error("queryEvents: unclassified failure, serving an internal error")
+	withPanic(logger.WithError(err), err).Error("queryEvents: unclassified failure, serving an internal error")
 	return &jrpc2.Error{Code: jrpc2.InternalError, Message: err.Error()}
+}
+
+// withPanic adds a recovered panic's value and stack to a log entry. The
+// error's own message leaves them out, since it can reach clients.
+func withPanic(entry *supportlog.Entry, err error) *supportlog.Entry {
+	var pe *packfile.PanicError
+	if !errors.As(err, &pe) {
+		return entry
+	}
+	return entry.WithField("panic", fmt.Sprint(pe.Value)).WithField("stack", string(pe.Stack))
 }
 
 // jrpcError: only InvalidParamsErrorData needs its reason set by hand. The
