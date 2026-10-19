@@ -188,28 +188,29 @@ func TestColdReader_LookupUnseenTermReturnsNil(t *testing.T) {
 	}
 }
 
-func TestColdReader_LookupKeysReturnsFreshBitmaps(t *testing.T) {
-	// Two LookupKeys calls for the same term return independent
-	// bitmaps — mutating one must not affect the other. The interface
-	// contract says cold-side results are freshly unmarshaled and
-	// logically owned by the caller; this pins that a mutation cannot
-	// bleed into a later lookup.
+func TestColdReader_LookupKeysSharesNothingAcrossReaders(t *testing.T) {
+	// A reader hands its later lookups the whole terms it already
+	// decoded, and a reader serves one request, so a second reader on
+	// the same files decodes its own: a mutation through one reader's
+	// result cannot reach another's.
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
-
-	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cr.Close() })
+	open := func() *ColdReader {
+		cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = cr.Close() })
+		return cr
+	}
 
 	key := contractTermKey(payloads[0])
-	first := lookupOne(t, cr, key)
+	first := lookupOne(t, open(), key)
 	require.NotNil(t, first)
 	first.Add(999_999)
 
-	second := lookupOne(t, cr, key)
+	second := lookupOne(t, open(), key)
 	require.NotNil(t, second)
 	assert.False(t, second.Contains(999_999),
-		"a LookupKeys result mutation must not bleed into the next lookup")
+		"a LookupKeys result mutation must not reach another reader's lookup")
 }
 
 func TestColdReader_FetchEventsRoundTrip(t *testing.T) {
@@ -590,32 +591,6 @@ func TestColdReader_LookupKeys(t *testing.T) {
 	assert.True(t, bms[2].Contains(0))
 
 	assert.Nil(t, bms[3], "second missing must also be nil")
-}
-
-// TestColdReader_LookupKeysClonesAcrossCalls pins that two
-// LookupKeys batches for the same key return independent bitmaps —
-// mutating one must not bleed into the next.
-func TestColdReader_LookupKeysClonesAcrossCalls(t *testing.T) {
-	const chunkID = chunk.ID(0)
-	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
-
-	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cr.Close() })
-
-	key := contractTermKey(payloads[0])
-	first, _, err := cr.LookupKeys(context.Background(), []TermKey{key}, everyID)
-	require.NoError(t, err)
-	require.Len(t, first, 1)
-	require.NotNil(t, first[0])
-	first[0].Add(999_999)
-
-	second, _, err := cr.LookupKeys(context.Background(), []TermKey{key}, everyID)
-	require.NoError(t, err)
-	require.Len(t, second, 1)
-	require.NotNil(t, second[0])
-	assert.False(t, second[0].Contains(999_999),
-		"a LookupKeys result mutation must not bleed into the next LookupKeys")
 }
 
 func TestColdReader_FetchRangeMidRange(t *testing.T) {
