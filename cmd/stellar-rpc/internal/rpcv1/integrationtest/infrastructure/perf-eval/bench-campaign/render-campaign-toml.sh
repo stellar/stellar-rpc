@@ -75,11 +75,10 @@ CAPACITY_MINUTES="${CAPACITY_MINUTES:-1260}"
 SETUP_MARGIN_MINUTES="${SETUP_MARGIN_MINUTES:-120}"
 NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
 
-# How long one `bench query` leg holds each rate of its ladder. The runner's
-# default is 60s (DefaultQueryDuration in runner/internal/config/config.go) and
-# the rendered TOML cannot set query_duration, because the runner rejects TOML
-# keys it does not know. The override exists so the estimate can follow the
-# runner's default if that default moves.
+# How long one `bench query` leg holds each rate of its ladder. This script
+# renders no query_duration, so the legs run at the runner's default of 60s
+# (DefaultQueryDuration in runner/internal/config/config.go). The override
+# exists so the estimate can follow that default if it moves.
 QUERY_LEG_DURATION_SECONDS="${QUERY_LEG_DURATION_SECONDS:-60}"
 # The query grid the runner builds (runner/internal/plan/plan.go): one leg per
 # dataset, per run, per tier (cold and hot), per query type, and the four types
@@ -115,8 +114,16 @@ case "$PHASE" in
   1) close_interval=2s;    interval_ms=2000; profiles="sac-6000 custom_token-4000 soroswap-1500" ;;
   2) close_interval=1s;    interval_ms=1000; profiles="sac-5000 custom_token-4000 soroswap-1500" ;;
   3) close_interval=600ms; interval_ms=600;  profiles="sac-6000 custom_token-3600 soroswap-1800" ;;
-  *) die "phase must be 1|2|3, got '$PHASE'" ;;
+  3b) close_interval=900ms; interval_ms=900;  profiles="sac-9000 custom_token-5400 soroswap-2700" ;;
+  *) die "phase must be 1|2|3|3b, got '$PHASE'" ;;
 esac
+# Measured on the phase 3b C1 e2e run: the m6id.2xlarge box has neither the disk
+# nor the memory for the 3b profiles.
+if [ "$PHASE" = 3b ] && [ "$MACHINE" = 2x ]; then
+  die "phase 3b does not fit machine=2x (m6id.2xlarge): it needs ~470 GiB of disk" \
+    "(214 GiB golden + ~106 GB cold stores + ~150 GB hot DBs at 10k ledgers) against ~441 GiB of NVMe," \
+    "and the sac-9000 cold ingest peaks at 41.5 GB RSS against 32 GiB of RAM; dispatch with machine=8x"
+fi
 
 require_uint runs "$RUNS" 1 20
 require_uint query_leg_duration_seconds "$QUERY_LEG_DURATION_SECONDS" 1 3600

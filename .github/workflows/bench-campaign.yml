@@ -19,7 +19,7 @@ on:
         description: 'Pacing phase (selects close_interval + the dataset profiles)'
         required: true
         type: choice
-        options: ['1', '2', '3']
+        options: ['1', '2', '3', '3b']
       ingest:
         description: 'Which ingest benchmarks to run'
         required: false

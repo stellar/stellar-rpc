@@ -189,7 +189,7 @@ if [ "$STATE" = "ok" ] && [ -n "$RUN_JSON" ] && [ -r "$RUN_JSON" ]; then
             (($target / 1e6) | round) as $target_ms
             | (($block / 1e6) | round) as $block_ms
             | {
-                header: "*Ingestion p99 vs the Phase \($ph) target (\($target_ms) ms)*",
+                header: "*Ingestion p99 vs the Phase \($ph) target (\($target_ms) ms)\(if $t.provisional == true then " (provisional)" else "" end)*",
                 lines: [ $rows[]
                   | ((.p99 / 1e6) | round) as $ms
                   | (((.p99 / $target * 10) | round) / 10) as $mult
