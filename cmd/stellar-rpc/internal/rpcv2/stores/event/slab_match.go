@@ -75,14 +75,12 @@ func resolveSlabPlans(plans []termPlan, sources []*roaring.Bitmap) []slabPlan {
 
 // eval returns p's matches inside slab, the bitmap of one slab's ids, as a
 // fresh bitmap the caller owns, or nil when there are none. The slab and
-// the plan's terms go to roaring in one FastAnd call, the shape in which a
-// count-first FastAnd can reject an empty intersection without allocating
-// for it; the pinned v2.26.0 still intersects pairwise and allocates the
-// first intermediate, so that saving arrives with the roaring bump.
-func (p slabPlan) eval(slab *roaring.Bitmap) *roaring.Bitmap {
-	ops := make([]*roaring.Bitmap, 0, len(p)+1)
-	ops = append(ops, slab)
-	ops = append(ops, p...)
+// the plan's terms go to roaring in one FastAnd call, the shape in which the
+// pinned roaring counts before it allocates, so an empty intersection
+// allocates only its result. ops is the caller's buffer for the call's
+// arguments, with room for the slab and every term.
+func (p slabPlan) eval(slab *roaring.Bitmap, ops []*roaring.Bitmap) *roaring.Bitmap {
+	ops = append(append(ops[:0], slab), p...)
 	res := roaring.FastAnd(ops...)
 	if res.IsEmpty() {
 		return nil
@@ -147,6 +145,9 @@ type slabStepper struct {
 	window IDRange
 	desc   bool
 
+	// ops is eval's argument buffer, sized once for the widest plan.
+	ops []*roaring.Bitmap
+
 	// bounds holds, per plan, the id its next candidate is proved to lie at
 	// or past (at or before, descending), or boundRetired once it has none
 	// left. A bound is monotone in the walk direction, so one proved earlier
@@ -185,6 +186,11 @@ func newSlabStepper(
 	for i := range s.bounds {
 		s.bounds[i] = int64(s.cursor)
 	}
+	width := 0
+	for _, p := range s.plans {
+		width = max(width, len(p))
+	}
+	s.ops = make([]*roaring.Bitmap, 0, width+1)
 	return s
 }
 
@@ -297,7 +303,7 @@ func (s *slabStepper) evalSlab(lo, hi uint32) *roaring.Bitmap {
 		if b := s.bounds[i]; b < int64(lo) || b >= int64(hi) {
 			continue
 		}
-		bm := s.plans[i].eval(slab)
+		bm := s.plans[i].eval(slab, s.ops)
 		switch {
 		case bm == nil:
 		case acc == nil:
