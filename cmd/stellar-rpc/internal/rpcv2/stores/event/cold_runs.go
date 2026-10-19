@@ -126,8 +126,10 @@ type runMerge struct {
 func (r *coldRuns) open(withBitmaps bool) (*runMerge, error) {
 	m := &runMerge{withBitmaps: withBitmaps}
 	m.less = func(a, b *runReader) bool { return bytes.Compare(a.key[:], b.key[:]) < 0 }
+	// The runs share 16 MiB of read buffers, between 4 KiB and 64 KiB each.
+	bufSize := min(max(16<<20/max(len(r.paths), 1), 4<<10), 64<<10)
 	for _, path := range r.paths {
-		rr, err := openRun(path, withBitmaps)
+		rr, err := openRun(path, withBitmaps, bufSize)
 		if err != nil {
 			return m, err
 		}
@@ -186,12 +188,12 @@ type runReader struct {
 	done        bool
 }
 
-func openRun(path string, withBitmaps bool) (*runReader, error) {
+func openRun(path string, withBitmaps bool, bufSize int) (*runReader, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	rr := &runReader{f: f, br: bufio.NewReaderSize(f, 1<<16), withBitmaps: withBitmaps}
+	rr := &runReader{f: f, br: bufio.NewReaderSize(f, bufSize), withBitmaps: withBitmaps}
 	if err := rr.next(); err != nil {
 		_ = f.Close()
 		return nil, err
