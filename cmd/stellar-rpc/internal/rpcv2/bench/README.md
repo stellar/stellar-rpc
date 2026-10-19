@@ -178,7 +178,7 @@ random bytes; these have the outcome `not_found`.
 **Events pool.** Before the first `events` scenario, the run reads up to
 20,000 stored events of the range. The pool holds the unfiltered read, one
 filter for each of the two contracts with the most events, and one filter for
-the most frequent contract and first topic. `eventsPool` is `unfiltered` when
+the most frequent pair of contract and first topic. `eventsPool` is `unfiltered` when
 the scan found no filter term.
 
 The pool builds are not timed.
