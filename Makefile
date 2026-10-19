@@ -129,7 +129,7 @@ $(ROCKSDB_HOME)/lib/librocksdb.a: $(ZSTD_HOME)/lib/libzstd.a
 # than librocksdb.a.
 build-native-libs: $(ZSTD_HOME)/lib/libzstd.a $(ROCKSDB_HOME)/lib/librocksdb.a
 
-# Called by name from stellar/pipelines and stellar/quickstart, in images with
+# Called by name from the package builder and stellar/quickstart, in images with
 # only build-essential and jq, so it builds the archives and the Rust
 # libraries itself and ends with the link check.
 build-stellar-rpc: build-libs build-native-libs

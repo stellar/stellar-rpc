@@ -3,7 +3,7 @@
 # Go and Rust come from upstream tarballs because there is no golang image on
 # ubuntu:22.04. zstd and RocksDB are static archives the binary carries.
 #
-# The package builder (stellar/pipelines) runs `docker build --target build`
+# The package builder runs `docker build --target build`
 # and copies /bin/stellar-rpc out, so that stage name and path stay.
 
 # --- Stage 1: zstd ---
