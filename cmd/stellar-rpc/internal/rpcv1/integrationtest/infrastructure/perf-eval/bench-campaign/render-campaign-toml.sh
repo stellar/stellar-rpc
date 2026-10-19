@@ -8,9 +8,9 @@
 #   PHASE=1 INGEST=both QUERY=no MACHINE=2x ./render-campaign-toml.sh
 #
 # Env in: PHASE INGEST QUERY RUNS WORKERS MACHINE TARGET_REF HOT_NUM_LEDGERS
-# RUN_NAME BENCHMARKS_REF, with PUBLISH_URI / INPUTS_PREFIX / CAPACITY_MINUTES /
-# SETUP_MARGIN_MINUTES / QUERY_LEG_DURATION_SECONDS / NOW_EPOCH available as
-# overrides for tests.
+# RUN_NAME BENCHMARKS_REF DATASET_SET, with PUBLISH_URI / INPUTS_PREFIX /
+# CAPACITY_MINUTES / SETUP_MARGIN_MINUTES / QUERY_LEG_DURATION_SECONDS /
+# NOW_EPOCH available as overrides for tests.
 # BENCHMARKS_REF produces no output key: it is validated here and consumed by the
 # workflow's launch job straight from the dispatch input.
 # Out: key=value lines appended to $GITHUB_OUTPUT (stdout when unset); the
@@ -56,9 +56,19 @@ TARGET_REF="${TARGET_REF:-feature/full-history}"
 HOT_NUM_LEDGERS="${HOT_NUM_LEDGERS:-0}"
 RUN_NAME="${RUN_NAME:-}"
 BENCHMARKS_REF="${BENCHMARKS_REF:-main}"
+# The synthetic dataset set. Both hold every profile, generated from the same
+# core meta config except for diagnostic events:
+#   c1 = ENABLE_SOROBAN_DIAGNOSTIC_EVENTS + EMIT_CLASSIC_EVENTS +
+#        EMIT_SOROBAN_TRANSACTION_META_EXT_V1
+#   c2 = c1 without ENABLE_SOROBAN_DIAGNOSTIC_EVENTS
+DATASET_SET="${DATASET_SET:-c1}"
 
 PUBLISH_URI="${PUBLISH_URI:-s3://stellar-rpc-bench/results}"
-INPUTS_PREFIX="${INPUTS_PREFIX:-s3://stellar-rpc-bench/inputs/synthetic-ledgers/2026-07-18-apply-load-20k}"
+case "$DATASET_SET" in
+  c1 | c2) ;;
+  *) die "dataset_set must be c1|c2, got '$DATASET_SET'" ;;
+esac
+INPUTS_PREFIX="${INPUTS_PREFIX:-s3://stellar-rpc-bench/inputs/synthetic-ledgers/2026-10-apply-load-20k-${DATASET_SET}}"
 # 21 h: four 5.3 h poller windows, the most the relay chain can cover.
 CAPACITY_MINUTES="${CAPACITY_MINUTES:-1260}"
 # Toolchain install, build, dataset sync, cold ingest legs, bundle upload.
@@ -215,7 +225,7 @@ toml_file="$(mktemp "${TMPDIR:-/tmp}/campaign-XXXXXX")"
     printf '\n[[dataset]]\n'
     printf 'name = "%s"\n' "$profile"
     printf 'kind = "packs-s3"\n'
-    printf 'location = "%s/%s/packs-v3/cold"\n' "$INPUTS_PREFIX" "$profile"
+    printf 'location = "%s/%s/packs-v4/cold"\n' "$INPUTS_PREFIX" "$profile"
     printf 'chunks = [1]\n'
   done
 } > "$toml_file"
@@ -232,7 +242,10 @@ toml_file="$(mktemp "${TMPDIR:-/tmp}/campaign-XXXXXX")"
 
 {
   echo "campaign $campaign_name: phase $PHASE (close_interval $close_interval), ingest=$INGEST query=$QUERY"
-  echo "datasets: $profiles"
+  echo "datasets: $profiles (set $DATASET_SET, $INPUTS_PREFIX)"
+  # The runner keys its dataset cache by name only, and both sets use the same
+  # names, so a reused box would serve the other set's packs without a word.
+  echo "note: the runner reuses \$BENCH_ROOT/golden/<name>/ whatever set filled it; on a box that ran the other set, rm -rf those dirs first"
   echo "machine $MACHINE = $instance_type, workers $workers, runs $RUNS, hot_num_ledgers $HOT_NUM_LEDGERS"
   echo "paced hot legs ~$((hot_secs / 60))m; ${query_legs} query legs ~$((query_secs / 60))m; budget ${budget_minutes}m of ${CAPACITY_MINUTES}m capacity"
   echo "deadline $(fmt_epoch "$deadline_epoch"); box self-terminates after ${self_terminate_minutes}m"
