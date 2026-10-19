@@ -42,7 +42,7 @@ All chunk and window ids use uniform `%08d` zero-padding. Example (window = 1,00
 
 ## Configuration
 
-One TOML file configures the daemon, passed as `--config` to the v2 binary (`stellar-rpc-v2 --config <path>`). Decoding is strict: an unknown key or section is a startup error, so a stale or mistyped config fails loudly instead of being half-read. A fully-commented sample lives at `cmd/stellar-rpc/rpcv2/rpc-v2-sample-config.toml`.
+One TOML file configures the daemon, passed as `--config` to the binary in rpcv2 mode (`stellar-rpc --enable-rpcv2 --config <path>`). Decoding is strict: an unknown key or section is a startup error, so a stale or mistyped config fails loudly instead of being half-read. A fully-commented sample lives at `cmd/stellar-rpc/internal/rpcv2/config/rpc-v2-sample-config.toml`.
 
 Every TOML leaf is also settable from the command line:
 
