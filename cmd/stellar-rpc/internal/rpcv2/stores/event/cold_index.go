@@ -159,7 +159,6 @@ func WriteColdIndex(
 	pw, err := packfile.Create(indexPackPath, packfile.WriterOptions{
 		Format:         indexPackFormat,
 		ItemsPerRecord: indexPackItemsPerRecord,
-		ContentHash:    true,
 		Overwrite:      true,
 		RecordChecksum: indexPackChecksum,
 	})

@@ -338,10 +338,9 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	_ = binary.LittleEndian.Uint32(record[:IndexRecordFingerprintLen])
 }
 
-// TestWriteColdIndex_StampAndContentHash pins index.pack's app-data build
-// stamp (schema, field mask, trailing-bytes-ignored, newer-version refusal)
-// and its content hash.
-func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
+// TestWriteColdIndex_Stamp pins index.pack's app-data build stamp (schema,
+// field mask, trailing-bytes-ignored, newer-version refusal).
+func TestWriteColdIndex_Stamp(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, indexFixture(t, 4), dir, testIndexSecret))
 	r := packfile.Open(filepath.Join(dir, IndexPackName(indexTestChunkID)), packfile.ReaderOptions{})
@@ -363,11 +362,6 @@ func TestWriteColdIndex_StampAndContentHash(t *testing.T) {
 	newer[0] = indexStampVersion + 1
 	_, _, err = decodeIndexBuildStamp(newer)
 	require.ErrorContains(t, err, "written by a newer stellar-rpc")
-
-	_, hashed, err := r.ContentHash()
-	require.NoError(t, err)
-	assert.True(t, hashed, "index.pack carries a content hash")
-	require.NoError(t, r.Verify(context.Background()))
 }
 
 // routedFP is the fingerprint the writer stores for term.

@@ -69,11 +69,8 @@ func NewColdWriter(path string, firstSeq uint32, opts ColdWriterOptions) (*ColdW
 		Format:           formatLedgerCold,
 		Overwrite:        true,
 		NewRecordEncoder: newColdPackEncoder,
-		// Items reach AppendItem as raw LCM bytes, so the content hash is
-		// independent of the zstd encoder version.
-		ContentHash:  true,
-		Concurrency:  opts.Concurrency,
-		BytesPerSync: opts.BytesPerSync,
+		Concurrency:      opts.Concurrency,
+		BytesPerSync:     opts.BytesPerSync,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cold: create packfile %q: %w", path, err)

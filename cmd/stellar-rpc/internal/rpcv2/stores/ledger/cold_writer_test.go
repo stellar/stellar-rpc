@@ -1,7 +1,6 @@
 package ledger
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
 	"os"
@@ -94,8 +93,6 @@ func TestColdWriter_CommitEmitsTrailerAndAppData(t *testing.T) {
 	}
 	require.NoError(t, w.Commit())
 
-	// The record decoder matters here: Verify recomputes the content hash over
-	// decoded (raw) items, the form the writer hashed.
 	r := packfile.Open(path, packfile.ReaderOptions{RecordDecoder: coldPackDecoder})
 	t.Cleanup(func() { _ = r.Close() })
 
@@ -108,13 +105,6 @@ func TestColdWriter_CommitEmitsTrailerAndAppData(t *testing.T) {
 	require.Len(t, ad, appDataSize)
 	assert.Equal(t, coldAppDataVersion, ad[0])
 	assert.Equal(t, firstSeq, binary.BigEndian.Uint32(ad[1:]))
-
-	// The pack carries a content hash over the raw (pre-compression) items,
-	// and it verifies.
-	_, hashed, err := r.ContentHash()
-	require.NoError(t, err)
-	assert.True(t, hashed, "cold packs carry a content hash")
-	require.NoError(t, r.Verify(context.Background()))
 }
 
 func TestNewColdWriter_TruncatesPreexistingFile(t *testing.T) {

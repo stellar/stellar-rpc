@@ -95,12 +95,9 @@ func NewColdWriter(chunkID chunk.ID, bucketDir string, opts ColdWriterOptions) (
 		Format:           eventsPackFormat,
 		ItemsPerRecord:   eventsPackItemsPerRecord,
 		NewRecordEncoder: newEventsPackEncoder,
-		// Items reach AppendItem in canonical (uncompressed) payload form, so
-		// the content hash is independent of the zstd encoder version.
-		ContentHash:  true,
-		Concurrency:  opts.Concurrency,
-		BytesPerSync: opts.BytesPerSync,
-		Overwrite:    true,
+		Concurrency:      opts.Concurrency,
+		BytesPerSync:     opts.BytesPerSync,
+		Overwrite:        true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("events: create events.pack at %s: %w", path, err)
