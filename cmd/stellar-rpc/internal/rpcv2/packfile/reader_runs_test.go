@@ -211,6 +211,29 @@ func TestReadItemsCallbackError(t *testing.T) {
 	}
 }
 
+// A panic on a worker fails the read with a plain error instead of ending the
+// process, the panic and its stack ride on the error, and the reader keeps
+// serving.
+func TestReadItemsWorkerPanicIsAnError(t *testing.T) {
+	path, items := writeSizedRecords(t, 1000, 1000, 1000, 1000)
+	r := Open(path, ReaderOptions{Concurrency: 2})
+	defer r.Close()
+
+	// Records 0 and 2: two reads, one per worker.
+	err := r.ReadItems(context.Background(), []int{0, 2}, func(idx int, _ []byte) error {
+		if idx == 1 {
+			panic("boom")
+		}
+		return nil
+	})
+	require.EqualError(t, err, "packfile: read panicked", "read errors can reach clients, so the message stays plain")
+	var perr *PanicError
+	require.ErrorAs(t, err, &perr)
+	require.Equal(t, "boom", perr.Value)
+	require.Contains(t, string(perr.Stack), "TestReadItemsWorkerPanicIsAnError.func")
+	checkReadItems(t, r, items, []int{0, 2})
+}
+
 func TestReadItemsCanceledContext(t *testing.T) {
 	path, _ := writeSizedRecords(t, 1000, 1000)
 	r := Open(path, ReaderOptions{})

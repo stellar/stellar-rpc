@@ -47,6 +47,7 @@ import (
 	"iter"
 	"math"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -165,6 +166,12 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 	}
 	ch := make(chan mphfResult, 1)
 	go func() {
+		// A panic in the load fails the lookups that wait on it, not the process.
+		defer func() {
+			if p := recover(); p != nil {
+				ch <- mphfResult{err: &packfile.PanicError{Op: "events: cold read", Value: p, Stack: debug.Stack()}}
+			}
+		}()
 		// openMPHF already wraps its errors with the path; pass them
 		// through so the path isn't printed twice.
 		m, err := openMPHF(indexHashPath)
