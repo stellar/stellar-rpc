@@ -31,7 +31,7 @@ const (
 //     typically 2-3× on XDR) and read in batches via
 //     BatchedMultiGetCF. Larger blocks give zstd more context per
 //     compression unit and align with batch-fetch shapes.
-//   - IndexCF stores one (slab || term_hash) -> bitmap entry per term of
+//   - IndexCF stores one (slab || routed term) -> bitmap entry per term of
 //     each sealed slab, loaded one sorted file per slab (see hotIndex).
 //     Auto compaction is off, and the files never overlap so it would have
 //     nothing to do; their index blocks sit in the block cache so a chunk's
@@ -122,9 +122,11 @@ var _ Reader = (*HotStore)(nil)
 // DB once. The store must have CFNames() registered + CFOptions() applied, and
 // be writable: warmup seals a full slab it indexes again as soon as the next
 // one starts. A warmup failure returns the error WITHOUT closing the
-// caller-owned store.
-func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) (*HotStore, error) {
-	index, offsets, err := warmup(store, chunkID)
+// caller-owned store. The index files terms under the chunk's cold index
+// secret, ColdIndexSecret(catalogSecret, chunkID), so its keys are the cold
+// build's.
+func NewWithStore(store *rocksdb.Store, chunkID chunk.ID, catalogSecret [32]byte) (*HotStore, error) {
+	index, offsets, err := warmup(store, chunkID, catalogSecret)
 	if err != nil {
 		return nil, fmt.Errorf("events: warmup chunk %s: %w", chunkID, err)
 	}
@@ -488,7 +490,7 @@ func (h *HotStore) applyLedger(startID uint32, termKeys [][]TermKey) error {
 // chunkID seeds ConcurrentLedgerOffsets.StartLedger for empty
 // chunks; on-disk rows carry the full ledger sequence themselves.
 func warmup(
-	chunkStore *rocksdb.Store, chunkID chunk.ID,
+	chunkStore *rocksdb.Store, chunkID chunk.ID, catalogSecret [32]byte,
 ) (*hotIndex, *ConcurrentLedgerOffsets, error) {
 	offsets, err := warmupOffsets(chunkStore, chunkID)
 	if err != nil {
@@ -501,7 +503,7 @@ func warmup(
 	if err := verifyChunkConsistency(chunkStore, offsets.TotalEvents(), sealed); err != nil {
 		return nil, nil, err
 	}
-	index := newHotIndex(chunkStore, sealed)
+	index := newHotIndex(chunkStore, sealed, ColdIndexSecret(catalogSecret[:], chunkID))
 	if err := replayUnsealed(chunkStore, index, sealed<<indexSlabShift, offsets.TotalEvents()); err != nil {
 		return nil, nil, err
 	}

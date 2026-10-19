@@ -33,6 +33,9 @@ func silentLogger() *supportlog.Entry {
 	return log
 }
 
+// testCatalogSecret is the catalog secret test hot stores open with.
+var testCatalogSecret = [32]byte(bytes.Repeat([]byte{0xA5}, 32))
+
 // hotStoreHarness bundles a HotStore + the root data directory used
 // by tests. The store is registered for cleanup.
 type hotStoreHarness struct {
@@ -64,7 +67,7 @@ func openHotStoreForTestAt(t *testing.T, dir string, chunkID chunk.ID) (*HotStor
 func tryOpenHotStoreForTest(t *testing.T, dir string, chunkID chunk.ID) (*HotStore, *rocksdb.Store, error) {
 	t.Helper()
 	raw := openRawHotChunkForTest(t, dir, chunkID)
-	hot, err := NewWithStore(raw, chunkID)
+	hot, err := NewWithStore(raw, chunkID, testCatalogSecret)
 	if err != nil {
 		_ = raw.Close()
 		return nil, nil, err
@@ -645,7 +648,7 @@ func mustOffsets(t *testing.T, r Reader) *LedgerOffsets {
 func addPostings(h *HotStore, key TermKey, ids ...uint32) {
 	live := h.index.view.Load().live
 	for _, id := range ids {
-		live.add(key, id)
+		live.add(routedKey(h.index.secret, key), id)
 	}
 }
 

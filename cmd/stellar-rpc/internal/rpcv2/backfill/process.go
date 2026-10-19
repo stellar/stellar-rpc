@@ -258,7 +258,7 @@ func tryHotSource(
 	// and must never mutate it (the read-only open replays any un-synced WAL into
 	// memtables but persists nothing). An absent or gutted "ready" DB fails the open
 	// — fails the run, never auto-created.
-	hot, err := hotchunk.OpenReadyView(state, dir, chunkID, cfg.Logger)
+	hot, err := hotchunk.OpenReadyView(state, dir, chunkID, cfg.Catalog.Secret(), cfg.Logger)
 	if err != nil {
 		return nil, nil, false, err
 	}
