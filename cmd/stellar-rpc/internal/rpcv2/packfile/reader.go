@@ -8,6 +8,7 @@ import (
 	"io"
 	"iter"
 	"os"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -39,6 +40,17 @@ var (
 	// strictly ascending (duplicates or out-of-order entries).
 	ErrPositionsUnsorted = errors.New("packfile: positions not strictly sorted")
 )
+
+// PanicError is a panic recovered on a goroutine a read started. Its message
+// is plain, since read errors can reach clients; Value and Stack keep what
+// panicked and where for the server's log.
+type PanicError struct {
+	Op    string
+	Value any
+	Stack []byte
+}
+
+func (e *PanicError) Error() string { return e.Op + " panicked" }
 
 // knownFlags is the bitmask of trailer flags this version of the reader
 // understands. Files with unknown bits set are rejected as corrupt.
@@ -173,8 +185,13 @@ func Open(path string, opts ReaderOptions) *Reader {
 		return nil
 	})
 	// Drive the open from a background goroutine; later waitOpen() calls
-	// (one at the head of each public method) get the cached result.
-	go func() { _ = r.waitOpen() }()
+	// (one at the head of each public method) get the cached result. A panic
+	// in the open repeats in each of those calls, on its caller's goroutine,
+	// so here it is only swallowed.
+	go func() {
+		defer func() { _ = recover() }()
+		_ = r.waitOpen()
+	}()
 	return r
 }
 
@@ -530,9 +547,17 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 	var nextRun atomic.Int64
 	g, gctx := errgroup.WithContext(ctx)
 	for range numWorkers {
-		g.Go(func() error {
+		g.Go(func() (err error) {
 			rec := r.getRecord()
-			defer r.putRecord(rec)
+			defer func() {
+				// A panic fails the read instead of the process. The workspace
+				// may be half written, so it does not go back to the pool.
+				if p := recover(); p != nil {
+					err = &PanicError{Op: "packfile: read", Value: p, Stack: debug.Stack()}
+					return
+				}
+				r.putRecord(rec)
+			}()
 			for {
 				i := int(nextRun.Add(1)) - 1
 				if i >= len(runs) {
