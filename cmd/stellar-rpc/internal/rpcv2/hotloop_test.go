@@ -264,7 +264,7 @@ func TestRunIngestionLoop_LedgerLandsAcrossAllCFs(t *testing.T) {
 	require.Error(t, err, "stream ran past the prefix and errored")
 
 	// Reopen the (loop-closed) DB and assert every CF advanced together.
-	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, cat.Secret(), silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = reopened.Close() })
 
@@ -466,7 +466,7 @@ func (p *fencePublisher) Publish() {
 	c := chunk.ID(lastComplete)
 	// (1) The closed chunk's write handle must be released: OpenExisting is read-write
 	// and takes the LOCK, so it succeeds only if the loop already closed the handle.
-	db, err := hotchunk.OpenExisting(p.cat.Layout().HotChunkPath(c), c, silentLogger())
+	db, err := hotchunk.OpenExisting(p.cat.Layout().HotChunkPath(c), c, p.cat.Secret(), silentLogger())
 	released := err == nil
 	if db != nil {
 		_ = db.Close()
@@ -667,7 +667,7 @@ func TestRunIngestionLoop_RestartResumesFromLastCommitted(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, first+3, stream2.firstSeen.Load(), "second run resumed at last-committed+1")
 
-	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
+	reopened, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, cat.Secret(), silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = reopened.Close() })
 	maxSeq, ok, err := reopened.MaxCommittedSeq()
