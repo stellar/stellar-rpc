@@ -93,6 +93,11 @@ type ColdReader struct {
 	// The lookup path awaits it before using the MPHF handle.
 	waitLayout func() (indexLayout, error)
 
+	// whole keeps each non-split entry a lookup decoded, a term's whole
+	// bitmap, so a later stage of the same query reuses it without a read.
+	wholeMu sync.Mutex
+	whole   map[TermKey]*roaring.Bitmap
+
 	closed atomic.Bool
 }
 
@@ -330,7 +335,8 @@ type entryRead struct {
 // decodeIndexEntry decodes the entry rd names. A slab entry carries no
 // fingerprint, so being one container of slab rd.slab's ids is what shows it
 // was read at the right position. UnmarshalBinary copies out of entry, so the
-// bitmap outlives the ReadItems callback.
+// bitmap outlives the ReadItems callback, and the per-request memo of whole
+// terms relies on it.
 func decodeIndexEntry(entry []byte, rd entryRead) (*roaring.Bitmap, error) {
 	if rd.slab < 0 {
 		if len(entry) < IndexRecordFingerprintLen {
@@ -418,6 +424,10 @@ func (c *ColdReader) LookupKeys(
 		}
 		pos, rowFP, split := layout.locate(hit.slot)
 		if !split {
+			if bm, ok := c.wholeTerm(keys[i]); ok { //nolint:gosec // LookupBatch answers keys[i] at i
+				results[i] = bm
+				continue
+			}
 			reads = append(reads, entryRead{pos: pos, key: i, slab: -1, fp: hit.fp})
 			continue
 		}
@@ -435,6 +445,7 @@ func (c *ColdReader) LookupKeys(
 	if err := readIndexEntries(ctx, c.index, reads); err != nil {
 		return nil, IDRange{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
 	}
+	c.keepWholeTerms(keys, reads)
 	// reads is in position order, so each Or appends a split term's next
 	// slab; with copy-on-write on both sides it takes over the slab's
 	// containers, which this lookup owns, instead of copying them.
@@ -661,4 +672,26 @@ func (c *ColdReader) loadMeta(eventsPath string) (coldMeta, error) {
 			eventsPath, offsets.TotalEvents(), total)
 	}
 	return coldMeta{count: total, offsets: offsets}, nil
+}
+
+// wholeTerm returns the whole term an earlier lookup decoded for k.
+func (c *ColdReader) wholeTerm(k TermKey) (*roaring.Bitmap, bool) {
+	c.wholeMu.Lock()
+	defer c.wholeMu.Unlock()
+	bm, ok := c.whole[k]
+	return bm, ok
+}
+
+// keepWholeTerms keeps the whole terms reads decoded for later lookups.
+func (c *ColdReader) keepWholeTerms(keys []TermKey, reads []entryRead) {
+	c.wholeMu.Lock()
+	defer c.wholeMu.Unlock()
+	if c.whole == nil {
+		c.whole = make(map[TermKey]*roaring.Bitmap)
+	}
+	for _, rd := range reads {
+		if rd.slab < 0 {
+			c.whole[keys[rd.key]] = rd.bm
+		}
+	}
 }

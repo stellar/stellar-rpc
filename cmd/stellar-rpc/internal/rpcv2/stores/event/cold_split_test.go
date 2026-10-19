@@ -366,3 +366,22 @@ func TestColdReader_CorruptSplitIndexIsCorrupt(t *testing.T) {
 		require.ErrorContains(t, err, "is not one container of slab 20")
 	})
 }
+
+// A later stage of the same query reuses the whole terms the first stage
+// decoded: decoding builds a new bitmap, so the same one twice means one
+// decode. A split term is still read for each stage's own slabs.
+func TestColdReader_LaterStagesReuseWholeTerms(t *testing.T) {
+	f := newSplitFixture()
+	cr, onSplitSlot := openSplitFixture(t, f)
+	keys := []TermKey{f.key("mid"), f.key("dense")}
+	require.False(t, onSplitSlot(keys[0]), "fixture: mid must be whole")
+
+	const slab = 1 << 16
+	first, _, err := cr.LookupKeys(context.Background(), keys, IDRange{Start: 0, End: 4 * slab})
+	require.NoError(t, err)
+	second, _, err := cr.LookupKeys(context.Background(), keys, IDRange{Start: 4 * slab, End: 20 * slab})
+	require.NoError(t, err)
+	assert.Same(t, first[0], second[0], "the second stage decoded mid again")
+	assert.True(t, f.oracle["mid"].Equals(second[0]))
+	assert.NotSame(t, first[1], second[1], "dense is read for each stage's slabs")
+}
