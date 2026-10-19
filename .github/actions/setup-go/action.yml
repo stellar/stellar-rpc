@@ -95,10 +95,7 @@ runs:
       run: |
         echo "CGO_CFLAGS=-I$HOME/.zstd/include -I$HOME/.rocksdb/include" >> "$GITHUB_ENV"
         echo "CGO_LDFLAGS=-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib" >> "$GITHUB_ENV"
-        echo "LD_LIBRARY_PATH=$HOME/.zstd/lib:$HOME/.rocksdb/lib" >> "$GITHUB_ENV"
 
-    # No DYLD_LIBRARY_PATH: SIP strips DYLD_* when /bin/bash is exec'd, and
-    # CI only links the binary (never runs it), so it isn't needed.
     - name: Configure CGO for native libs (macOS)
       if: runner.os == 'macOS'
       shell: bash

@@ -65,24 +65,24 @@ CARGO_BUILD_TARGET ?= $(shell rustc -vV | sed -n 's|host: ||p')
 # unchanged name: the Jenkins packager, apt packaging, and Dockerfile.release consume it
 STELLAR_RPC_BINARY := stellar-rpc
 
-# Where the static zstd and RocksDB archives the binary links are installed.
-# The same two prefixes CI installs through .github/actions/setup-go. Every go
-# command in every target searches them first, ahead of whatever the shell
-# put in the two CGO variables.
+# The static zstd and RocksDB archives, in the same prefixes CI installs via
+# .github/actions/setup-go. Prepended so they win over any CGO_* from the
+# shell or the make command line.
 ZSTD_HOME ?= $(HOME)/.zstd
 ROCKSDB_HOME ?= $(HOME)/.rocksdb
-export CGO_CFLAGS := -I$(ZSTD_HOME)/include -I$(ROCKSDB_HOME)/include $(CGO_CFLAGS)
-export CGO_LDFLAGS := -L$(ZSTD_HOME)/lib -L$(ROCKSDB_HOME)/lib $(CGO_LDFLAGS)
+override CGO_CFLAGS := -I$(ZSTD_HOME)/include -I$(ROCKSDB_HOME)/include $(CGO_CFLAGS)
+override CGO_LDFLAGS := -L$(ZSTD_HOME)/lib -L$(ROCKSDB_HOME)/lib $(CGO_LDFLAGS)
+export CGO_CFLAGS CGO_LDFLAGS
 
 
 # update the Cargo.lock every time the Cargo.toml changes.
 Cargo.lock: Cargo.toml
 	cargo update --workspace
 
-install: build-libs
+install: build-libs build-native-libs
 	go install -ldflags="${GOLDFLAGS}" ./cmd/stellar-rpc
 
-build: build-libs
+build: build-libs build-native-libs
 	go build -ldflags="${GOLDFLAGS}" ./...
 
 build-libs: Cargo.lock
@@ -107,7 +107,7 @@ fmt:
 rust-test:
 	cargo test
 
-go-test: build-libs
+go-test: build-libs build-native-libs
 	go test ./...
 
 test: go-test rust-test
@@ -125,17 +125,13 @@ $(ZSTD_HOME)/lib/libzstd.a:
 $(ROCKSDB_HOME)/lib/librocksdb.a: $(ZSTD_HOME)/lib/libzstd.a
 	PREFIX="$(ROCKSDB_HOME)" ZSTD_HOME="$(ZSTD_HOME)" ./scripts/install-rocksdb.sh
 
-# The two static archives, built once into ZSTD_HOME and ROCKSDB_HOME. A
-# prefix that already holds its archive is left alone, which is how the
-# Docker build stage reuses the archives its earlier stages installed.
+# Builds each archive only when its prefix lacks it, or when libzstd.a is newer
+# than librocksdb.a.
 build-native-libs: $(ZSTD_HOME)/lib/libzstd.a $(ROCKSDB_HOME)/lib/librocksdb.a
 
-# The optimized build, invoked by name from the package builder
-# (stellar/pipelines, soroban-rpc/Jenkinsfile-soroban-rpc-package-builder,
-# through cmd/stellar-rpc/docker/Dockerfile) and from stellar/quickstart's
-# Dockerfile. Both run it in an image with only build-essential and jq, so it
-# brings the static archives and the Rust libraries itself, and it ends with
-# the link check so every caller gets it.
+# Called by name from stellar/pipelines and stellar/quickstart, in images with
+# only build-essential and jq, so it builds the archives and the Rust
+# libraries itself and ends with the link check.
 build-stellar-rpc: build-libs build-native-libs
 	go build -ldflags="${GOLDFLAGS}" -o ${STELLAR_RPC_BINARY} -trimpath -v ./cmd/stellar-rpc
 	./scripts/check-link.sh ${STELLAR_RPC_BINARY}

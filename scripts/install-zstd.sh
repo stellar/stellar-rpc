@@ -12,10 +12,9 @@ set -euo pipefail
 ZSTD_VERSION=1.5.7
 PREFIX="${PREFIX:-/usr/local}"
 
-# Shared with the other install script by copy, not by a sourced file: each
-# script is copied on its own into a Docker stage.
-# apt-get as root where there is no sudo (the quickstart builder image), with
-# sudo everywhere else.
+# Duplicated in the other install script on purpose: each script stands alone,
+# and CI hashes each file for its cache key. Root has no sudo in the
+# quickstart builder image.
 apt_install() {
   if [ "$(id -u)" = 0 ]; then
     apt-get update -qq && apt-get install -y -qq "$@"
@@ -24,7 +23,7 @@ apt_install() {
   fi
 }
 
-# Per-OS: parallel jobs (JOBS overrides, for builders with little memory), cmake/ninja install, cross arch flag.
+# Per-OS: parallel jobs (JOBS overrides it), cmake/ninja install, cross arch flag.
 ARCH_FLAG=""
 case "$(uname -s)" in
   Darwin)
@@ -35,16 +34,21 @@ case "$(uname -s)" in
     if [ -n "${MACOS_ARCH:-}" ]; then
       ARCH_FLAG="-DCMAKE_OSX_ARCHITECTURES=$MACOS_ARCH"
     fi
-    # Same floor as the Makefile's -mmacosx-version-min, so the archive and
-    # the Go link agree on the deployment target.
+    # Same floor as the Makefile's -mmacosx-version-min.
     ARCH_FLAG="$ARCH_FLAG -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
     ;;
   Linux)
     JOBS="${JOBS:-$(nproc)}"
-    # Bare-machine fallback; CI runners and the Docker image already ship
-    # cmake/ninja, so this is skipped there.
-    if command -v apt-get &>/dev/null && { ! command -v cmake &>/dev/null || ! command -v ninja &>/dev/null; }; then
-      apt_install cmake ninja-build
+    # Bare-machine fallback: install only what is missing.
+    pkgs=()
+    if ! command -v cmake &>/dev/null || ! command -v ninja &>/dev/null; then
+      pkgs+=(cmake ninja-build)
+    fi
+    if ! command -v curl &>/dev/null; then
+      pkgs+=(curl ca-certificates)
+    fi
+    if command -v apt-get &>/dev/null && [ "${#pkgs[@]}" -gt 0 ]; then
+      apt_install "${pkgs[@]}"
     fi
     ;;
   *)
@@ -53,10 +57,8 @@ case "$(uname -s)" in
     ;;
 esac
 
-# A shared libzstd in PREFIX/lib would win over the archive at link time, and
-# the binary would load it at run time. Refuse before the build rather than
-# delete: PREFIX may be a prefix other tools install into, such as /usr/local
-# under Homebrew.
+# A shared libzstd next to the archive would win at link time. Refuse rather
+# than delete: PREFIX may belong to other tools, such as /usr/local under brew.
 shared=$(ls "$PREFIX"/lib/libzstd*.so* "$PREFIX"/lib/libzstd*.dylib 2>/dev/null || true)
 if [ -n "$shared" ]; then
   echo "error: shared libzstd in $PREFIX/lib; remove it or pick another PREFIX:" >&2

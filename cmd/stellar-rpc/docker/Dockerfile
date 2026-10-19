@@ -1,9 +1,7 @@
-# zstd and RocksDB are static archives built from source on ubuntu:22.04, so
-# the binary carries them and needs at most glibc 2.35: one Debian package
-# runs on jammy and noble. The build stage is ubuntu:22.04 for the same
-# reason; Go and Rust come from upstream tarballs because there is no golang
-# image on ubuntu:22.04. The runtime stage is ubuntu:24.04 with noble
-# stellar-core packages.
+# Everything is built on ubuntu:22.04 so the binary needs no glibc newer than
+# jammy's, and a newer glibc (noble) runs it too: one Debian package for both.
+# Go and Rust come from upstream tarballs because there is no golang image on
+# ubuntu:22.04. zstd and RocksDB are static archives the binary carries.
 #
 # The package builder (stellar/pipelines) runs `docker build --target build`
 # and copies /bin/stellar-rpc out, so that stage name and path stay.
@@ -37,11 +35,9 @@ RUN apt update && apt install -y build-essential curl git jq && apt clean
 RUN curl -sSfL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" \
     | tar -C /usr/local -xzf -
 
-# Rust is required: build-stellar-rpc depends on build-libs, which cargo-builds
-# the preflight and xdr2json libraries the binary links through cgo.
+# Rust builds the preflight and xdr2json libraries the binary links through cgo.
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain $RUST_TOOLCHAIN_VERSION
 
-# The zstd and RocksDB headers and archives, both installed to /usr/local.
 COPY --from=rocksdb-build /usr/local/include/ /usr/local/include/
 COPY --from=rocksdb-build /usr/local/lib/libzstd.a /usr/local/lib/librocksdb.a /usr/local/lib/
 
@@ -49,10 +45,9 @@ WORKDIR /go/src/github.com/stellar/stellar-rpc
 ADD . ./
 RUN git config --global --add safe.directory "/go/src/github.com/stellar/stellar-rpc" || true
 
-# The archives are already in /usr/local, so build-stellar-rpc links them and
-# does not rebuild them. The target ends with scripts/check-link.sh, which
-# with MAX_GLIBC also holds the binary to this stage's glibc.
-RUN MAX_GLIBC=2.35 make REPOSITORY_VERSION=${REPOSITORY_VERSION} ZSTD_HOME=/usr/local ROCKSDB_HOME=/usr/local build-stellar-rpc
+# The archives are already in /usr/local, so make links them instead of
+# rebuilding them.
+RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} ZSTD_HOME=/usr/local ROCKSDB_HOME=/usr/local build-stellar-rpc
 RUN mv stellar-rpc /bin/stellar-rpc
 
 # --- Stage 4: Runtime ---
@@ -73,7 +68,7 @@ RUN CHANNELS="stable unstable" /tmp/install-stellar-core.sh "${STELLAR_CORE_VERS
 RUN apt clean
 
 # Each tool carries its own copy of RocksDB.
-COPY --from=rocksdb-build /usr/local/bin/ldb /usr/local/bin/sst_dump /usr/local/bin/db_bench /usr/local/bin/
+COPY --from=rocksdb-build /usr/local/bin/ldb /usr/local/bin/sst_dump /usr/local/bin/
 
 COPY --from=build /bin/stellar-rpc /usr/bin/stellar-rpc
 ENTRYPOINT ["/usr/bin/stellar-rpc"]

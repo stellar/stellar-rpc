@@ -83,12 +83,7 @@ jobs:
           CGO_ENABLED: 1
           GOARCH: ${{ matrix.go_arch }}
 
-      # librocksdb and libzstd must be inside the binary. The glibc ceiling
-      # (2.35, so that one Debian package runs on jammy and noble) is checked
-      # in the Dockerfile's build stage, which is what the package builder
-      # ships: a binary linked on these 24.04 runners needs glibc 2.38 or
-      # newer, and the 22.04 runner images retire in April 2027.
-      - name: Check the link line
+      - name: Check that librocksdb and libzstd are inside the binary
         run: ./scripts/check-link.sh stellar-rpc
 
   integration:
