@@ -208,9 +208,9 @@ at the end.
 
 `bench query` writes `bench.txt` for `benchstat` only when the run ends with
 `status` `ok`. It has one Go benchmark line for each scenario, in run order.
-For `txhash`, one line for each outcome follows. Its
-name ends with `/outcome=found` or `/outcome=not_found`, and it has no
-`dropped`.
+For `txhash` and `events`, one line follows for each outcome that has samples.
+Its name ends with `/outcome=` and the `latency.csv` outcome, for example
+`/outcome=not_found` or `/outcome=no_match`, and it has no `dropped`.
 
 ```
 BenchmarkQuery/tier=cold/type=ledgers/rps=10	600	812345 ns/op	790123 p50-ns	2345678 p99-ns	301234 handler-p50-ns	901234 handler-p99-ns	2400000 p99-from-due-ns	10 items/op	0 dropped
@@ -239,7 +239,7 @@ cat new-*/bench.txt > new.txt
 benchstat -filter '/outcome:""' old.txt new.txt
 ```
 
-The filter removes the `txhash` outcome lines. Examine `dropped` first. If it
+The filter removes the outcome lines of `txhash` and `events`. Examine `dropped` first. If it
 changed, the latency values compare different loads.
 
 ### Query types
