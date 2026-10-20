@@ -40,6 +40,13 @@ const eventScanPageSlack = 4
 // its no_match set.
 const noMatchProbes = 8
 
+// poolRNG returns the RNG of qtype's pool build, derived from --seed. Each
+// type's pool gets its own stream.
+func poolRNG(seed int64, qtype string) *rand.Rand {
+	key := uint64(scenarioSeed(seed, qtype))           //nolint:gosec // seed mixing, not cryptography
+	return rand.New(rand.NewPCG(key, splitmix64(key))) //nolint:gosec // seed mixing, not cryptography
+}
+
 // txHashPool holds the hashes the txhash requests look up, one per sampled
 // ledger.
 type txHashPool struct {
@@ -67,7 +74,7 @@ func buildTxHashPool(
 	ctx context.Context, logger *supportlog.Entry, ds *queryDataset, notFoundFraction float64, seed int64,
 	size int,
 ) (*txHashPool, error) {
-	rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed*31+7))) //nolint:gosec // seed mixing
+	rng := poolRNG(seed, queryTypeTxHash)
 	var hashes [][32]byte
 	var ledgers []uint32
 	drawn := map[uint32]struct{}{}
@@ -358,7 +365,7 @@ func compareTermPairs(a, b eventTermPair) int {
 // pages from random starts in the dataset's range, and returns the contract IDs
 // and the (contract, first topic) pairs by descending frequency.
 func sampleEventTerms(ctx context.Context, ds *queryDataset, seed int64) ([]string, []eventTermPair, error) {
-	rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed*31+11))) //nolint:gosec // seed mixing
+	rng := poolRNG(seed, queryTypeEvents)
 	limit := maxEventsLimit()
 	maxPages := (eventScanCap+int(limit)-1)/int(limit) + eventScanPageSlack //nolint:gosec // limit <= 1000
 	contracts := map[string]int{}
