@@ -122,7 +122,7 @@ One row for each scenario, in run order.
 | `achieved_rps`, `completion_rps` | Rates |
 | `schedule_ns`, `elapsed_ns`, `overrun_ns` | Windows |
 | `process_cpu_ns` | `process_cpu` |
-| `page_cache_evict_ns` | Time of the eviction before the scenario; empty if no file was evicted |
+| `page_cache_evict_ns` | Time of the eviction before the scenario; empty if the scenario advised no file (eviction off, not Linux, or no frozen file) |
 
 ### `run.json`
 
