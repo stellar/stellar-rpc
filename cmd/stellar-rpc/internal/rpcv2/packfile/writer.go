@@ -379,12 +379,9 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 //
 //nolint:funcorder // pipeline helper; kept near runWriter
 func (w *Writer) recordWorker() {
-	var encoder RecordEncoder
-	if w.newRecordEncoder != nil {
-		encoder = w.newRecordEncoder()
-		if encoder != nil {
-			defer func() { _ = w.recordErr(encoder.Close()) }()
-		}
+	encoder := w.newRecordEncoder()
+	if encoder != nil {
+		defer func() { _ = w.recordErr(encoder.Close()) }()
 	}
 	// Per-worker scratch for encoder output. The encoder writes into this
 	// buffer (growing it if necessary); it persists across iterations so
@@ -403,20 +400,16 @@ func (w *Writer) recordWorker() {
 			}
 		}
 
-		var compressErr error
 		if encoder != nil {
-			encScratch, compressErr = encoder.Encode(encScratch[:0], work.data)
-		}
-
-		if compressErr != nil {
-			w.resultCh <- processedRecord{
-				ordinal: work.ordinal,
-				err:     fmt.Errorf("packfile: record %d compress: %w", work.ordinal, compressErr),
+			var err error
+			encScratch, err = encoder.Encode(encScratch[:0], work.data)
+			if err != nil {
+				w.resultCh <- processedRecord{
+					ordinal: work.ordinal,
+					err:     fmt.Errorf("packfile: record %d compress: %w", work.ordinal, err),
+				}
+				return
 			}
-			return
-		}
-
-		if encoder != nil {
 			// Copy the encoded bytes into work.data, which the main goroutine
 			// pre-sized with spare capacity for the forIndex appended below
 			// (so the append on the next line doesn't reallocate).
