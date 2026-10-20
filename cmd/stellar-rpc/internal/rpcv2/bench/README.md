@@ -45,6 +45,11 @@ starts each request at its due time. It does not wait for a response before
 it starts the next request. At most 512 requests run at a time. If 512
 requests run when the generator reaches an iteration, it drops the iteration.
 
+The bench does not apply the daemon request limits. `rpcv2.ReadMethods`
+builds the handlers without the per-method queue limits and request-duration
+limits, and the bench adds no global request limits. Thus a request that the
+daemon rejects or stops can succeed in the bench.
+
 ## Formulas
 
 A **scenario** is one query type at one target rate. A run does each type in
