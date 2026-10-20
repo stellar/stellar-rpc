@@ -239,8 +239,16 @@ cat new-*/bench.txt > new.txt
 benchstat -filter '/outcome:""' old.txt new.txt
 ```
 
-The filter removes the outcome lines of `txhash` and `events`. Examine `dropped` first. If it
-changed, the latency values compare different loads.
+The filter keeps only the aggregate line of each scenario. Examine `dropped`
+first. If it changed, the latency values compare different loads.
+
+The aggregate line of `txhash` and `events` mixes code paths: found and
+not-found lookups, or the filter sets of the events pool. To compare these
+paths, compare the outcome lines of one type, for example:
+
+```
+benchstat -filter '/type:txhash -/outcome:""' old.txt new.txt
+```
 
 ### Query types
 
