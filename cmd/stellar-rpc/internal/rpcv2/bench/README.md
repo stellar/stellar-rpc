@@ -99,7 +99,7 @@ One row for each scenario, metric and outcome that has samples.
 | `query_type` | `ledgers`, `txpage`, `txhash` or `events` |
 | `target_rps` | `r` |
 | `metric` | `latency`, `handler_latency`, `latency_from_due` or `start_delay` |
-| `outcome` | `all`; for `txhash` also `found` and `not_found` |
+| `outcome` | `all` for each type. For `txhash` also `found` and `not_found`. For `events` also the label of the filter set: `unfiltered`, `frequent_contract`, `frequent_pair`, `rare_contract` or `no_match` |
 | `count` | `n` |
 | `items` | Sum of the items in the responses; `0` for `start_delay` |
 | `total_ns` | Sum of the samples |
@@ -148,8 +148,8 @@ the end.
 | `handlerConcurrency` | Bridge handler slots (number of CPUs) |
 | `cacheScenario` | `warm-run` (warmup > 0), `cold-start` (eviction, no warmup) or `existing-cache` |
 | `pageCacheEviction` | `off`, `requested` or `unsupported-on-this-platform` |
-| `txhashPoolHashes`, `txhashPoolLedgers` | Hashes in the txhash pool, and the ledgers they came from |
-| `eventsPool` | `derived` or `unfiltered` |
+| `txhashPoolHashes` | Hashes in the txhash pool |
+| `eventsPool` | Labels of the events pool's filter sets, comma-joined, for example `unfiltered,frequent_contract,frequent_pair,rare_contract,no_match` |
 | `fixedReadRange` | Types whose requests read the same ledgers each time |
 
 ## Query types
@@ -163,23 +163,41 @@ the end.
 
 - A `ledgers` request fails if it returns fewer ledgers than the limit (cut at
   the end of the range). A `txhash` request fails if the found status is not
-  the expected one.
+  the expected one. An `events` request with the `no_match` filter set fails
+  if it returns events.
 - `txpage` and `events` scan at most 10,000 ledgers for each request. An empty
   `events` page is not an error; examine `items`.
 - `fixedReadRange` lists a type when the served range is too small for random
   starts. Its percentiles then measure a cached read.
 
-**Txhash pool.** Before the first `txhash` scenario, the run takes one hash
-from each of a set of random ledgers, up to `--txhash-pool-size`. It checks
-one hash against `--network-passphrase` and `getTransaction`. A wrong
-passphrase fails the build. `--not-found-fraction` of the lookups use 32
-random bytes; these have the outcome `not_found`.
+**Txhash pool.** Before the first `txhash` scenario, the run picks random
+ledgers from the full range and takes the hash of one random transaction from
+each ledger, up to `--txhash-pool-size` hashes. A ledger with no transactions
+gives no hash. The run then calls `getTransaction` for the first hash. If the
+call does not find the transaction, the build fails. A wrong
+`--network-passphrase` is a likely cause. `--not-found-fraction` of the
+lookups use 32 random bytes; these have the outcome `not_found`.
 
 **Events pool.** Before the first `events` scenario, the run reads up to
-20,000 stored events of the range. The pool holds the unfiltered read, one
-filter for each of the two contracts with the most events, and one filter for
-the most frequent pair of contract and first topic. `eventsPool` is `unfiltered` when
-the scan found no filter term.
+20,000 events as unfiltered `queryEvents` pages from random start ledgers.
+From these events it makes the filter sets below. Each `events`
+request uses one set, and the label of the set is the outcome of the request.
+
+| Set | Filter |
+|---|---|
+| `unfiltered` | No filter |
+| `frequent_contract` | The contract with the most sampled events |
+| `frequent_pair` | The most frequent pair of contract and first topic |
+| `rare_contract` | The contract with the fewest sampled events |
+| `no_match` | The `frequent_contract` contract and a first topic that the sample shows only with other contracts |
+
+The run adds the `no_match` set only after a `queryEvents` probe of the full
+range finds no event for it. It probes at most 8 candidates. A set that the
+sample cannot supply is not in the pool. If the sample has no contract ID, the
+pool holds only `unfiltered`.
+
+`--seed` sets the random choices of both pool builds. Each pool uses its own
+random sequence.
 
 The pool builds are not timed.
 
