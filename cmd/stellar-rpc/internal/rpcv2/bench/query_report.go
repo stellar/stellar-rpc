@@ -292,15 +292,12 @@ func (q *queryReport) stageBench(outDir string, staged *stagedFiles) (string, er
 }
 
 // benchText renders bench.txt: the scenarios in Go benchmark format, for
-// benchstat. A scenario with no planned iteration has no line.
+// benchstat.
 func (q *queryReport) benchText() string {
 	var b strings.Builder
 	b.WriteString("goos: " + runtime.GOOS + "\ngoarch: " + runtime.GOARCH + "\n")
 	for _, sc := range q.scenarios {
 		res := sc.result
-		if res.planned == 0 {
-			continue
-		}
 		name := "BenchmarkQuery/tier=" + q.tier + "/type=" + sc.queryType + "/rps=" + formatRPS(sc.targetRPS)
 		dropped := benchMetric{strconv.Itoa(res.measured.dropped), "dropped"}
 		if _, ok := sc.aggregated(metricLatency); !ok {

@@ -218,13 +218,11 @@ func runQueryBench(
 	if err != nil {
 		return err
 	}
-	if len(written) > 0 {
-		path, err := report.stageBench(env.OutDir, env.Staged)
-		if err != nil {
-			return err
-		}
-		written = append(written, path)
+	path, err := report.stageBench(env.OutDir, env.Staged)
+	if err != nil {
+		return err
 	}
+	written = append(written, path)
 	report.logSummary(logger)
 	logger.Infof("wrote %d report files to %s", len(written), env.OutDir)
 	return nil
