@@ -51,10 +51,7 @@ func TestRecordWithDecoder(t *testing.T) {
 		[]byte("!"),
 	}
 	payload, sizes := buildPayload(entries)
-	encoded, err := xorCompress(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
+	encoded := xorTransform(nil, payload)
 	data := buildRecordBytes(encoded, sizes, false)
 
 	rec := newTestRecord(len(entries), newXorDecoder())
@@ -116,10 +113,7 @@ func TestRecordWidenedChecksum(t *testing.T) {
 func TestRecordNoForIndex(t *testing.T) {
 	// itemsPerRecord=1: the entire payload is one item, no FOR index is appended.
 	payload := []byte("single-item-payload")
-	encoded, err := xorCompress(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
+	encoded := xorTransform(nil, payload)
 
 	rec := newTestRecord(1, newXorDecoder())
 
@@ -192,10 +186,7 @@ func TestRecordReuse(t *testing.T) {
 	// sizes/offsets slices) doesn't leak into the second.
 	entries1 := [][]byte{[]byte("a"), []byte("bb"), []byte("ccc"), []byte("dd"), []byte("e")}
 	payload1, sizes1 := buildPayload(entries1)
-	enc1, err := xorCompress(payload1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	enc1 := xorTransform(nil, payload1)
 	data1 := buildRecordBytes(enc1, sizes1, false)
 
 	rec := newTestRecord(5, newXorDecoder())
@@ -212,10 +203,7 @@ func TestRecordReuse(t *testing.T) {
 	// Second decode: fewer items.
 	entries2 := [][]byte{[]byte("xx"), []byte("yy")}
 	payload2, sizes2 := buildPayload(entries2)
-	enc2, err := xorCompress(payload2)
-	if err != nil {
-		t.Fatal(err)
-	}
+	enc2 := xorTransform(nil, payload2)
 	data2 := buildRecordBytes(enc2, sizes2, false)
 
 	rec.reader.totalItems = 2

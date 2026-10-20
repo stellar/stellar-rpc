@@ -98,10 +98,6 @@ func xorTransform(dst, src []byte) []byte {
 	return dst
 }
 
-// xorCompress is a one-shot variant of xorTransform that allocates a fresh
-// slice.
-func xorCompress(in []byte) ([]byte, error) { return xorTransform(nil, in), nil }
-
 type xorEncoder struct{}
 
 func (xorEncoder) Encode(dst, src []byte) ([]byte, error) { return xorTransform(dst, src), nil }
