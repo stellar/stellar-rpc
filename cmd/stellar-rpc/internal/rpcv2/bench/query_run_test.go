@@ -378,8 +378,8 @@ func TestQueryColdCommandRecordsRun(t *testing.T) {
 	}
 }
 
-// A cold dataset lists every frozen artifact of its chunks and the tx-hash
-// window index as an eviction path; a hot dataset lists none.
+// A cold dataset lists the frozen ledger and events files of its chunks and the
+// tx-hash window index as eviction paths; a hot dataset lists none.
 func TestDatasetEvictPaths(t *testing.T) {
 	coldRoot := ingestColdChunk(t)
 	ds, release, err := openDataset(testLogger(), queryOptions{DataDir: coldRoot, Plan: testPlan(protocol.FormatBase64)})
@@ -388,7 +388,7 @@ func TestDatasetEvictPaths(t *testing.T) {
 
 	layout := geometry.NewLayout(coldRoot)
 	want := append(layout.EventsPaths(0),
-		layout.LedgerPackPath(0), layout.TxHashBinPath(0),
+		layout.LedgerPackPath(0),
 		layout.TxHashIndexFilePath(geometry.TxHashIndexCoverage{Index: 0, Lo: 0, Hi: 0}))
 	assert.ElementsMatch(t, want, ds.EvictPaths)
 	for _, path := range ds.EvictPaths {

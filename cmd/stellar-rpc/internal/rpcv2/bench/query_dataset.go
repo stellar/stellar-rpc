@@ -2,9 +2,7 @@ package bench
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"slices"
 	"time"
@@ -140,7 +138,7 @@ func (ds *queryDataset) verifyServes(types []string) error {
 }
 
 // evictColdArtifacts requests page-cache eviction of EvictPaths and returns how
-// many files it advised. It skips a missing file.
+// many files it advised.
 func (ds *queryDataset) evictColdArtifacts(ctx context.Context) (int, error) {
 	if !evictSupported {
 		return 0, nil
@@ -151,9 +149,6 @@ func (ds *queryDataset) evictColdArtifacts(ctx context.Context) (int, error) {
 			return evicted, err
 		}
 		if err := evictFile(path); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
-			}
 			return evicted, fmt.Errorf("evict from the page cache: %w", err)
 		}
 		evicted++
