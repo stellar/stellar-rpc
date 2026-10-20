@@ -66,9 +66,9 @@ const (
 // (e.g. for diagnostic dumps or for verifying a stored Checksum against an
 // independent recomputation).
 //
-// The Has* fields are the typed views of the defined flag bits; the raw flags
-// byte itself is not exposed because no caller can act on unknown bits (Open
-// rejects them via knownFlags).
+// HasRecordChecksum is the typed view of its flag bit; the raw flags byte is
+// not exposed because no caller can act on unknown bits (Open rejects them via
+// knownFlags), and legacy bits are accepted but not surfaced.
 type Trailer struct {
 	Version           uint8
 	Format            Format
