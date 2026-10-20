@@ -29,8 +29,9 @@ type queryPlan struct {
 	Passphrase       string
 	Seed             int64
 
-	// WarmupSet reports whether --warmup was given.
-	WarmupSet bool
+	// DefaultWarmup makes forTier replace Warmup with the default of the
+	// dataset's tier.
+	DefaultWarmup bool
 
 	// Evict requests page-cache eviction before each scenario.
 	Evict bool
@@ -40,22 +41,18 @@ type queryPlan struct {
 // defaults to 0.
 const defaultHotWarmup = 20
 
-// forTier returns p with the defaults for a dataset of tier, and checks that
-// every rate still gives a runnable scenario.
-func (p queryPlan) forTier(tier string) (queryPlan, error) {
-	if tier != tierHot {
-		return p, nil
-	}
-	p.Evict = false
-	if !p.WarmupSet {
-		p.Warmup = defaultHotWarmup
-	}
-	for _, rps := range p.TargetRPS {
-		if _, _, err := validateScenario(rps, p.Duration, p.Warmup); err != nil {
-			return p, fmt.Errorf("--target-rps, --duration and the hot --warmup default: %w", err)
+// forTier returns p with the defaults for a dataset of tier.
+func (p queryPlan) forTier(tier string) queryPlan {
+	if p.DefaultWarmup {
+		p.Warmup = 0
+		if tier == tierHot {
+			p.Warmup = defaultHotWarmup
 		}
 	}
-	return p, nil
+	if tier == tierHot {
+		p.Evict = false
+	}
+	return p
 }
 
 // cacheScenario is the settings.cacheScenario value: the page-cache state the

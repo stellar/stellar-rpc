@@ -38,7 +38,7 @@ func TestQueryPlanPoolAndEventsFlags(t *testing.T) {
 		t.Run(strconv.Itoa(size), func(t *testing.T) {
 			f := validQueryFlags()
 			f.txHashPoolSize = size
-			p, err := f.plan()
+			p, err := f.plan(true)
 			if size < 1 || size > maxTxHashPoolSize {
 				require.ErrorContains(t, err, "--txhash-pool-size")
 			} else {
@@ -50,13 +50,13 @@ func TestQueryPlanPoolAndEventsFlags(t *testing.T) {
 	for _, fraction := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -0.1, 1.1} {
 		f := validQueryFlags()
 		f.notFoundFraction = fraction
-		_, err := f.plan()
+		_, err := f.plan(true)
 		require.ErrorContains(t, err, "--not-found-fraction")
 	}
 	for _, fraction := range []float64{0, 1} {
 		f := validQueryFlags()
 		f.notFoundFraction = fraction
-		p, err := f.plan()
+		p, err := f.plan(true)
 		require.NoError(t, err)
 		assert.InDelta(t, fraction, p.NotFoundFraction, 0)
 	}
@@ -66,7 +66,7 @@ func TestQueryPlanPoolAndEventsFlags(t *testing.T) {
 	} {
 		f := validQueryFlags()
 		f.eventsLimit = limit
-		_, err := f.plan()
+		_, err := f.plan(true)
 		if want == "" {
 			require.NoError(t, err)
 			continue
@@ -113,7 +113,7 @@ func TestPlanAcceptsLimitCaps(t *testing.T) {
 		f.ledgersLimit = uint32(maxLedgersLimit())
 		f.txPageLimit = uint32(maxTxPageLimit())
 		f.format = format
-		p, err := f.plan()
+		p, err := f.plan(true)
 		require.NoError(t, err)
 		assert.Equal(t, format, p.Format)
 	}
@@ -148,35 +148,65 @@ func TestPlanRejectsUnrunnableScenarios(t *testing.T) {
 			f.targetRPS = tc.targetRPS
 			f.duration = tc.duration
 			f.warmup = tc.warmup
-			_, err := f.plan()
+			_, err := f.plan(true)
 			require.ErrorContains(t, err, tc.want)
 		})
 	}
 }
 
-// --warmup defaults to 0 and --evict-page-cache to true; a hot dataset warms
-// up defaultHotWarmup iterations unless --warmup was given, and evicts nothing.
+// Without --warmup, plan checks each rate against the hot warmup default, so a
+// scenario that only a cold dataset can run fails before the dataset opens.
+func TestPlanChecksHotWarmupDefault(t *testing.T) {
+	for _, tc := range []struct {
+		measured    int
+		warmupGiven bool
+		want        string
+	}{
+		{maxIterations - defaultHotWarmup, false, ""},
+		{
+			maxIterations - defaultHotWarmup + 1, false,
+			"--target-rps, --duration and the hot --warmup default: scenario plans more than 100000000 " +
+				"iterations: 20 warmup plus 99999981 measured",
+		},
+		{maxIterations - defaultHotWarmup + 1, true, ""},
+		{maxIterations, true, ""},
+	} {
+		f := validQueryFlags()
+		f.duration = time.Duration(tc.measured) * time.Second
+		_, err := f.plan(tc.warmupGiven)
+		if tc.want == "" {
+			require.NoError(t, err, "%d measured, --warmup given: %v", tc.measured, tc.warmupGiven)
+		} else {
+			require.EqualError(t, err, tc.want)
+		}
+	}
+}
+
+// --warmup defaults to 0 and --evict-page-cache to true. Without --warmup a hot
+// dataset warms up defaultHotWarmup iterations and a cold one none; a given
+// --warmup, or a plan built without the flags, keeps its warmup on both tiers.
 func TestQueryCacheControls(t *testing.T) {
 	cmd := newQueryCommand()
 	assert.Equal(t, "0", cmd.Flags().Lookup("warmup").DefValue)
 	assert.Equal(t, "true", cmd.Flags().Lookup("evict-page-cache").DefValue)
 
-	base := queryPlan{TargetRPS: []float64{1}, Duration: time.Second, Evict: true}
-	cold, err := base.forTier(tierCold)
+	f := validQueryFlags()
+	f.evict = true
+	byTier, err := f.plan(false)
 	require.NoError(t, err)
-	assert.Equal(t, base, cold)
-	hot, err := base.forTier(tierHot)
+	assert.True(t, byTier.Evict)
+	assert.Equal(t, 0, byTier.forTier(tierCold).Warmup)
+	assert.Equal(t, defaultHotWarmup, byTier.forTier(tierHot).Warmup)
+	assert.True(t, byTier.forTier(tierCold).Evict)
+	assert.False(t, byTier.forTier(tierHot).Evict)
+
+	f.warmup = 3
+	given, err := f.plan(true)
 	require.NoError(t, err)
-	assert.Equal(t, defaultHotWarmup, hot.Warmup)
-	assert.False(t, hot.Evict)
-	set := base
-	set.Warmup, set.WarmupSet = 3, true
-	hot, err = set.forTier(tierHot)
-	require.NoError(t, err)
-	assert.Equal(t, 3, hot.Warmup)
-	full := queryPlan{TargetRPS: []float64{maxIterations}, Duration: time.Second}
-	_, err = full.forTier(tierHot)
-	require.ErrorContains(t, err, "the hot --warmup default")
+	assert.Equal(t, 3, given.forTier(tierCold).Warmup)
+	assert.Equal(t, 3, given.forTier(tierHot).Warmup)
+	built := queryPlan{Warmup: 5}
+	assert.Equal(t, 5, built.forTier(tierHot).Warmup)
 
 	for _, tc := range []struct {
 		warmup int

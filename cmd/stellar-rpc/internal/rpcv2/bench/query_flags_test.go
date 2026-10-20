@@ -30,7 +30,7 @@ func TestPlanRejectsRequestFlags(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := validQueryFlags()
 			tc.edit(&f)
-			_, err := f.plan()
+			_, err := f.plan(true)
 			require.ErrorContains(t, err, tc.want)
 		})
 	}

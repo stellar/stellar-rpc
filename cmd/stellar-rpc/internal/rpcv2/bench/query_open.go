@@ -30,15 +30,12 @@ func newQueryCommand() *cobra.Command {
 		dataDir       string
 		startChunk    uint32
 		sampleLedgers uint32
-		evict         bool
 	)
 	opts := func() (queryOptions, error) {
-		plan, err := qf.plan()
+		plan, err := qf.plan(cmd.Flags().Changed("warmup"))
 		if err != nil {
 			return queryOptions{}, err
 		}
-		plan.WarmupSet = cmd.Flags().Changed("warmup")
-		plan.Evict = evict
 		return queryOptions{
 			DataDir:       dataDir,
 			StartChunk:    chunk.ID(startChunk),
@@ -74,8 +71,6 @@ func newQueryCommand() *cobra.Command {
 	fs.Uint32Var(&sampleLedgers, "sample-ledgers", 0,
 		"use only this many ledgers from the first queried chunk's start for the requests "+
 			"(0 = every committed ledger)")
-	fs.BoolVar(&evict, "evict-page-cache", true,
-		"request best-effort OS page-cache eviction of a cold dataset's files before each scenario (Linux only)")
 	markRequired(cmd, "data-dir")
 	return cmd
 }

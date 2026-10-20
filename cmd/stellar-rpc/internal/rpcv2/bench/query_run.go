@@ -186,9 +186,7 @@ func runQueryBench(
 	}
 	defer release()
 	env.SetupTimes["storeOpen"] = time.Since(start)
-	if p, err = p.forTier(ds.Tier); err != nil {
-		return err
-	}
+	p = p.forTier(ds.Tier)
 	env.Settings["warmup"] = strconv.Itoa(p.Warmup)
 	env.Settings["pageCacheEviction"] = evictionState(p.Evict)
 	env.Settings["cacheScenario"] = p.cacheScenario()
