@@ -13,6 +13,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/network"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -159,9 +160,9 @@ func TestBuildEventFilterPoolStopsOnCancel(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-// The events pool derives the unfiltered set, a contract set and a (contract,
-// first topic) set from the sampled events, and each set matches the fixture's
-// events.
+// On a fixture with one contract and one topic, the events pool holds the
+// unfiltered, frequent_contract and frequent_pair sets, and each matches the
+// fixture's events.
 func TestBuildEventFilterPool(t *testing.T) {
 	ds, release, err := openDataset(testLogger(), queryOptions{
 		DataDir: ingestHotChunk(t),
@@ -172,26 +173,147 @@ func TestBuildEventFilterPool(t *testing.T) {
 
 	pool, err := buildEventFilterPool(context.Background(), testLogger(), ds, defaultSeed)
 	require.NoError(t, err)
-	require.Len(t, pool.sets, 3)
-	assert.Equal(t, "derived", pool.kind())
-	assert.Nil(t, pool.sets[0])
-	require.Len(t, pool.sets[1], 1)
-	assert.NotEmpty(t, pool.sets[1][0].ContractID)
-	assert.Nil(t, pool.sets[1][0].Topic0)
-	require.Len(t, pool.sets[2], 1)
-	assert.Equal(t, pool.sets[1][0].ContractID, pool.sets[2][0].ContractID)
-	assert.NotEmpty(t, pool.sets[2][0].Topic0)
-
-	limit := uint(defaultEventsLimit)
-	for i, filters := range pool.sets {
-		timing, err := ds.server.call(context.Background(), protocol.QueryEventsMethodName, protocol.QueryEventsRequest{
-			MinLedger: ds.FirstLedger, MaxLedger: ds.LastLedger, Filters: filters, Limit: &limit,
-		})
-		require.NoError(t, err)
-		assert.Equal(t, 2, timing.items, "set %d", i)
+	assert.Equal(t, "unfiltered,frequent_contract,frequent_pair", pool.labels())
+	assert.Nil(t, pool.sets[0].filters)
+	assert.Equal(t, pool.sets[1].filters[0].ContractID, pool.sets[2].filters[0].ContractID)
+	assert.NotEmpty(t, pool.sets[2].filters[0].Topic0)
+	for _, set := range pool.sets {
+		assert.Equal(t, 2, eventsMatched(t, ds, set.filters), set.outcome.label())
 	}
+}
 
-	assert.Equal(t, "unfiltered", (&eventFilterPool{sets: pool.sets[:1]}).kind())
+// On a fixture with contracts of different frequency, the events pool also
+// holds the rare_contract and no_match sets, and each set returns its expected
+// events through the queryEvents handler.
+func TestBuildEventFilterPoolRareAndNoMatch(t *testing.T) {
+	ds, release := openEventsFixture(t)
+	defer release()
+
+	pool, err := buildEventFilterPool(context.Background(), testLogger(), ds, defaultSeed)
+	require.NoError(t, err)
+	assert.Equal(t, "unfiltered,frequent_contract,frequent_pair,rare_contract,no_match", pool.labels())
+	busy, rare := fixtureContractID(t, 0xaa), fixtureContractID(t, 0xcc)
+	want := map[lookupOutcome]struct {
+		contract, topic string
+		events          int
+	}{
+		outcomeUnfiltered:       {"", "", 10},
+		outcomeFrequentContract: {busy, "", 6},
+		outcomeFrequentPair:     {busy, "transfer", 6},
+		outcomeRareContract:     {rare, "", 1},
+		outcomeNoMatch:          {busy, "mint", 0},
+	}
+	for _, set := range pool.sets {
+		w := want[set.outcome]
+		if w.contract != "" {
+			require.Len(t, set.filters, 1)
+			assert.Equal(t, w.contract, set.filters[0].ContractID, set.outcome.label())
+			if w.topic != "" {
+				assert.JSONEq(t, topicJSON(t, w.topic), string(set.filters[0].Topic0), set.outcome.label())
+			}
+		}
+		assert.Equal(t, w.events, eventsMatched(t, ds, set.filters), set.outcome.label())
+	}
+}
+
+// noMatchFilter finds no filter when every candidate topic matches the
+// contract.
+func TestNoMatchFilterOmittedWhenEveryCandidateMatches(t *testing.T) {
+	ds, release := openEventsFixture(t)
+	defer release()
+
+	busy := fixtureContractID(t, 0xaa)
+	other := fixtureContractID(t, 0xbb)
+	topic := topicBase64(t, "transfer")
+	_, found, err := noMatchFilter(context.Background(), ds, busy, []eventTermPair{{other, topic}})
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+// openEventsFixture opens a hot dataset whose last ledger holds six events of
+// contract 0xaa and three of contract 0xbb under the first topic "transfer",
+// and one event of contract 0xcc under "mint".
+func openEventsFixture(t *testing.T) (*queryDataset, func()) {
+	t.Helper()
+	evs := make([]xdr.ContractEvent, 0, 10)
+	for range 6 {
+		evs = append(evs, rpcv2test.SymbolContractEvent(xdr.ContractId{0xaa}, "d", "transfer"))
+	}
+	for range 3 {
+		evs = append(evs, rpcv2test.SymbolContractEvent(xdr.ContractId{0xbb}, "d", "transfer"))
+	}
+	evs = append(evs, rpcv2test.SymbolContractEvent(xdr.ContractId{0xcc}, "d", "mint"))
+
+	const numLedgers = 10
+	root := t.TempDir()
+	layout := geometry.NewLayout(root)
+	packPath := layout.LedgerPackPath(0)
+	require.NoError(t, os.MkdirAll(filepath.Dir(packPath), 0o755))
+	w, err := ledger.NewColdWriter(packPath, chunk.ID(0).FirstLedger(), ledger.ColdWriterOptions{})
+	require.NoError(t, err)
+	defer func() { _ = w.Close() }()
+	first := chunk.ID(0).FirstLedger()
+	for seq := first; seq < first+numLedgers-1; seq++ {
+		require.NoError(t, w.AppendLedger(seq, rpcv2test.ZeroTxLCMBytes(t, seq)))
+	}
+	// Every sampled page reads the last ledger, so the sample counts each of
+	// its events the same number of times.
+	last := first + numLedgers - 1
+	require.NoError(t, w.AppendLedger(last, rpcv2test.EventsLCMBytes(t, last, evs...)))
+	require.NoError(t, w.Commit())
+
+	hotRoot := t.TempDir()
+	require.NoError(t, runHot(context.Background(), testLogger(), hotOptions{
+		Source:     sourceConfig{Kind: sourcePack, PackDir: layout.LedgersRoot()},
+		StartChunk: 0,
+		NumChunks:  1,
+		NumLedgers: numLedgers,
+		HotRoot:    hotRoot,
+		OutDir:     filepath.Join(t.TempDir(), "csv"),
+	}))
+	ds, release, err := openDataset(testLogger(), queryOptions{
+		DataDir: hotRoot,
+		Plan:    queryPlan{Types: []string{queryTypeEvents}},
+	})
+	require.NoError(t, err)
+	return ds, release
+}
+
+// eventsMatched returns how many events of ds's range queryEvents returns
+// under filters.
+func eventsMatched(t *testing.T, ds *queryDataset, filters []protocol.QueryEventsFilter) int {
+	t.Helper()
+	limit := uint(defaultEventsLimit)
+	timing, err := ds.server.call(context.Background(), protocol.QueryEventsMethodName, protocol.QueryEventsRequest{
+		MinLedger: ds.FirstLedger, MaxLedger: ds.LastLedger, Filters: filters, Limit: &limit,
+	})
+	require.NoError(t, err)
+	return timing.items
+}
+
+// fixtureContractID returns the strkey of the contract ID whose first byte is
+// b and the rest zero.
+func fixtureContractID(t *testing.T, b byte) string {
+	t.Helper()
+	raw := xdr.ContractId{b}
+	id, err := strkey.Encode(strkey.VersionByteContract, raw[:])
+	require.NoError(t, err)
+	return id
+}
+
+// topicBase64 returns the base64 XDR of the symbol topic sym.
+func topicBase64(t *testing.T, sym string) string {
+	t.Helper()
+	s := xdr.ScSymbol(sym)
+	raw, err := xdr.MarshalBase64(xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &s})
+	require.NoError(t, err)
+	return raw
+}
+
+// topicJSON returns the queryEvents topic filter value of the symbol topic sym.
+func topicJSON(t *testing.T, sym string) string {
+	t.Helper()
+	return `"` + topicBase64(t, sym) + `"`
 }
 
 // byDescendingCount orders keys by count, most frequent first, and ties by

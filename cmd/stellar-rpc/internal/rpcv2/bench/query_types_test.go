@@ -87,11 +87,15 @@ func TestQueryRequests(t *testing.T) {
 						events += timing.items
 					}
 				}
-				if qtype == queryTypeTxHash {
+				switch qtype {
+				case queryTypeTxHash:
 					assert.Positive(t, outcomes[outcomeFound])
 					assert.Positive(t, outcomes[outcomeNotFound])
 					assert.Zero(t, outcomes[outcomeNone])
-				} else {
+				case queryTypeEvents:
+					assert.Positive(t, outcomes[outcomeUnfiltered])
+					assert.Zero(t, outcomes[outcomeNone])
+				default:
 					assert.Equal(t, 40, outcomes[outcomeNone])
 				}
 				if qtype == queryTypeEvents {

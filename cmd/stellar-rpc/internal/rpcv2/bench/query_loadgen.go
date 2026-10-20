@@ -23,17 +23,25 @@ type requestTiming struct {
 	// latencyFromDue spans the iteration's due time to its response.
 	latencyFromDue time.Duration
 	items          int
-	// outcome is the txhash lookup result, or outcomeNone.
+	// outcome is the txhash lookup result, the events filter set, or
+	// outcomeNone.
 	outcome lookupOutcome
 }
 
-// lookupOutcome splits txhash latencies by lookup result.
+// lookupOutcome splits a query type's latencies by request kind in the
+// latency.csv outcome column.
 type lookupOutcome uint8
 
 const (
 	outcomeNone lookupOutcome = iota
 	outcomeFound
 	outcomeNotFound
+	outcomeUnfiltered
+	outcomeFrequentContract
+	outcomeFrequentPair
+	outcomeRareContract
+	outcomeNoMatch
+	numOutcomes
 )
 
 // queryRequest sends one request and measures its own latency. Calls run

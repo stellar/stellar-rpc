@@ -10,6 +10,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"slices"
+	"strings"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
@@ -35,9 +36,9 @@ const eventScanCap = 20_000
 // range's end can still reach the cap.
 const eventScanPageSlack = 4
 
-// eventFilterSets caps the filter sets in the events pool, the unfiltered one
-// included.
-const eventFilterSets = 4
+// noMatchProbes bounds the candidate filters the events pool build probes for
+// its no_match set.
+const noMatchProbes = 8
 
 // txHashPool holds the hashes the txhash requests look up, one per sampled
 // ledger.
@@ -162,19 +163,35 @@ func probeTxHash(ctx context.Context, ds *queryDataset, hash [32]byte, seq uint3
 }
 
 // eventFilterPool holds the queryEvents filter sets the events requests pick
-// from; one of them is the unfiltered read.
+// from, each at most once.
 type eventFilterPool struct {
-	sets [][]protocol.QueryEventsFilter
+	sets []eventFilterSet
 }
 
-// pick returns one filter set. nil is the unfiltered read.
-func (p *eventFilterPool) pick(rng *rand.Rand) []protocol.QueryEventsFilter {
+// eventFilterSet is one filter set and the outcome label of its requests. nil
+// filters are the unfiltered read.
+type eventFilterSet struct {
+	outcome lookupOutcome
+	filters []protocol.QueryEventsFilter
+}
+
+// pick returns one filter set.
+func (p *eventFilterPool) pick(rng *rand.Rand) eventFilterSet {
 	return p.sets[rng.IntN(len(p.sets))]
 }
 
-// buildEventFilterPool derives at most eventFilterSets filter sets from a
-// sample of the dataset's events: the unfiltered set, the busiest contracts and
-// the most common (contract, first topic) pair.
+// labels is the settings.eventsPool value: the comma-joined outcome labels of
+// the pool's sets.
+func (p *eventFilterPool) labels() string {
+	out := make([]string, len(p.sets))
+	for i, set := range p.sets {
+		out[i] = set.outcome.label()
+	}
+	return strings.Join(out, ",")
+}
+
+// buildEventFilterPool derives the events pool's labeled filter sets from a
+// sample of the dataset's events. A set the sample cannot supply is left out.
 func buildEventFilterPool(
 	ctx context.Context, logger *supportlog.Entry, ds *queryDataset, seed int64,
 ) (*eventFilterPool, error) {
@@ -182,47 +199,131 @@ func buildEventFilterPool(
 	if err != nil {
 		return nil, err
 	}
-	sets := [][]protocol.QueryEventsFilter{nil} // the unfiltered read
-	for _, cid := range contracts {
-		if len(sets) >= eventFilterSets-1 {
-			break
-		}
-		sets = append(sets, []protocol.QueryEventsFilter{{ContractID: cid}})
+	filtered, err := filteredSets(ctx, logger, ds, contracts, pairs)
+	if err != nil {
+		return nil, err
 	}
+	sets := append([]eventFilterSet{{outcome: outcomeUnfiltered}}, filtered...)
+	if err := validateFilterSets(sets); err != nil {
+		return nil, err
+	}
+	pool := &eventFilterPool{sets: sets}
+	logger.Infof("events pool: filter sets %s (%d contracts, %d contract-topic pairs seen)",
+		pool.labels(), len(contracts), len(pairs))
+	if len(sets) == 1 {
+		logger.Warnf("events pool holds only the unfiltered read: no contract ID was found in the " +
+			"sampled events; every events request reads an unfiltered page")
+	}
+	return pool, nil
+}
+
+// filteredSets returns the events pool's sets other than the unfiltered read,
+// from contracts and pairs by descending frequency.
+func filteredSets(
+	ctx context.Context, logger *supportlog.Entry, ds *queryDataset, contracts []string, pairs []eventTermPair,
+) ([]eventFilterSet, error) {
+	if len(contracts) == 0 {
+		return nil, nil
+	}
+	var sets []eventFilterSet
+	add := func(outcome lookupOutcome, filter protocol.QueryEventsFilter) {
+		sets = append(sets, eventFilterSet{outcome: outcome, filters: []protocol.QueryEventsFilter{filter}})
+	}
+	busiest := contracts[0]
+	add(outcomeFrequentContract, protocol.QueryEventsFilter{ContractID: busiest})
 	if len(pairs) > 0 {
 		filter, err := pairs[0].filter()
 		if err != nil {
 			return nil, err
 		}
-		sets = append(sets, []protocol.QueryEventsFilter{filter})
+		add(outcomeFrequentPair, filter)
 	}
-	if err := validateFilterSets(sets); err != nil {
+	if rare := contracts[len(contracts)-1]; rare != busiest {
+		add(outcomeRareContract, protocol.QueryEventsFilter{ContractID: rare})
+	}
+	filter, found, err := noMatchFilter(ctx, ds, busiest, pairs)
+	if err != nil {
 		return nil, err
 	}
-	logger.Infof("events pool: %d filter sets (%d contracts, %d contract-topic pairs seen)",
-		len(sets), len(contracts), len(pairs))
-	if len(sets) == 1 {
-		logger.Warnf("events pool holds only the unfiltered read: no contract ID or " +
-			"(contract, topic) term was found in the sampled events; every events " +
-			"request reads an unfiltered page")
+	if !found {
+		logger.Warnf("events pool has no %s set: no first topic seen only with other contracts "+
+			"matches none of contract %s's events", outcomeNoMatch.label(), busiest)
+		return sets, nil
 	}
-	return &eventFilterPool{sets: sets}, nil
+	add(outcomeNoMatch, filter)
+	return sets, nil
 }
 
-// kind is the settings.eventsPool value: "derived" when the sample held a
-// filter term, "unfiltered" when the only set is the unfiltered read.
-func (p *eventFilterPool) kind() string {
-	if len(p.sets) > 1 {
-		return "derived"
+// noMatchFilter returns a filter of contract and a first topic that the sample
+// saw only with other contracts and that matches no event of the dataset's
+// range. found is false when none of the first noMatchProbes candidates
+// qualifies.
+func noMatchFilter(
+	ctx context.Context, ds *queryDataset, contract string, pairs []eventTermPair,
+) (protocol.QueryEventsFilter, bool, error) {
+	tried := map[string]bool{}
+	for _, p := range pairs {
+		if p.contract == contract {
+			tried[p.topic] = true
+		}
 	}
-	return "unfiltered"
+	probes := 0
+	for _, p := range pairs {
+		if tried[p.topic] {
+			continue
+		}
+		if probes == noMatchProbes {
+			break
+		}
+		tried[p.topic] = true
+		probes++
+		filter, err := eventTermPair{contract: contract, topic: p.topic}.filter()
+		if err != nil {
+			return protocol.QueryEventsFilter{}, false, err
+		}
+		matches, err := filterMatches(ctx, ds, filter)
+		if err != nil {
+			return protocol.QueryEventsFilter{}, false, err
+		}
+		if !matches {
+			return filter, true, nil
+		}
+	}
+	return protocol.QueryEventsFilter{}, false, nil
+}
+
+// filterMatches reports whether filter matches an event of the dataset's range.
+func filterMatches(ctx context.Context, ds *queryDataset, filter protocol.QueryEventsFilter) (bool, error) {
+	one := uint(1)
+	req := protocol.QueryEventsRequest{
+		MinLedger: ds.FirstLedger,
+		MaxLedger: ds.LastLedger,
+		Filters:   []protocol.QueryEventsFilter{filter},
+		Limit:     &one,
+		Format:    protocol.FormatBase64,
+	}
+	// One page scans at most query.MaxScanLedgers ledgers, so the probe pages
+	// through the range until it finds an event or the scan completes.
+	for {
+		var rsp protocol.QueryEventsResponse
+		if err := ds.server.callResult(ctx, protocol.QueryEventsMethodName, req, &rsp); err != nil {
+			return false, fmt.Errorf("probe event filter: %w", err)
+		}
+		if len(rsp.Events) > 0 {
+			return true, nil
+		}
+		if rsp.ScanStatus != protocol.ScanStatusHasMore || rsp.Cursor == "" {
+			return false, nil
+		}
+		req = protocol.QueryEventsRequest{Cursor: rsp.Cursor, Limit: &one, Format: protocol.FormatBase64}
+	}
 }
 
 // validateFilterSets checks every set as queryEvents checks a request's
 // filters.
-func validateFilterSets(sets [][]protocol.QueryEventsFilter) error {
+func validateFilterSets(sets []eventFilterSet) error {
 	for _, set := range sets {
-		req := protocol.QueryEventsRequest{MinLedger: chunk.FirstLedgerSeq, Filters: set}
+		req := protocol.QueryEventsRequest{MinLedger: chunk.FirstLedgerSeq, Filters: set.filters}
 		if err := req.Valid(protocol.QueryEventsDefaultMaxFilters); err != nil {
 			return fmt.Errorf("derived event filter is invalid: %w", err)
 		}

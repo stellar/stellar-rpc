@@ -162,6 +162,22 @@ func TestQueryReportLatencyRows(t *testing.T) {
 	assert.Equal(t, "20000", rows[10]["p50_ns"])
 }
 
+// Events latency rows split by filter set label, and a label with no request
+// has no row.
+func TestEventsLatencyRowsSplitByFilterSet(t *testing.T) {
+	sc := scenarioReport{queryType: queryTypeEvents, targetRPS: 1}
+	for _, o := range []lookupOutcome{outcomeUnfiltered, outcomeUnfiltered, outcomeFrequentPair, outcomeNoMatch} {
+		sc.result.timings = append(sc.result.timings, requestTiming{latency: time.Millisecond, outcome: o})
+	}
+	counts := map[string]int{}
+	for _, r := range sc.latencyRows() {
+		if r.metric == metricLatency {
+			counts[r.outcome] = r.agg.n
+		}
+	}
+	assert.Equal(t, map[string]int{"all": 4, "unfiltered": 2, "frequent_pair": 1, "no_match": 1}, counts)
+}
+
 // TestQueryReportPercentileColumns: each percentile goes to its own column.
 func TestQueryReportPercentileColumns(t *testing.T) {
 	timings := make([]requestTiming, 10)

@@ -35,7 +35,7 @@ func newQueryRequest(
 		if err != nil {
 			return nil, err
 		}
-		settings["eventsPool"] = pool.kind()
+		settings["eventsPool"] = pool.labels()
 		return eventsRequest(ds, p, pool), nil
 	default:
 		return nil, fmt.Errorf("unknown query type %q", qtype)
@@ -103,17 +103,24 @@ func txHashRequest(ds *queryDataset, p queryPlan, pool *txHashPool) queryRequest
 
 // eventsRequest calls queryEvents for one page of at most --events-limit events
 // from a random start ledger to the end of the dataset's range, under a filter
-// set from the pool.
+// set from the pool whose label is the request's outcome.
 func eventsRequest(ds *queryDataset, p queryPlan, pool *eventFilterPool) queryRequest {
 	limit := uint(p.EventsLimit)
 	return func(ctx context.Context, rng *rand.Rand) (requestTiming, error) {
-		return ds.server.call(ctx, protocol.QueryEventsMethodName, protocol.QueryEventsRequest{
-			MinLedger: ds.pickStart(rng, 1),
+		start := ds.pickStart(rng, 1)
+		set := pool.pick(rng)
+		timing, err := ds.server.call(ctx, protocol.QueryEventsMethodName, protocol.QueryEventsRequest{
+			MinLedger: start,
 			MaxLedger: ds.LastLedger,
-			Filters:   pool.pick(rng),
+			Filters:   set.filters,
 			Limit:     &limit,
 			Format:    p.Format,
 		})
+		if err != nil {
+			return requestTiming{}, err
+		}
+		timing.outcome = set.outcome
+		return timing, nil
 	}
 }
 

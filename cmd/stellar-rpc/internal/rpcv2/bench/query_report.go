@@ -42,24 +42,26 @@ const (
 	metricStartDelay     = "start_delay"
 )
 
-// latency.csv outcome values.
-const (
-	outcomeLabelAll      = "all"
-	outcomeLabelFound    = "found"
-	outcomeLabelNotFound = "not_found"
-)
+// outcomeLabelAll is the latency.csv outcome value of a row over every
+// successful request.
+const outcomeLabelAll = "all"
+
+// outcomeLabels holds the latency.csv outcome value of each lookupOutcome.
+//
+//nolint:gochecknoglobals // fixed report schema, read-only
+var outcomeLabels = [numOutcomes]string{
+	outcomeNone:             outcomeLabelAll,
+	outcomeFound:            "found",
+	outcomeNotFound:         "not_found",
+	outcomeUnfiltered:       "unfiltered",
+	outcomeFrequentContract: "frequent_contract",
+	outcomeFrequentPair:     "frequent_pair",
+	outcomeRareContract:     "rare_contract",
+	outcomeNoMatch:          "no_match",
+}
 
 // label is the latency.csv outcome value of o.
-func (o lookupOutcome) label() string {
-	switch o {
-	case outcomeFound:
-		return outcomeLabelFound
-	case outcomeNotFound:
-		return outcomeLabelNotFound
-	default:
-		return outcomeLabelAll
-	}
-}
+func (o lookupOutcome) label() string { return outcomeLabels[o] }
 
 //nolint:gochecknoglobals // fixed report schema, read-only
 var (
@@ -101,7 +103,7 @@ type latencyRow struct {
 	agg       row
 }
 
-// latencyRows returns the scenario's latency.csv rows, split by lookup outcome
+// latencyRows returns the scenario's latency.csv rows, split by outcome
 // when the requests report one. A metric with no sample has no row, and zero
 // durations count as samples.
 func (s scenarioReport) latencyRows() []latencyRow {
@@ -113,7 +115,7 @@ func (s scenarioReport) latencyRows() []latencyRow {
 	}
 	// outcomeNone selects every successful request; each other outcome selects
 	// its own requests. counts holds the size of each selection.
-	var counts [outcomeNotFound + 1]int
+	var counts [numOutcomes]int
 	for _, t := range s.result.timings {
 		counts[t.outcome]++
 	}
@@ -127,7 +129,7 @@ func (s scenarioReport) latencyRows() []latencyRow {
 		}
 		add(metric, o.label(), &dist)
 	}
-	for _, o := range []lookupOutcome{outcomeNone, outcomeFound, outcomeNotFound} {
+	for o := range numOutcomes {
 		timingRow(metricLatency, o, func(t requestTiming) time.Duration { return t.latency })
 		timingRow(metricHandlerLatency, o, func(t requestTiming) time.Duration { return t.handlerLatency })
 		timingRow(metricLatencyFromDue, o, func(t requestTiming) time.Duration { return t.latencyFromDue })
