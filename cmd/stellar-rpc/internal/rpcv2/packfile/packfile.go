@@ -53,6 +53,8 @@ const (
 // On-disk flag bits (uint8 at trailer offset 5). The remaining bits are
 // reserved for future use.
 const (
+	// legacyFlags are retired bits, accepted and ignored on read and never reused: bit 0 was the pre-#1127 content hash.
+	legacyFlags uint8 = 1 << 0
 	// flagRecordChecksum widens the CRC32C in each record's last four bytes
 	// to cover the whole record instead of the FOR-encoded item sizes alone.
 	// See RecordChecksum for the two layouts.

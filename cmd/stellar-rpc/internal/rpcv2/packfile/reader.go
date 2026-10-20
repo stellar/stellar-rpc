@@ -39,7 +39,7 @@ var (
 
 // knownFlags is the bitmask of trailer flags this version of the reader
 // understands. Files with unknown bits set are rejected as corrupt.
-const knownFlags = flagRecordChecksum
+const knownFlags = legacyFlags | flagRecordChecksum
 
 // readBufPool is a process-wide pool of 1 MiB read buffers used to coalesce
 // consecutive record reads in ReadRange and ReadItems.
