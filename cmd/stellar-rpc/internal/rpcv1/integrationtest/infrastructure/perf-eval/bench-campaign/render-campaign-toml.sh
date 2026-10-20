@@ -65,7 +65,7 @@ CAPACITY_MINUTES="${CAPACITY_MINUTES:-1260}"
 SETUP_MARGIN_MINUTES="${SETUP_MARGIN_MINUTES:-120}"
 NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
 
-# How long one bench-query leg holds each rate of its ladder. The runner's
+# How long one `bench query` leg holds each rate of its ladder. The runner's
 # default is 60s (DefaultQueryDuration in runner/internal/config/config.go) and
 # the rendered TOML cannot set query_duration, because the runner rejects TOML
 # keys it does not know. The override exists so the estimate can follow the
