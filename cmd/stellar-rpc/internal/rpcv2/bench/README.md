@@ -182,7 +182,7 @@ the end.
   starts. Its percentiles then measure a cached read.
 
 **Txhash pool.** Before the first `txhash` scenario, the run picks random
-ledgers from the full range and takes the hash of one random transaction from
+ledgers from the served range and takes the hash of one random transaction from
 each ledger, up to `--txhash-pool-size` hashes. A ledger with no transactions
 gives no hash. The run then calls `getTransaction` for the first hash. If the
 call does not find the transaction, the build fails. A wrong
@@ -202,7 +202,7 @@ request uses one set, and the label of the set is the outcome of the request.
 | `rare_contract` | The contract with the fewest sampled events |
 | `no_match` | The `frequent_contract` contract and a first topic that the sample shows only with other contracts |
 
-The run adds the `no_match` set only after a `queryEvents` probe of the full
+The run adds the `no_match` set only after a `queryEvents` probe of the served
 range finds no event for it. It probes at most 8 candidates. A set that the
 sample cannot supply is not in the pool. If the sample has no contract ID, the
 pool holds only `unfiltered`.
