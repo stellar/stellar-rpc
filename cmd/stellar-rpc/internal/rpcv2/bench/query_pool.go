@@ -7,17 +7,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
-	"github.com/stellar/go-stellar-sdk/strkey"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
 // defaultTxHashPoolSize is the --txhash-pool-size default. The other constants
@@ -28,11 +27,13 @@ const (
 	poolDrawsPerHash      = 16
 )
 
-// eventScanCap bounds how many stored events the filter builder reads.
+// eventScanCap bounds how many events the events pool build reads.
 const eventScanCap = 20_000
 
-// minEventScanPerChunk is the smallest per-chunk share of eventScanCap.
-const minEventScanPerChunk = 500
+// eventScanPageSlack is how many pages the events pool build reads beyond the
+// eventScanCap/maxEventsLimit full pages, rounded up, so pages cut short at the
+// range's end can still reach the cap.
+const eventScanPageSlack = 4
 
 // eventFilterSets caps the filter sets in the events pool, the unfiltered one
 // included.
@@ -171,13 +172,13 @@ func (p *eventFilterPool) pick(rng *rand.Rand) []protocol.QueryEventsFilter {
 	return p.sets[rng.IntN(len(p.sets))]
 }
 
-// buildEventFilterPool derives at most eventFilterSets filter sets from the
-// stored events: the unfiltered set, the busiest contracts and the most common
-// (contract, first topic) pair.
+// buildEventFilterPool derives at most eventFilterSets filter sets from a
+// sample of the dataset's events: the unfiltered set, the busiest contracts and
+// the most common (contract, first topic) pair.
 func buildEventFilterPool(
-	ctx context.Context, logger *supportlog.Entry, ds *queryDataset,
+	ctx context.Context, logger *supportlog.Entry, ds *queryDataset, seed int64,
 ) (*eventFilterPool, error) {
-	contracts, pairs, err := scanEventTerms(ctx, ds)
+	contracts, pairs, err := sampleEventTerms(ctx, ds, seed)
 	if err != nil {
 		return nil, err
 	}
@@ -186,14 +187,10 @@ func buildEventFilterPool(
 		if len(sets) >= eventFilterSets-1 {
 			break
 		}
-		filter, err := queryEventsFilter(cid, nil)
-		if err != nil {
-			return nil, err
-		}
-		sets = append(sets, []protocol.QueryEventsFilter{filter})
+		sets = append(sets, []protocol.QueryEventsFilter{{ContractID: cid}})
 	}
 	if len(pairs) > 0 {
-		filter, err := queryEventsFilter(pairs[0].contract, pairs[0].topic)
+		filter, err := pairs[0].filter()
 		if err != nil {
 			return nil, err
 		}
@@ -206,36 +203,19 @@ func buildEventFilterPool(
 		len(sets), len(contracts), len(pairs))
 	if len(sets) == 1 {
 		logger.Warnf("events pool holds only the unfiltered read: no contract ID or " +
-			"(contract, topic) term was found in the scanned events; every events " +
+			"(contract, topic) term was found in the sampled events; every events " +
 			"request reads an unfiltered page")
 	}
 	return &eventFilterPool{sets: sets}, nil
 }
 
-// kind is the settings.eventsPool value: "derived" when the scan found a
+// kind is the settings.eventsPool value: "derived" when the sample held a
 // filter term, "unfiltered" when the only set is the unfiltered read.
 func (p *eventFilterPool) kind() string {
 	if len(p.sets) > 1 {
 		return "derived"
 	}
 	return "unfiltered"
-}
-
-// queryEventsFilter returns the queryEvents filter for a contract ID term and,
-// when not nil, a first-topic term, as the store keys them.
-func queryEventsFilter(contract, topic0 []byte) (protocol.QueryEventsFilter, error) {
-	cid, err := strkey.Encode(strkey.VersionByteContract, contract)
-	if err != nil {
-		return protocol.QueryEventsFilter{}, fmt.Errorf("encode contract ID term: %w", err)
-	}
-	filter := protocol.QueryEventsFilter{ContractID: cid}
-	if topic0 != nil {
-		// A base64 topic is a JSON string of the ScVal's XDR bytes.
-		if filter.Topic0, err = json.Marshal(topic0); err != nil {
-			return protocol.QueryEventsFilter{}, fmt.Errorf("encode topic term: %w", err)
-		}
-	}
-	return filter, nil
 }
 
 // validateFilterSets checks every set as queryEvents checks a request's
@@ -250,176 +230,70 @@ func validateFilterSets(sets [][]protocol.QueryEventsFilter) error {
 	return nil
 }
 
-// eventTermPair is one event's contract ID and first topic, as the store's
-// canonical term bytes.
+// eventTermPair is an event's contract ID and base64 first topic, as
+// queryEvents returns them.
 type eventTermPair struct {
-	contract, topic []byte
+	contract, topic string
 }
 
-// eventTermCounts tallies the terms scanEventTerms reads out of the events
-// stores. A pair's key is its contract ID and topic joined by a zero byte.
-type eventTermCounts struct {
-	contracts map[string]int
-	pairs     map[string]int
-	scanned   int
+// filter returns the queryEvents filter that matches p.
+func (p eventTermPair) filter() (protocol.QueryEventsFilter, error) {
+	// A base64 topic filter is the topic's base64 string as a JSON string.
+	topic0, err := json.Marshal(p.topic)
+	if err != nil {
+		return protocol.QueryEventsFilter{}, fmt.Errorf("encode topic term: %w", err)
+	}
+	return protocol.QueryEventsFilter{ContractID: p.contract, Topic0: topic0}, nil
 }
 
-// contractIDLen is the length of a contract ID term, where a pair key splits.
-const contractIDLen = len(xdr.ContractId{})
+func compareTermPairs(a, b eventTermPair) int {
+	return cmp.Or(cmp.Compare(a.contract, b.contract), cmp.Compare(a.topic, b.topic))
+}
 
-// scanEventTerms reads up to eventScanCap stored events of the dataset's
-// ledger range and returns the contract IDs and the (contract, first topic)
-// pairs by descending frequency, as the store's canonical term bytes.
-func scanEventTerms(ctx context.Context, ds *queryDataset) ([][]byte, []eventTermPair, error) {
-	if len(ds.Chunks) == 0 {
-		return nil, nil, nil
-	}
-	counts := &eventTermCounts{
-		contracts: map[string]int{},
-		pairs:     map[string]int{},
-	}
-	stride, perChunk := eventScanPlan(len(ds.Chunks))
-	for i := 0; i < len(ds.Chunks); i += stride {
-		if err := counts.scanChunk(ctx, ds, ds.Chunks[i], counts.scanned+perChunk); err != nil {
+// sampleEventTerms reads up to eventScanCap events as unfiltered queryEvents
+// pages from random starts in the dataset's range, and returns the contract IDs
+// and the (contract, first topic) pairs by descending frequency.
+func sampleEventTerms(ctx context.Context, ds *queryDataset, seed int64) ([]string, []eventTermPair, error) {
+	rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed*31+11))) //nolint:gosec // seed mixing
+	limit := maxEventsLimit()
+	maxPages := (eventScanCap+int(limit)-1)/int(limit) + eventScanPageSlack //nolint:gosec // limit <= 1000
+	contracts := map[string]int{}
+	pairs := map[eventTermPair]int{}
+	scanned := 0
+	for page := 0; page < maxPages && scanned < eventScanCap; page++ {
+		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-	}
-	pairKeys := byDescendingCount(counts.pairs)
-	pairs := make([]eventTermPair, len(pairKeys))
-	for i, k := range pairKeys {
-		pairs[i] = eventTermPair{contract: k[:contractIDLen], topic: k[contractIDLen+1:]}
-	}
-	return byDescendingCount(counts.contracts), pairs, nil
-}
-
-// eventScanPlan splits eventScanCap evenly over n chunks and returns the chunk
-// stride and the per-chunk share. A range with more chunks than the cap can
-// give minEventScanPerChunk to is strided, so the scan still spans the range.
-func eventScanPlan(n int) (int, int) {
-	stride := max((n*minEventScanPerChunk+eventScanCap-1)/eventScanCap, 1)
-	perChunk := max(eventScanCap/((n+stride-1)/stride), minEventScanPerChunk)
-	return stride, perChunk
-}
-
-// scanChunk tallies the event terms of chunk c's ledgers inside the dataset's
-// range and stops once the tally reaches limit events.
-func (t *eventTermCounts) scanChunk(ctx context.Context, ds *queryDataset, c chunk.ID, limit int) error {
-	view, err := ds.view()
-	if err != nil {
-		return fmt.Errorf("acquire read view: %w", err)
-	}
-	defer view.Release()
-
-	reader, err := view.Events(c)
-	if err != nil {
-		return fmt.Errorf("resolve events of chunk %s: %w", c, err)
-	}
-	offsets, err := reader.Offsets()
-	if err != nil {
-		return fmt.Errorf("read event offsets of chunk %s: %w", c, err)
-	}
-	if offsets.LedgerCount() == 0 {
-		return nil
-	}
-	lo := max(c.FirstLedger(), ds.FirstLedger, offsets.StartLedger())
-	hi := min(c.LastLedger(), ds.LastLedger, offsets.EndLedger()-1)
-	if lo > hi {
-		return nil
-	}
-	ids, err := event.IDRangeForLedgers(offsets, lo, hi)
-	if err != nil {
-		return fmt.Errorf("map ledgers [%d, %d] of chunk %s to event IDs: %w", lo, hi, c, err)
-	}
-	for payload, perr := range reader.FetchRange(ctx, ids.Start, ids.End-ids.Start) {
-		if perr != nil {
-			return fmt.Errorf("scan events of chunk %s: %w", c, perr)
+		var rsp protocol.QueryEventsResponse
+		err := ds.server.callResult(ctx, protocol.QueryEventsMethodName, protocol.QueryEventsRequest{
+			MinLedger: ds.pickStart(rng, 1),
+			MaxLedger: ds.LastLedger,
+			Limit:     &limit,
+			Format:    protocol.FormatBase64,
+		}, &rsp)
+		if err != nil {
+			return nil, nil, fmt.Errorf("sample events: %w", err)
 		}
-		cid, topic0, terr := eventTerms(payload.ContractEventBytes)
-		if terr != nil {
-			return fmt.Errorf("read event terms in chunk %s: %w", c, terr)
-		}
-		if cid != nil {
-			t.contracts[string(cid)]++
-		}
-		if cid != nil && topic0 != nil {
-			t.pairs[string(cid)+"\x00"+string(topic0)]++
-		}
-		t.scanned++
-		if t.scanned >= limit {
-			return nil
+		for _, ev := range rsp.Events[:min(len(rsp.Events), eventScanCap-scanned)] {
+			scanned++
+			if ev.ContractID == "" {
+				continue
+			}
+			contracts[ev.ContractID]++
+			if len(ev.TopicXDR) > 0 {
+				pairs[eventTermPair{ev.ContractID, ev.TopicXDR[0]}]++
+			}
 		}
 	}
-	return nil
-}
-
-// eventTerms reads one stored event's contract ID and first topic through the
-// XDR views, as the events indexer does. Either is nil when absent.
-func eventTerms(eventBytes []byte) ([]byte, []byte, error) {
-	var cid []byte
-	ev := xdr.ContractEventView(eventBytes)
-	cidOpt, err := ev.ContractId()
-	if err != nil {
-		return nil, nil, fmt.Errorf("view ContractId: %w", err)
-	}
-	cidView, present, err := cidOpt.Unwrap()
-	if err != nil {
-		return nil, nil, fmt.Errorf("view ContractId unwrap: %w", err)
-	}
-	if present {
-		v, verr := cidView.Value()
-		if verr != nil {
-			return nil, nil, fmt.Errorf("view ContractId value: %w", verr)
-		}
-		cid = slices.Clone(v[:])
-	}
-
-	body, err := ev.Body()
-	if err != nil {
-		return nil, nil, fmt.Errorf("view Body: %w", err)
-	}
-	v, err := body.V()
-	if err != nil {
-		return nil, nil, fmt.Errorf("view Body.V: %w", err)
-	}
-	if v != 0 {
-		// Only body version 0 carries topics.
-		return cid, nil, nil
-	}
-	v0, err := body.V0()
-	if err != nil {
-		return nil, nil, fmt.Errorf("view Body.V0: %w", err)
-	}
-	topicList, err := v0.Topics()
-	if err != nil {
-		return nil, nil, fmt.Errorf("view Body.V0.Topics: %w", err)
-	}
-	all, err := topicList.All()
-	if err != nil {
-		return nil, nil, fmt.Errorf("view Body.V0.Topics.All: %w", err)
-	}
-	if len(all) == 0 {
-		return cid, nil, nil
-	}
-	// Each element of All is the topic's raw XDR, the form the index keys on.
-	return cid, slices.Clone([]byte(all[0])), nil
+	return byDescendingCount(contracts, cmp.Compare[string]), byDescendingCount(pairs, compareTermPairs), nil
 }
 
 // byDescendingCount returns the keys of counts, most frequent first, ties
-// broken by key.
-func byDescendingCount(counts map[string]int) [][]byte {
-	keys := make([]string, 0, len(counts))
-	for k := range counts {
-		keys = append(keys, k)
-	}
-	slices.SortFunc(keys, func(a, b string) int {
-		if counts[a] != counts[b] {
-			return counts[b] - counts[a]
-		}
-		return cmp.Compare(a, b)
+// broken by compare.
+func byDescendingCount[K comparable](counts map[K]int, compare func(a, b K) int) []K {
+	keys := slices.Collect(maps.Keys(counts))
+	slices.SortFunc(keys, func(a, b K) int {
+		return cmp.Or(cmp.Compare(counts[b], counts[a]), compare(a, b))
 	})
-	out := make([][]byte, len(keys))
-	for i, k := range keys {
-		out[i] = []byte(k)
-	}
-	return out
+	return keys
 }

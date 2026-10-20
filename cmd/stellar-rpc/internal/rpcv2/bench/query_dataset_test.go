@@ -131,7 +131,7 @@ func TestOpenDatasetBounds(t *testing.T) {
 	assert.Equal(t, chunk.ID(1).FirstLedger()+4, ds.LastLedger)
 
 	var latest protocol.GetLatestLedgerResponse
-	callResult(t, ds.server, protocol.GetLatestLedgerMethodName, nil, &latest)
+	mustCallResult(t, ds.server, protocol.GetLatestLedgerMethodName, nil, &latest)
 	assert.Equal(t, ds.LastLedger, latest.Sequence)
 
 	_, err = requestItems(ds, plan, ledgersRequest, chunk.ID(0).LastLedger(), chunk.ID(0).LastLedger())

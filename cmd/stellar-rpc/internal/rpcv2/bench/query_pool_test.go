@@ -1,10 +1,10 @@
 package bench
 
 import (
+	"cmp"
 	"context"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,35 +20,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
-
-// The events scan counts only the events of the dataset's ledger range: a hot
-// dataset narrowed by --sample-ledgers leaves out the chunk's later events.
-func TestScanEventTermsStaysInRange(t *testing.T) {
-	hotRoot := ingestHotChunk(t)
-	for _, tc := range []struct {
-		sampleLedgers uint32
-		want          int
-	}{
-		{0, 2},
-		{eventEvery, 1},
-	} {
-		t.Run(strconv.Itoa(int(tc.sampleLedgers)), func(t *testing.T) {
-			ds, release, err := openDataset(testLogger(), queryOptions{
-				DataDir: hotRoot, SampleLedgers: tc.sampleLedgers,
-				Plan: queryPlan{Types: []string{queryTypeEvents}},
-			})
-			require.NoError(t, err)
-			defer release()
-
-			counts := &eventTermCounts{
-				contracts: map[string]int{},
-				pairs:     map[string]int{},
-			}
-			require.NoError(t, counts.scanChunk(context.Background(), ds, 0, eventScanCap))
-			assert.Equal(t, tc.want, counts.scanned)
-		})
-	}
-}
 
 // The txhash pool takes one hash from each sampled ledger, so a pool over
 // ledgers that each hold several transactions spans as many ledgers as hashes.
@@ -184,33 +155,12 @@ func TestBuildEventFilterPoolStopsOnCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = buildEventFilterPool(ctx, testLogger(), ds)
+	_, err = buildEventFilterPool(ctx, testLogger(), ds, defaultSeed)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-// The events scan stays within eventScanCap, gives each scanned chunk at least
-// minEventScanPerChunk, and strides by the fewest chunks that keep that share,
-// so the scan spans the range.
-func TestEventScanPlan(t *testing.T) {
-	maxFull := eventScanCap / minEventScanPerChunk
-	for _, n := range []int{1, maxFull, maxFull + 1, maxFull + 2, 1000} {
-		stride, perChunk := eventScanPlan(n)
-		require.GreaterOrEqual(t, stride, 1, "n %d", n)
-		assert.GreaterOrEqual(t, perChunk, minEventScanPerChunk, "n %d", n)
-		scanned := 0
-		for i := 0; i < n; i += stride {
-			scanned++
-		}
-		assert.LessOrEqual(t, scanned*perChunk, eventScanCap, "n %d", n)
-		assert.Equal(t, (n+maxFull-1)/maxFull, stride, "n %d", n)
-	}
-	stride, perChunk := eventScanPlan(1)
-	assert.Equal(t, 1, stride)
-	assert.Equal(t, eventScanCap, perChunk)
-}
-
 // The events pool derives the unfiltered set, a contract set and a (contract,
-// first topic) set from the stored events, and each set matches the fixture's
+// first topic) set from the sampled events, and each set matches the fixture's
 // events.
 func TestBuildEventFilterPool(t *testing.T) {
 	ds, release, err := openDataset(testLogger(), queryOptions{
@@ -220,7 +170,7 @@ func TestBuildEventFilterPool(t *testing.T) {
 	require.NoError(t, err)
 	defer release()
 
-	pool, err := buildEventFilterPool(context.Background(), testLogger(), ds)
+	pool, err := buildEventFilterPool(context.Background(), testLogger(), ds, defaultSeed)
 	require.NoError(t, err)
 	require.Len(t, pool.sets, 3)
 	assert.Equal(t, "derived", pool.kind())
@@ -244,9 +194,9 @@ func TestBuildEventFilterPool(t *testing.T) {
 	assert.Equal(t, "unfiltered", (&eventFilterPool{sets: pool.sets[:1]}).kind())
 }
 
-// byDescendingCount orders keys by count, most frequent first, and ties by key
-// bytes.
+// byDescendingCount orders keys by count, most frequent first, and ties by
+// compare.
 func TestByDescendingCount(t *testing.T) {
-	got := byDescendingCount(map[string]int{"b": 2, "a": 2, "c": 5})
-	assert.Equal(t, [][]byte{[]byte("c"), []byte("a"), []byte("b")}, got)
+	got := byDescendingCount(map[string]int{"b": 2, "a": 2, "c": 5}, cmp.Compare[string])
+	assert.Equal(t, []string{"c", "a", "b"}, got)
 }

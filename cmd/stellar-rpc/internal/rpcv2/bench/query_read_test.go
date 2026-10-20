@@ -1,14 +1,11 @@
 package bench
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
-	"net/http"
 	"path/filepath"
 	"testing"
 
@@ -34,22 +31,11 @@ func executeQuery(t *testing.T, args ...string) {
 	require.NoError(t, cmd.Execute())
 }
 
-// callResult sends one request through s's bridge and decodes its result into
+// mustCallResult sends one request through s and decodes its result into
 // result.
-func callResult(t *testing.T, s *readServer, method string, params, result any) {
+func mustCallResult(t *testing.T, s *readServer, method string, params, result any) {
 	t.Helper()
-	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: rpcRequestID, Method: method, Params: params})
-	require.NoError(t, err)
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "/", bytes.NewReader(body))
-	require.NoError(t, err)
-	req.Header.Set("Content-Type", "application/json")
-	w := &responseBuffer{header: http.Header{}}
-	s.bridge.ServeHTTP(w, req)
-	require.Equal(t, http.StatusOK, w.status, "%s", w.body.Bytes())
-	var rsp rpcResponse
-	require.NoError(t, json.Unmarshal(w.body.Bytes(), &rsp))
-	require.Nil(t, rsp.Error)
-	require.NoError(t, json.Unmarshal(rsp.Result, result))
+	require.NoError(t, s.callResult(t.Context(), method, params, result))
 }
 
 // newTestReadServer serves methods through a bridge the way newReadServer

@@ -31,7 +31,7 @@ func newQueryRequest(
 		settings["txhashPoolHashes"] = strconv.Itoa(len(pool.hashes))
 		return txHashRequest(ds, p, pool), nil
 	case queryTypeEvents:
-		pool, err := buildEventFilterPool(ctx, logger, ds)
+		pool, err := buildEventFilterPool(ctx, logger, ds, p.Seed)
 		if err != nil {
 			return nil, err
 		}
