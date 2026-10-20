@@ -155,7 +155,7 @@ the end.
 |---|---|
 | `tier` | `cold` or `hot` |
 | `format` | `--format` |
-| `warmup` | Warmup iterations after the tier default |
+| `warmup` | Effective warmup iterations: `--warmup`, or the tier default if `--warmup` is unset. `flags.warmup` is the flag value |
 | `handlerConcurrency` | Bridge handler slots (number of CPUs) |
 | `cacheScenario` | `warm-run` (warmup > 0), `cold-start` (eviction, no warmup) or `existing-cache` |
 | `pageCacheEviction` | `off`, `requested` or `unsupported-on-this-platform` |
