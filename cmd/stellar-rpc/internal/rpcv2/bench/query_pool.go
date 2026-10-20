@@ -151,6 +151,9 @@ func pickLedgerTxHash(ds *queryDataset, rng *rand.Rand, seq uint32) ([32]byte, b
 func probeTxHash(ctx context.Context, ds *queryDataset, hash [32]byte, seq uint32) error {
 	timing, err := ds.server.call(ctx, protocol.GetTransactionMethodName,
 		protocol.GetTransactionRequest{Hash: hex.EncodeToString(hash[:])})
+	if isContextErr(err) {
+		return fmt.Errorf("look up transaction %x: %w", hash, err)
+	}
 	if err != nil {
 		return fmt.Errorf("look up transaction %x, sampled from ledger %d; "+
 			"a wrong --network-passphrase=%q is a likely cause: %w", hash, seq, ds.Passphrase, err)

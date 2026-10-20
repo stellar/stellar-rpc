@@ -130,6 +130,9 @@ func (s scenarioReport) latencyRows() []latencyRow {
 		add(metric, o.label(), &dist)
 	}
 	for o := range numOutcomes {
+		if o != outcomeNone && counts[o] == 0 {
+			continue
+		}
 		timingRow(metricLatency, o, func(t requestTiming) time.Duration { return t.latency })
 		timingRow(metricHandlerLatency, o, func(t requestTiming) time.Duration { return t.handlerLatency })
 		timingRow(metricLatencyFromDue, o, func(t requestTiming) time.Duration { return t.latencyFromDue })

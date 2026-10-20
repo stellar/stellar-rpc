@@ -310,8 +310,11 @@ func TestQueryColdCommandRecordsRun(t *testing.T) {
 	record, rows := runQueryCommand(t, "--data-dir", coldRoot,
 		"--types", strings.Join(allQueryTypes, ","), "--target-rps", "1000,2000", "--duration", "10ms")
 	assert.Equal(t, tierCold, record.Settings["tier"])
-	assert.NotEmpty(t, record.Settings["txhashPoolHashes"])
-	assert.NotEmpty(t, record.Settings["eventsPool"])
+	hashes, err := strconv.Atoi(record.Settings["txhashPoolHashes"])
+	require.NoError(t, err)
+	assert.Positive(t, hashes)
+	assert.LessOrEqual(t, hashes, defaultTxHashPoolSize)
+	assert.Equal(t, "unfiltered,frequent_contract,frequent_pair", record.Settings["eventsPool"])
 	require.Len(t, rows, 2*len(allQueryTypes))
 	for i, row := range rows {
 		assert.Equal(t, allQueryTypes[i/2], row["query_type"], "row %d", i)

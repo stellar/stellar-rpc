@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/creachadair/jrpc2/handler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -223,4 +224,19 @@ func TestTxHashRequestOutcomeMismatch(t *testing.T) {
 	pool := &txHashPool{hashes: [][32]byte{{0xff}}}
 	_, err = txHashRequest(ds, plan, pool)(context.Background(), rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
 	require.ErrorContains(t, err, "found=false, expected true")
+}
+
+// A txhash request fails when the pool expects not found and the handler finds
+// the transaction.
+func TestTxHashRequestUnexpectedFound(t *testing.T) {
+	ds := &queryDataset{server: newTestReadServer(t, handler.Map{
+		protocol.GetTransactionMethodName: fixedHandler(
+			protocol.GetTransactionResponse{TransactionDetails: protocol.TransactionDetails{
+				Status: protocol.TransactionStatusSuccess,
+			}}, nil),
+	})}
+	pool := &txHashPool{hashes: [][32]byte{{0xff}}, notFoundFraction: 1}
+	_, err := txHashRequest(ds, testPlan(protocol.FormatBase64), pool)(
+		t.Context(), rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
+	require.ErrorContains(t, err, "found=true, expected false")
 }

@@ -5,8 +5,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
+	"github.com/creachadair/jrpc2"
+	"github.com/creachadair/jrpc2/handler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -145,6 +148,18 @@ func TestBuildTxHashPoolWrongPassphrase(t *testing.T) {
 	require.ErrorContains(t, err, "a wrong --network-passphrase")
 }
 
+// A canceled probe returns the context error without the passphrase hint.
+func TestProbeTxHashCanceled(t *testing.T) {
+	ds := &queryDataset{server: newTestReadServer(t, handler.Map{
+		protocol.GetTransactionMethodName: fixedHandler(nil, context.Canceled),
+	})}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := probeTxHash(ctx, ds, [32]byte{1}, 2)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotContains(t, err.Error(), "--network-passphrase")
+}
+
 // A canceled context stops the events pool build.
 func TestBuildEventFilterPoolStopsOnCancel(t *testing.T) {
 	ds, release, err := openDataset(testLogger(), queryOptions{
@@ -228,6 +243,92 @@ func TestNoMatchFilterOmittedWhenEveryCandidateMatches(t *testing.T) {
 	_, found, err := noMatchFilter(context.Background(), ds, busy, []eventTermPair{{other, topic}})
 	require.NoError(t, err)
 	assert.False(t, found)
+}
+
+// filterMatches follows a HAS_MORE cursor until a page holds an event or the
+// scan completes.
+func TestFilterMatchesFollowsCursor(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		secondEvents int
+		secondStatus string
+		wantMatches  bool
+	}{
+		{"event on the second page", 1, protocol.ScanStatusHasMore, true},
+		{"scan completes empty", 0, protocol.ScanStatusComplete, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ds, reqs := stubEventsDataset(t, func(req protocol.QueryEventsRequest) protocol.QueryEventsResponse {
+				if req.Cursor == "" {
+					return protocol.QueryEventsResponse{ScanStatus: protocol.ScanStatusHasMore, Cursor: "next"}
+				}
+				return protocol.QueryEventsResponse{
+					Events: make([]protocol.EventInfo, tc.secondEvents), ScanStatus: tc.secondStatus,
+				}
+			})
+			matches, err := filterMatches(t.Context(), ds, protocol.QueryEventsFilter{ContractID: "c"})
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantMatches, matches)
+			require.Len(t, *reqs, 2)
+			assert.Equal(t, "next", (*reqs)[1].Cursor)
+		})
+	}
+}
+
+// noMatchFilter probes at most noMatchProbes candidates, and a candidate at
+// the bound is still found.
+func TestNoMatchFilterProbeBound(t *testing.T) {
+	candidates := func(n int) []eventTermPair {
+		pairs := make([]eventTermPair, n)
+		for i := range pairs {
+			pairs[i] = eventTermPair{contract: "other", topic: "t" + strconv.Itoa(i)}
+		}
+		return pairs
+	}
+	matchUnless := func(topic string) func(protocol.QueryEventsRequest) protocol.QueryEventsResponse {
+		return func(req protocol.QueryEventsRequest) protocol.QueryEventsResponse {
+			rsp := protocol.QueryEventsResponse{ScanStatus: protocol.ScanStatusComplete}
+			if string(req.Filters[0].Topic0) != strconv.Quote(topic) {
+				rsp.Events = make([]protocol.EventInfo, 1)
+			}
+			return rsp
+		}
+	}
+
+	ds, reqs := stubEventsDataset(t, matchUnless(""))
+	_, found, err := noMatchFilter(t.Context(), ds, "busy", candidates(noMatchProbes+1))
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Len(t, *reqs, noMatchProbes)
+
+	last := "t" + strconv.Itoa(noMatchProbes-1)
+	ds, reqs = stubEventsDataset(t, matchUnless(last))
+	filter, found, err := noMatchFilter(t.Context(), ds, "busy", candidates(noMatchProbes))
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "busy", filter.ContractID)
+	assert.Equal(t, strconv.Quote(last), string(filter.Topic0))
+	assert.Len(t, *reqs, noMatchProbes)
+}
+
+// stubEventsDataset returns a dataset whose queryEvents handler answers with
+// respond, and the requests the handler received.
+func stubEventsDataset(
+	t *testing.T, respond func(protocol.QueryEventsRequest) protocol.QueryEventsResponse,
+) (*queryDataset, *[]protocol.QueryEventsRequest) {
+	t.Helper()
+	var reqs []protocol.QueryEventsRequest
+	ds := &queryDataset{FirstLedger: 2, LastLedger: 100, server: newTestReadServer(t, handler.Map{
+		protocol.QueryEventsMethodName: func(_ context.Context, r *jrpc2.Request) (any, error) {
+			var req protocol.QueryEventsRequest
+			if err := r.UnmarshalParams(&req); err != nil {
+				return nil, err
+			}
+			reqs = append(reqs, req)
+			return respond(req), nil
+		},
+	})}
+	return ds, &reqs
 }
 
 // openEventsFixture opens a hot dataset whose last ledger holds six events of
