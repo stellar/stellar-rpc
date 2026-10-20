@@ -148,6 +148,20 @@ func TestBuildTxHashPoolWrongPassphrase(t *testing.T) {
 	require.ErrorContains(t, err, "a wrong --network-passphrase")
 }
 
+// A probe whose hash getTransaction does not find blames the tx-hash index, not
+// the passphrase.
+func TestProbeTxHashNotFound(t *testing.T) {
+	ds := &queryDataset{server: newTestReadServer(t, handler.Map{
+		protocol.GetTransactionMethodName: fixedHandler(
+			protocol.GetTransactionResponse{TransactionDetails: protocol.TransactionDetails{
+				Status: protocol.TransactionStatusNotFound,
+			}}, nil),
+	})}
+	err := probeTxHash(t.Context(), ds, [32]byte{1}, 2)
+	require.ErrorContains(t, err, "tx-hash index does not resolve it")
+	assert.NotContains(t, err.Error(), "--network-passphrase")
+}
+
 // A canceled probe returns the context error without the passphrase hint.
 func TestProbeTxHashCanceled(t *testing.T) {
 	ds := &queryDataset{server: newTestReadServer(t, handler.Map{

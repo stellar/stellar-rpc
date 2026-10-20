@@ -166,8 +166,8 @@ func probeTxHash(ctx context.Context, ds *queryDataset, hash [32]byte, seq uint3
 			"a wrong --network-passphrase=%q is a likely cause: %w", hash, seq, ds.Passphrase, err)
 	}
 	if timing.items != 1 {
-		return fmt.Errorf("getTransaction does not find transaction %x, sampled from ledger %d; "+
-			"a wrong --network-passphrase=%q is a likely cause", hash, seq, ds.Passphrase)
+		return fmt.Errorf("getTransaction does not find transaction %x, sampled from served ledger %d: "+
+			"the dataset's tx-hash index does not resolve it", hash, seq)
 	}
 	return nil
 }
