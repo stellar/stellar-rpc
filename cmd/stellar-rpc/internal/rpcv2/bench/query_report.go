@@ -308,10 +308,18 @@ func (q *queryReport) benchText() string {
 			continue
 		}
 		writeBenchLine(&b, name, sc.succeeded, append(sc.latencyMetrics(outcomeLabelAll), dropped))
+		var outcomes []latencyRow
 		for _, r := range sc.latency {
 			if r.metric == metricLatency && r.outcome != outcomeLabelAll {
-				writeBenchLine(&b, name+"/outcome="+r.outcome, r.agg.n, sc.latencyMetrics(r.outcome))
+				outcomes = append(outcomes, r)
 			}
+		}
+		// A single outcome line would repeat the aggregate line.
+		if len(outcomes) < 2 {
+			continue
+		}
+		for _, r := range outcomes {
+			writeBenchLine(&b, name+"/outcome="+r.outcome, r.agg.n, sc.latencyMetrics(r.outcome))
 		}
 	}
 	return b.String()

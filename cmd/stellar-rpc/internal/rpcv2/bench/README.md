@@ -208,8 +208,8 @@ at the end.
 
 `bench query` writes `bench.txt` for `benchstat` only when the run ends with
 `status` `ok`. It has one Go benchmark line for each scenario, in run order.
-For `txhash` and `events`, one line follows for each outcome that has samples.
-Its name ends with `/outcome=` and the `latency.csv` outcome, for example
+For `txhash` and `events`, if two or more outcomes have samples, one line
+follows for each of these outcomes. Its name ends with `/outcome=` and the `latency.csv` outcome, for example
 `/outcome=not_found` or `/outcome=no_match`, and it has no `dropped`.
 
 ```

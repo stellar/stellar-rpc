@@ -384,6 +384,43 @@ func TestQueryReportBenchText(t *testing.T) {
 	assert.Equal(t, q.benchText(), string(data))
 }
 
+// A scenario whose samples have one outcome gets only its aggregate line.
+func TestQueryReportBenchTextSingleOutcome(t *testing.T) {
+	q := &queryReport{tier: tierCold}
+	for _, sc := range []struct {
+		qtype   string
+		outcome lookupOutcome
+	}{{queryTypeTxHash, outcomeFound}, {queryTypeEvents, outcomeUnfiltered}} {
+		q.add(scenarioReport{
+			queryType: sc.qtype,
+			targetRPS: 1,
+			result: scenarioResult{
+				scenarioRecord: scenarioRecord{
+					startDelays: []time.Duration{0, 0},
+					timings: []requestTiming{
+						{latency: 10 * time.Microsecond, latencyFromDue: 10 * time.Microsecond, outcome: sc.outcome},
+						{latency: 30 * time.Microsecond, latencyFromDue: 30 * time.Microsecond, outcome: sc.outcome},
+					},
+					measured: phaseCounts{started: 2},
+				},
+				planned:  2,
+				schedule: 2 * time.Second,
+				elapsed:  2 * time.Second,
+			},
+		})
+	}
+
+	assert.Equal(t, []string{
+		"goos: " + runtime.GOOS,
+		"goarch: " + runtime.GOARCH,
+		"BenchmarkQuery/tier=cold/type=txhash/rps=1\t2\t20000 ns/op\t10000 p50-ns\t30000 p99-ns" +
+			"\t0 handler-p50-ns\t0 handler-p99-ns\t30000 p99-from-due-ns\t0 items/op\t0 dropped",
+		"BenchmarkQuery/tier=cold/type=events/rps=1\t2\t20000 ns/op\t10000 p50-ns\t30000 p99-ns" +
+			"\t0 handler-p50-ns\t0 handler-p99-ns\t30000 p99-from-due-ns\t0 items/op\t0 dropped",
+		"",
+	}, strings.Split(q.benchText(), "\n"))
+}
+
 // capturingLogger returns an Info-level logger and the buffer it writes to.
 func capturingLogger() (*supportlog.Entry, *bytes.Buffer) {
 	var output bytes.Buffer
