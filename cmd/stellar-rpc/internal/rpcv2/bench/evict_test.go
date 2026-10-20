@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -12,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A missing artifact is skipped, not an error.
-func TestEvictColdArtifactsSkipsMissingFile(t *testing.T) {
+// A missing frozen artifact fails eviction.
+func TestEvictColdArtifactsFailsOnMissingFile(t *testing.T) {
 	if !evictSupported {
 		t.Skip("page-cache eviction is Linux only")
 	}
@@ -24,8 +25,8 @@ func TestEvictColdArtifactsSkipsMissingFile(t *testing.T) {
 
 	ds := &queryDataset{EvictPaths: []string{missing, present}}
 	evicted, err := ds.evictColdArtifacts(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, 1, evicted, "the present file is advised, the missing one skipped")
+	require.ErrorIs(t, err, fs.ErrNotExist)
+	assert.Zero(t, evicted)
 }
 
 // A cancel before eviction advises no file, and the scenario adds no row and
