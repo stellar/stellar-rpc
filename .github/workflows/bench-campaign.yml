@@ -313,34 +313,56 @@ jobs:
 
   # A campaign outlives any single GHA job (6 h hard ceiling), and Actions has no
   # way to loop a job, so the wait is relayed across four copied jobs. Each one
-  # polls its ~5.3 h window and reports state=ok|fail|running; `running` hands
-  # off to the next. 4 x 19200 s covers the 21 h capacity ceiling the render
-  # script enforces.
+  # polls up to ~5.3 h and reports state=ok|fail|running; `running` hands off to
+  # the next. A window ends 10 min before its job's 330 min timeout, measured
+  # from the job's start (poll-window.sh), so a slow setup shortens the window
+  # instead of letting the timeout cancel the job before it reports. 4 windows
+  # of up to 19200 s cover the 21 h capacity ceiling the render script enforces.
   poll1:
     name: Await campaign (window 1/4)
     needs: [validate, launch]
     runs-on: ubuntu-latest
     timeout-minutes: 330
     outputs:
-      state: ${{ steps.relay.outputs.state }}
+      state: ${{ steps.relay.outputs.state || steps.handoff.outputs.state }}
     steps:
+      # First, so the poll window below is measured from the job's own start.
+      - name: Record the job start
+        run: echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-go
+      # The relay is pure Go (no cgo, no native libs), so it needs only the
+      # toolchain, not the repo's setup-go action and its rocksdb/zstd builds.
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26" # the default of ./.github/actions/setup-go
       - name: Configure AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-duration-seconds: 21600
+      - name: Size the poll window
+        id: window
+        env:
+          JOB_TIMEOUT_MINUTES: 330 # this job's timeout-minutes
+        run: ./"$PERF_EVAL_DIR"/bench-campaign/poll-window.sh
+      - name: Hand off without polling
+        id: handoff
+        if: steps.window.outputs.handoff == 'true'
+        run: |
+          echo "::warning::too little of this job is left to poll; handing off to the next poll job"
+          echo "state=running" >> "$GITHUB_OUTPUT"
       # RUN_ID must match the box preamble's: the relay ignores result objects
       # from other attempts, which share RESULT_KEY with this one.
       - name: Relay
         id: relay
+        if: steps.window.outputs.handoff != 'true'
         env:
           INSTANCE_ID: ${{ needs.launch.outputs.instance_id }}
           DEADLINE_EPOCH: ${{ needs.validate.outputs.deadline_epoch }}
           RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-          WINDOW_SECONDS: 19200
+          WINDOW_SECONDS: ${{ steps.window.outputs.window_seconds }}
+          CGO_ENABLED: 0
           POLL_INTERVAL: 30
           DEBUG_LOG_LINES: 40
           DEBUG_LOG_EVERY_POLLS: 10
@@ -356,7 +378,7 @@ jobs:
       # The relay exits 0 for every state; the job verdict is decided here.
       - name: Gate on relay state
         env:
-          STATE: ${{ steps.relay.outputs.state }}
+          STATE: ${{ steps.relay.outputs.state || steps.handoff.outputs.state }}
         run: |
           case "$STATE" in
             ok) echo "campaign passed inside this window" ;;
@@ -379,23 +401,43 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 330
     outputs:
-      state: ${{ steps.relay.outputs.state }}
+      state: ${{ steps.relay.outputs.state || steps.handoff.outputs.state }}
     steps:
+      # First, so the poll window below is measured from the job's own start.
+      - name: Record the job start
+        run: echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-go
+      # The relay is pure Go (no cgo, no native libs), so it needs only the
+      # toolchain, not the repo's setup-go action and its rocksdb/zstd builds.
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26" # the default of ./.github/actions/setup-go
       - name: Configure AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-duration-seconds: 21600
+      - name: Size the poll window
+        id: window
+        env:
+          JOB_TIMEOUT_MINUTES: 330 # this job's timeout-minutes
+        run: ./"$PERF_EVAL_DIR"/bench-campaign/poll-window.sh
+      - name: Hand off without polling
+        id: handoff
+        if: steps.window.outputs.handoff == 'true'
+        run: |
+          echo "::warning::too little of this job is left to poll; handing off to the next poll job"
+          echo "state=running" >> "$GITHUB_OUTPUT"
       - name: Relay
         id: relay
+        if: steps.window.outputs.handoff != 'true'
         env:
           INSTANCE_ID: ${{ needs.launch.outputs.instance_id }}
           DEADLINE_EPOCH: ${{ needs.validate.outputs.deadline_epoch }}
           RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-          WINDOW_SECONDS: 19200
+          WINDOW_SECONDS: ${{ steps.window.outputs.window_seconds }}
+          CGO_ENABLED: 0
           POLL_INTERVAL: 30
           DEBUG_LOG_LINES: 40
           DEBUG_LOG_EVERY_POLLS: 10
@@ -410,7 +452,7 @@ jobs:
           fi
       - name: Gate on relay state
         env:
-          STATE: ${{ steps.relay.outputs.state }}
+          STATE: ${{ steps.relay.outputs.state || steps.handoff.outputs.state }}
         run: |
           case "$STATE" in
             ok) echo "campaign passed inside this window" ;;
@@ -433,23 +475,43 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 330
     outputs:
-      state: ${{ steps.relay.outputs.state }}
+      state: ${{ steps.relay.outputs.state || steps.handoff.outputs.state }}
     steps:
+      # First, so the poll window below is measured from the job's own start.
+      - name: Record the job start
+        run: echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-go
+      # The relay is pure Go (no cgo, no native libs), so it needs only the
+      # toolchain, not the repo's setup-go action and its rocksdb/zstd builds.
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26" # the default of ./.github/actions/setup-go
       - name: Configure AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-duration-seconds: 21600
+      - name: Size the poll window
+        id: window
+        env:
+          JOB_TIMEOUT_MINUTES: 330 # this job's timeout-minutes
+        run: ./"$PERF_EVAL_DIR"/bench-campaign/poll-window.sh
+      - name: Hand off without polling
+        id: handoff
+        if: steps.window.outputs.handoff == 'true'
+        run: |
+          echo "::warning::too little of this job is left to poll; handing off to the next poll job"
+          echo "state=running" >> "$GITHUB_OUTPUT"
       - name: Relay
         id: relay
+        if: steps.window.outputs.handoff != 'true'
         env:
           INSTANCE_ID: ${{ needs.launch.outputs.instance_id }}
           DEADLINE_EPOCH: ${{ needs.validate.outputs.deadline_epoch }}
           RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-          WINDOW_SECONDS: 19200
+          WINDOW_SECONDS: ${{ steps.window.outputs.window_seconds }}
+          CGO_ENABLED: 0
           POLL_INTERVAL: 30
           DEBUG_LOG_LINES: 40
           DEBUG_LOG_EVERY_POLLS: 10
@@ -464,7 +526,7 @@ jobs:
           fi
       - name: Gate on relay state
         env:
-          STATE: ${{ steps.relay.outputs.state }}
+          STATE: ${{ steps.relay.outputs.state || steps.handoff.outputs.state }}
         run: |
           case "$STATE" in
             ok) echo "campaign passed inside this window" ;;
@@ -487,23 +549,43 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 330
     outputs:
-      state: ${{ steps.relay.outputs.state }}
+      state: ${{ steps.relay.outputs.state || steps.handoff.outputs.state }}
     steps:
+      # First, so the poll window below is measured from the job's own start.
+      - name: Record the job start
+        run: echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-go
+      # The relay is pure Go (no cgo, no native libs), so it needs only the
+      # toolchain, not the repo's setup-go action and its rocksdb/zstd builds.
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26" # the default of ./.github/actions/setup-go
       - name: Configure AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-duration-seconds: 21600
+      - name: Size the poll window
+        id: window
+        env:
+          JOB_TIMEOUT_MINUTES: 330 # this job's timeout-minutes
+        run: ./"$PERF_EVAL_DIR"/bench-campaign/poll-window.sh
+      - name: Hand off without polling
+        id: handoff
+        if: steps.window.outputs.handoff == 'true'
+        run: |
+          echo "::warning::too little of this job is left to poll; handing off to the next poll job"
+          echo "state=running" >> "$GITHUB_OUTPUT"
       - name: Relay
         id: relay
+        if: steps.window.outputs.handoff != 'true'
         env:
           INSTANCE_ID: ${{ needs.launch.outputs.instance_id }}
           DEADLINE_EPOCH: ${{ needs.validate.outputs.deadline_epoch }}
           RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-          WINDOW_SECONDS: 19200
+          WINDOW_SECONDS: ${{ steps.window.outputs.window_seconds }}
+          CGO_ENABLED: 0
           POLL_INTERVAL: 30
           DEBUG_LOG_LINES: 40
           DEBUG_LOG_EVERY_POLLS: 10
@@ -520,7 +602,7 @@ jobs:
       # campaign deadline. The box's own ceiling and the reaper still kill it.
       - name: Gate on relay state
         env:
-          STATE: ${{ steps.relay.outputs.state }}
+          STATE: ${{ steps.relay.outputs.state || steps.handoff.outputs.state }}
         run: |
           case "$STATE" in
             ok) echo "campaign passed inside this window" ;;
