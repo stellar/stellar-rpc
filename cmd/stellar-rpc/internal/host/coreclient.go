@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"encoding/base64"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -49,8 +50,7 @@ func NewCoreClientWithMetrics(client stellarcore.Client, registry *prometheus.Re
 func (c *CoreClientWithMetrics) SubmitTransaction(ctx context.Context,
 	envelopeBase64 string,
 ) (*proto.TXResponse, error) {
-	var envelope xdr.TransactionEnvelope
-	err := xdr.SafeUnmarshalBase64(envelopeBase64, &envelope)
+	opCount, err := operationCount(envelopeBase64)
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +71,24 @@ func (c *CoreClientWithMetrics) SubmitTransaction(ctx context.Context,
 
 	label := prometheus.Labels{submissionStatusLabel: status}
 	c.submitMetric.With(label).Observe(duration)
-	c.opCountMetric.With(label).Observe(float64(len(envelope.Operations())))
+	c.opCountMetric.With(label).Observe(float64(opCount))
 	return response, err
+}
+
+func operationCount(envelopeBase64 string) (int, error) {
+	raw, err := base64.StdEncoding.DecodeString(envelopeBase64)
+	if err != nil {
+		return 0, err
+	}
+	envelope := xdr.TransactionEnvelopeView(raw)
+	return xdr.Try(func() int {
+		switch envelope.MustType() {
+		case xdr.EnvelopeTypeEnvelopeTypeTxV0:
+			return envelope.MustV0().MustTx().MustOperations().MustCount()
+		case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
+			return envelope.MustFeeBump().MustTx().MustInnerTx().MustV1().MustTx().MustOperations().MustCount()
+		default:
+			return envelope.MustV1().MustTx().MustOperations().MustCount()
+		}
+	})
 }
