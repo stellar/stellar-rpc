@@ -225,17 +225,15 @@ func servedBounds(cat *catalog.Catalog, opts queryOptions) (chunk.ID, uint32, er
 	return floor, last, nil
 }
 
-// coldArtifactPaths lists the frozen ledger and events files of chunks, plus
-// every frozen tx-hash index file in the catalog.
+// coldArtifactPaths lists the frozen files that queries read: the ledger and
+// events files of chunks, plus every frozen tx-hash index file in the catalog. A
+// listed file that does not exist is an error.
 func coldArtifactPaths(cat *catalog.Catalog, chunks []chunk.ID) ([]string, error) {
 	layout := cat.Layout()
 	var paths []string
 	for _, c := range chunks {
-		for _, kind := range geometry.AllKinds() {
-			// No query reads the per-chunk tx-hash .bin, and backfill can delete it.
-			if kind == geometry.KindTxHash {
-				continue
-			}
+		// No query reads the per-chunk tx-hash .bin, and backfill can delete it.
+		for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents} {
 			state, err := cat.State(c, kind)
 			if err != nil {
 				return nil, fmt.Errorf("read the state of chunk %s %s: %w", c, kind, err)
@@ -252,6 +250,11 @@ func coldArtifactPaths(cat *catalog.Catalog, chunks []chunk.ID) ([]string, error
 	for _, cov := range covs {
 		if cov.State == geometry.StateFrozen {
 			paths = append(paths, layout.TxHashIndexFilePath(cov))
+		}
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); err != nil {
+			return nil, fmt.Errorf("the catalog lists %s as frozen: %w", path, err)
 		}
 	}
 	return paths, nil

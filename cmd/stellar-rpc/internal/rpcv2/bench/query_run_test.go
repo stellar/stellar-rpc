@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -401,6 +402,19 @@ func TestDatasetEvictPaths(t *testing.T) {
 	require.NoError(t, err)
 	defer releaseHot()
 	assert.Empty(t, hot.EvictPaths)
+}
+
+// A frozen file that the catalog lists but that does not exist fails the open,
+// even when no requested query type reads it.
+func TestDatasetMissingFrozenFile(t *testing.T) {
+	coldRoot := ingestColdChunk(t)
+	missing := geometry.NewLayout(coldRoot).EventsPaths(0)[0]
+	require.NoError(t, os.Remove(missing))
+	plan := testPlan(protocol.FormatBase64)
+	plan.Types = []string{queryTypeLedgers}
+	_, _, err := openDataset(testLogger(), queryOptions{DataDir: coldRoot, Plan: plan})
+	require.ErrorIs(t, err, fs.ErrNotExist)
+	assert.ErrorContains(t, err, "the catalog lists "+missing+" as frozen")
 }
 
 // scenarios builds each type's pool once and runs every rate on it.
