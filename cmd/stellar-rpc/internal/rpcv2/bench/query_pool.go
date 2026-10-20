@@ -17,12 +17,11 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
 // defaultTxHashPoolSize is the --txhash-pool-size default. The other constants
-// bound the tx-hash sampler's ledger draws.
+// bound the txhash pool's ledger draws.
 const (
 	defaultTxHashPoolSize = 512
 	poolMinLedgerDraws    = 512
@@ -67,191 +66,96 @@ func buildTxHashPool(
 	size int,
 ) (*txHashPool, error) {
 	rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed*31+7))) //nolint:gosec // seed mixing
-	s := newTxHashSampler(rng)
-	for i, c := range ds.Chunks {
-		s.stopAt = txHashStopAt(size, i, len(ds.Chunks))
-		if len(s.hashes) >= s.stopAt {
+	var hashes [][32]byte
+	var ledgers []uint32
+	drawn := map[uint32]struct{}{}
+	// Draws can repeat or land on a ledger with no transactions, so the budget
+	// can end before the pool fills.
+	maxDraws := max(poolMinLedgerDraws, size*poolDrawsPerHash)
+	for draws := 0; draws < maxDraws && len(hashes) < size; draws++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		seq := ds.pickStart(rng, 1)
+		if _, seen := drawn[seq]; seen {
 			continue
 		}
-		// A view holds every reader it opened until Release, so each chunk gets
-		// its own view and the run does not keep every chunk's reader open.
-		err := func() error {
-			view, err := ds.view()
-			if err != nil {
-				return fmt.Errorf("acquire read view: %w", err)
-			}
-			defer view.Release()
-			return s.sampleChunk(ctx, view, c, ds.FirstLedger, ds.LastLedger)
-		}()
+		drawn[seq] = struct{}{}
+		hash, picked, err := pickLedgerTxHash(ds, rng, seq)
 		if err != nil {
 			return nil, err
 		}
+		if picked {
+			hashes = append(hashes, hash)
+			ledgers = append(ledgers, seq)
+		}
 	}
-	if len(s.hashes) == 0 {
+	if len(hashes) == 0 {
 		return nil, fmt.Errorf("the sampled ledgers carry no transactions: chunks %v, ledgers [%d, %d]",
 			ds.Chunks, ds.FirstLedger, ds.LastLedger)
 	}
-	hash, seq := s.first()
-	err := func() error {
-		view, err := ds.view()
-		if err != nil {
-			return fmt.Errorf("acquire read view: %w", err)
-		}
-		defer view.Release()
-		return verifySampledHashResolves(ctx, view, ds, hash, seq)
-	}()
-	if err != nil {
+	if err := probeTxHash(ctx, ds, hashes[0], ledgers[0]); err != nil {
 		return nil, err
 	}
-	s.logCoverage(logger, notFoundFraction)
-	if len(s.hashes) < size {
+	logger.Infof("txhash pool: %d hashes, one per ledger, spanning ledgers %d..%d, not-found fraction %.2f",
+		len(hashes), slices.Min(ledgers), slices.Max(ledgers), notFoundFraction)
+	if len(hashes) == 1 {
+		logger.Warnf("txhash pool holds one hash, from ledger %d: every found lookup reads that "+
+			"one ledger, so repeated lookups may benefit from cache reuse", ledgers[0])
+	}
+	if len(hashes) < size {
 		logger.Warnf("txhash pool underfilled: %d of %d requested hashes after bounded sampling; "+
 			"the pool takes one hash per ledger, so ledgers with no transactions and repeated "+
-			"ledger draws limit it", len(s.hashes), size)
+			"ledger draws limit it", len(hashes), size)
 	}
-	return &txHashPool{hashes: s.hashes, notFoundFraction: notFoundFraction}, nil
+	return &txHashPool{hashes: hashes, notFoundFraction: notFoundFraction}, nil
 }
 
-// txHashStopAt is the pool size at which chunk i of n stops sampling: its
-// cumulative share of size, rounded up.
-func txHashStopAt(size, i, n int) int {
-	return int((int64(size)*int64(i+1) + int64(n) - 1) / int64(n))
-}
-
-// txHashSampler draws transaction hashes from a dataset's ledgers. It reads
-// each sequence at most once.
-type txHashSampler struct {
-	rng *rand.Rand
-
-	// stopAt is the pool size at which sampleChunk stops for the current chunk.
-	stopAt int
-
-	// hashes is the pool; ledgers[i] is the ledger hashes[i] came from. drawn
-	// holds every sequence drawn, including ones with no transactions.
-	hashes  [][32]byte
-	ledgers []uint32
-	drawn   map[uint32]struct{}
-}
-
-func newTxHashSampler(rng *rand.Rand) *txHashSampler {
-	return &txHashSampler{rng: rng, drawn: map[uint32]struct{}{}}
-}
-
-// first returns the pool's first hash and the ledger it came from. The pool
-// must not be empty.
-func (s *txHashSampler) first() ([32]byte, uint32) {
-	return s.hashes[0], s.ledgers[0]
-}
-
-// sampleChunk adds one hash from each randomly drawn ledger of chunk c within
-// [first, last] until the pool reaches s.stopAt or the chunk's draw budget is
-// spent.
-func (s *txHashSampler) sampleChunk(
-	ctx context.Context, view *query.ReadView, c chunk.ID, first, last uint32,
-) error {
-	lo := max(c.FirstLedger(), first)
-	hi := min(c.LastLedger(), last)
-	if lo > hi || len(s.hashes) >= s.stopAt {
-		return nil
-	}
-	reader, err := view.Ledgers(c)
+// pickLedgerTxHash returns the hash of a random transaction of ledger seq, and
+// false when the ledger holds none.
+func pickLedgerTxHash(ds *queryDataset, rng *rand.Rand, seq uint32) ([32]byte, bool, error) {
+	// A view holds every reader it opened until Release, so each ledger gets
+	// its own view and the build does not keep every chunk's reader open.
+	view, err := ds.view()
 	if err != nil {
-		return fmt.Errorf("resolve ledgers of chunk %s: %w", c, err)
+		return [32]byte{}, false, fmt.Errorf("acquire read view: %w", err)
 	}
-
-	span := int(hi - lo + 1)
-	// Draws can repeat or land on a ledger with no transactions, so the budget
-	// can end before the pool fills.
-	maxDraws := max(poolMinLedgerDraws, (s.stopAt-len(s.hashes))*poolDrawsPerHash)
-	for draws := 0; draws < maxDraws && len(s.hashes) < s.stopAt; draws++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		seq := lo + uint32(s.rng.IntN(span)) //nolint:gosec // span <= LedgersPerChunk
-		if _, seen := s.drawn[seq]; seen {
-			continue
-		}
-		s.drawn[seq] = struct{}{}
-		// The ledger bytes are valid only inside the callback; the hash is
-		// copied out as a [32]byte value.
-		var hash [32]byte
-		var picked bool
-		err := reader.WithLedger(seq, func(raw []byte) error {
-			parts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
-			if err != nil {
-				return fmt.Errorf("extract tx parts: %w", err)
-			}
-			if len(parts) > 0 {
-				hash, picked = parts[s.rng.IntN(len(parts))].Hash, true
-			}
-			return nil
-		})
-		if err != nil {
-			return fmt.Errorf("read ledger %d: %w", seq, err)
-		}
-		if !picked {
-			continue
-		}
-		s.hashes = append(s.hashes, hash)
-		s.ledgers = append(s.ledgers, seq)
-	}
-	return nil
-}
-
-// logCoverage logs the pool's size and ledger span.
-func (s *txHashSampler) logCoverage(logger *supportlog.Entry, notFoundFraction float64) {
-	logger.Infof("txhash pool: %d hashes, one per ledger, spanning ledgers %d..%d, not-found fraction %.2f",
-		len(s.hashes), slices.Min(s.ledgers), slices.Max(s.ledgers), notFoundFraction)
-	if len(s.hashes) == 1 {
-		logger.Warnf("txhash pool holds one hash, from ledger %d: every found lookup reads that "+
-			"one ledger, so repeated lookups may benefit from cache reuse", s.ledgers[0])
-	}
-}
-
-// verifySampledHashResolves checks that hash pairs with its envelope in ledger
-// seq under ds.Passphrase, then that getTransaction finds it.
-func verifySampledHashResolves(
-	ctx context.Context, view *query.ReadView, ds *queryDataset, hash [32]byte, seq uint32,
-) error {
-	if err := verifyEnvelopePairing(view, ds.Passphrase, hash, seq); err != nil {
-		return err
-	}
-	timing, err := ds.server.call(ctx, protocol.GetTransactionMethodName,
-		protocol.GetTransactionRequest{Hash: hex.EncodeToString(hash[:])})
-	if err != nil {
-		return fmt.Errorf("look up transaction %x, sampled from ledger %d: %w", hash, seq, err)
-	}
-	if timing.items != 1 {
-		return fmt.Errorf("getTransaction does not find transaction %x, sampled from ledger %d", hash, seq)
-	}
-	return nil
-}
-
-// verifyEnvelopePairing re-reads ledger seq and checks that hash pairs with
-// its envelope under passphrase, so a wrong passphrase fails the pool build.
-func verifyEnvelopePairing(view *query.ReadView, passphrase string, hash [32]byte, seq uint32) error {
+	defer view.Release()
 	reader, err := view.Ledgers(chunk.IDFromLedger(seq))
 	if err != nil {
-		return fmt.Errorf("resolve ledgers of the sampled ledger %d: %w", seq, err)
+		return [32]byte{}, false, fmt.Errorf("resolve ledgers of ledger %d: %w", seq, err)
 	}
-	var found bool
-	var pairErr error
+	var hash [32]byte
+	var picked bool
 	err = reader.WithLedger(seq, func(raw []byte) error {
-		_, found, pairErr = sdkingest.LedgerTransactionViewByHash(xdr.LedgerCloseMetaView(raw), hash, passphrase)
+		parts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
+		if err != nil {
+			return fmt.Errorf("extract tx parts: %w", err)
+		}
+		if len(parts) > 0 {
+			hash, picked = parts[rng.IntN(len(parts))].Hash, true
+		}
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("re-read the sampled ledger %d: %w", seq, err)
+		return [32]byte{}, false, fmt.Errorf("read ledger %d: %w", seq, err)
 	}
-	if err := pairErr; err != nil {
-		return fmt.Errorf(
-			"transaction %x does not pair with an envelope in ledger %d, the ledger it was sampled from, "+
-				"under --network-passphrase=%q: %w", hash, seq, passphrase, err)
+	return hash, picked, nil
+}
+
+// probeTxHash checks that getTransaction finds hash, sampled from ledger seq.
+// The lookup pairs the transaction with its envelope under the dataset's
+// passphrase, so a wrong --network-passphrase fails it.
+func probeTxHash(ctx context.Context, ds *queryDataset, hash [32]byte, seq uint32) error {
+	timing, err := ds.server.call(ctx, protocol.GetTransactionMethodName,
+		protocol.GetTransactionRequest{Hash: hex.EncodeToString(hash[:])})
+	if err != nil {
+		return fmt.Errorf("look up transaction %x, sampled from ledger %d; "+
+			"a wrong --network-passphrase=%q is a likely cause: %w", hash, seq, ds.Passphrase, err)
 	}
-	if !found {
-		return fmt.Errorf(
-			"transaction %x is not in ledger %d, the ledger it was sampled from: "+
-				"the ledger bytes changed between the two reads", hash, seq)
+	if timing.items != 1 {
+		return fmt.Errorf("getTransaction does not find transaction %x, sampled from ledger %d; "+
+			"a wrong --network-passphrase=%q is a likely cause", hash, seq, ds.Passphrase)
 	}
 	return nil
 }

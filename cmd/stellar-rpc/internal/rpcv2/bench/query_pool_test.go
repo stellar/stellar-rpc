@@ -74,6 +74,23 @@ func TestBuildTxHashPoolTakesOneHashPerLedger(t *testing.T) {
 	assert.Len(t, ledgers, size)
 }
 
+// The same seed builds the same txhash pool.
+func TestBuildTxHashPoolIsDeterministic(t *testing.T) {
+	hotRoot, _ := ingestMultiTxHotChunk(t, 20, 4)
+	ds, release, err := openDataset(testLogger(), queryOptions{
+		DataDir: hotRoot,
+		Plan:    queryPlan{Types: []string{queryTypeTxHash}, Passphrase: network.PublicNetworkPassphrase},
+	})
+	require.NoError(t, err)
+	defer release()
+
+	a, err := buildTxHashPool(context.Background(), testLogger(), ds, 0, defaultSeed, 8)
+	require.NoError(t, err)
+	b, err := buildTxHashPool(context.Background(), testLogger(), ds, 0, defaultSeed, 8)
+	require.NoError(t, err)
+	assert.Equal(t, a.hashes, b.hashes)
+}
+
 // ingestMultiTxHotChunk writes numLedgers ledgers of chunk 0, each holding
 // txPerLedger transactions, into a hot database. It returns the --hot-dir and
 // the ledger of each transaction hash.
@@ -153,7 +170,7 @@ func TestBuildTxHashPoolWrongPassphrase(t *testing.T) {
 	defer release()
 
 	_, err = buildTxHashPool(context.Background(), testLogger(), ds, 0, defaultSeed, defaultTxHashPoolSize)
-	require.ErrorContains(t, err, "does not pair")
+	require.ErrorContains(t, err, "a wrong --network-passphrase")
 }
 
 // A canceled context stops the events pool build.
@@ -169,25 +186,6 @@ func TestBuildEventFilterPoolStopsOnCancel(t *testing.T) {
 	cancel()
 	_, err = buildEventFilterPool(ctx, testLogger(), ds)
 	require.ErrorIs(t, err, context.Canceled)
-}
-
-// Each chunk's tx-hash stop point is its cumulative share of size, rounded up,
-// and the last chunk's is size.
-func TestTxHashStopAt(t *testing.T) {
-	for _, tc := range []struct {
-		size, n int
-		want    []int
-	}{
-		{10, 1, []int{10}},
-		{10, 3, []int{4, 7, 10}},
-		{2, 4, []int{1, 1, 2, 2}},
-	} {
-		got := make([]int, tc.n)
-		for i := range tc.n {
-			got[i] = txHashStopAt(tc.size, i, tc.n)
-		}
-		assert.Equal(t, tc.want, got, "size %d, n %d", tc.size, tc.n)
-	}
 }
 
 // The events scan stays within eventScanCap, gives each scanned chunk at least
