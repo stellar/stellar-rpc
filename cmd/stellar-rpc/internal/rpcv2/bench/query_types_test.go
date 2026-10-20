@@ -216,7 +216,7 @@ func TestTxHashRequestOutcomeMismatch(t *testing.T) {
 	require.NoError(t, err)
 	defer release()
 
-	pool := &txHashPool{hashes: [][32]byte{{0xff}}, ledgerCount: 1}
+	pool := &txHashPool{hashes: [][32]byte{{0xff}}}
 	_, err = txHashRequest(ds, plan, pool)(context.Background(), rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
 	require.ErrorContains(t, err, "found=false, expected true")
 }

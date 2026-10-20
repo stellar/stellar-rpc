@@ -44,7 +44,6 @@ const eventFilterSets = 4
 type txHashPool struct {
 	hashes           [][32]byte
 	notFoundFraction float64
-	ledgerCount      int
 }
 
 // pick returns one hash to look up and whether it is expected to be found. A
@@ -110,7 +109,7 @@ func buildTxHashPool(
 			"the pool takes one hash per ledger, so ledgers with no transactions and repeated "+
 			"ledger draws limit it", len(s.hashes), size)
 	}
-	return &txHashPool{hashes: s.hashes, notFoundFraction: notFoundFraction, ledgerCount: len(s.ledgers)}, nil
+	return &txHashPool{hashes: s.hashes, notFoundFraction: notFoundFraction}, nil
 }
 
 // txHashStopAt is the pool size at which chunk i of n stops sampling: its

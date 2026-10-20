@@ -29,7 +29,6 @@ func newQueryRequest(
 			return nil, err
 		}
 		settings["txhashPoolHashes"] = strconv.Itoa(len(pool.hashes))
-		settings["txhashPoolLedgers"] = strconv.Itoa(pool.ledgerCount)
 		return txHashRequest(ds, p, pool), nil
 	case queryTypeEvents:
 		pool, err := buildEventFilterPool(ctx, logger, ds)

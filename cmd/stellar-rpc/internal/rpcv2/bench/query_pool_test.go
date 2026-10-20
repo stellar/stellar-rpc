@@ -65,7 +65,6 @@ func TestBuildTxHashPoolTakesOneHashPerLedger(t *testing.T) {
 	pool, err := buildTxHashPool(context.Background(), testLogger(), ds, 0, defaultSeed, size)
 	require.NoError(t, err)
 	require.Len(t, pool.hashes, size)
-	assert.Equal(t, size, pool.ledgerCount)
 	ledgers := map[uint32]struct{}{}
 	for _, h := range pool.hashes {
 		seq, ok := ledgerOf[h]
