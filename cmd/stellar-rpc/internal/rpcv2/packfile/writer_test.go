@@ -472,22 +472,6 @@ func TestConcurrentCompressErrorSurfaces(t *testing.T) {
 	require.Contains(t, seenErr.Error(), "boom")
 }
 
-// TestNewRecordEncoderReturnsNil verifies the worker doesn't panic when a
-// caller's NewRecordEncoder returns nil. Such a writer behaves like passthrough
-// for that worker (no compression performed), and Close on nil is skipped.
-func TestNewRecordEncoderReturnsNil(t *testing.T) {
-	w, err := Create(filepath.Join(t.TempDir(), "pack"), WriterOptions{
-		Format:           1,
-		NewRecordEncoder: func() RecordEncoder { return nil },
-	})
-	require.NoError(t, err)
-	defer w.Close()
-	for range 200 {
-		require.NoError(t, w.AppendItem([]byte("data")))
-	}
-	require.NoError(t, w.Finish(nil))
-}
-
 // closingFailEncoder counts Close calls and optionally returns an error.
 type closingFailEncoder struct {
 	closes   *atomic.Int64

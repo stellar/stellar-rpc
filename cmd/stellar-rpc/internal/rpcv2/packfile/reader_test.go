@@ -706,14 +706,13 @@ func TestWriterReaderMatrix(t *testing.T) {
 func TestRecordWorkerRaceStress(t *testing.T) {
 	items := makeItems(200, 100)
 	for _, codec := range allCodecs {
-		newEncoder := codec.newEncoder
-		if newEncoder == nil {
-			newEncoder = func() RecordEncoder { return nil } // a nil factory skips the workers; a nil encoder doesn't
+		if codec.newEncoder == nil {
+			continue // passthrough runs no workers
 		}
 		for _, rs := range []int{1, 2, 3} {
 			t.Run(fmt.Sprintf("%s/rs=%d", codec.name, rs), func(t *testing.T) {
 				opts := WriterOptions{
-					NewRecordEncoder: newEncoder,
+					NewRecordEncoder: codec.newEncoder,
 					Concurrency:      8,
 					ItemsPerRecord:   rs,
 				}

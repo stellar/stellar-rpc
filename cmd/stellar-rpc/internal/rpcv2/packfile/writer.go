@@ -59,7 +59,7 @@ type WriterOptions struct {
 	// Format is a caller-assigned identifier written to the trailer.
 	Format Format
 
-	// NewRecordEncoder, if non-nil, returns a per-worker RecordEncoder.
+	// NewRecordEncoder, if non-nil, returns a per-worker RecordEncoder (never nil).
 	// Called once per worker goroutine; the writer invokes Encode once per
 	// record before write and Close on shutdown. Callers supplying a stateful
 	// codec (e.g. zstd) should construct fresh state inside this constructor —
@@ -374,15 +374,12 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 	return w, nil
 }
 
-// recordWorker reads work from workCh, compresses (or passes through),
-// and ships the result.
+// recordWorker reads work from workCh, compresses, and ships the result.
 //
 //nolint:funcorder // pipeline helper; kept near runWriter
 func (w *Writer) recordWorker() {
 	encoder := w.newRecordEncoder()
-	if encoder != nil {
-		defer func() { _ = w.recordErr(encoder.Close()) }()
-	}
+	defer func() { _ = w.recordErr(encoder.Close()) }()
 	// Per-worker scratch for encoder output. The encoder writes into this
 	// buffer (growing it if necessary); it persists across iterations so
 	// steady-state Encode calls don't allocate.
@@ -400,21 +397,19 @@ func (w *Writer) recordWorker() {
 			}
 		}
 
-		if encoder != nil {
-			var err error
-			encScratch, err = encoder.Encode(encScratch[:0], work.data)
-			if err != nil {
-				w.resultCh <- processedRecord{
-					ordinal: work.ordinal,
-					err:     fmt.Errorf("packfile: record %d compress: %w", work.ordinal, err),
-				}
-				return
+		var err error
+		encScratch, err = encoder.Encode(encScratch[:0], work.data)
+		if err != nil {
+			w.resultCh <- processedRecord{
+				ordinal: work.ordinal,
+				err:     fmt.Errorf("packfile: record %d compress: %w", work.ordinal, err),
 			}
-			// Copy the encoded bytes into work.data, which the main goroutine
-			// pre-sized with spare capacity for the forIndex appended below
-			// (so the append on the next line doesn't reallocate).
-			work.data = append(work.data[:0], encScratch...)
+			return
 		}
+		// Copy the encoded bytes into work.data, which the main goroutine
+		// pre-sized with spare capacity for the forIndex appended below
+		// (so the append on the next line doesn't reallocate).
+		work.data = append(work.data[:0], encScratch...)
 		// Seal after the codec: the checksum has to cover the bytes that
 		// actually land on disk.
 		w.resultCh <- processedRecord{
