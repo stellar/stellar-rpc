@@ -52,10 +52,13 @@ SRC_REF=$(sed -n 's/^ref = "\(.*\)"$/\1/p' /root/bench-campaign.toml | head -1)
 log "running runner/bootstrap.sh (SRC_REF=${SRC_REF:-unset})"
 SRC_REF="$SRC_REF" bash /root/stellar-rpc-benchmarks/runner/bootstrap.sh
 
-# bootstrap.sh appends these to .bashrc for future shells; this shell is not one,
-# so mirror them exactly as it writes them.
+# bootstrap.sh appends the toolchain and native-lib env to .bashrc for future
+# shells; this shell is not one, so set it here. The include paths go in
+# CGO_CPPFLAGS, as stellar-rpc's Makefile sets them since #1123: CGO_CFLAGS
+# would replace Go's default "-O2 -g". LD_LIBRARY_PATH serves refs from before
+# #1123, which link a shared librocksdb.
 export PATH=/usr/local/go/bin:$HOME/go/bin:$HOME/.cargo/bin:$PATH
-export CGO_CFLAGS="-I$HOME/.zstd/include -I$HOME/.rocksdb/include"
+export CGO_CPPFLAGS="-I$HOME/.zstd/include -I$HOME/.rocksdb/include"
 export CGO_LDFLAGS="-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib"
 export LD_LIBRARY_PATH="$HOME/.zstd/lib:$HOME/.rocksdb/lib"
 
