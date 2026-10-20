@@ -22,4 +22,14 @@
 // the wait for a handler slot, the handler and the response write;
 // handler_latency covers the handler alone, read view included. HTTP and
 // network time are outside both. A run writes latency.csv and scenarios.csv.
+//
+// Before each scenario, a cold run asks the kernel to drop the dataset's
+// frozen files from the page cache (--evict-page-cache, Linux only). Then the
+// --warmup iterations run: by default none on a cold dataset and 20 on a hot
+// one. run.json records the cache state when measurement starts as
+// settings.cacheScenario: cold-start (eviction, no warmup), warm-run (warmup,
+// after the eviction on a cold dataset) or existing-cache (no eviction, no
+// warmup). The label does not describe the rest of the scenario: the requests
+// fill the cache, and at a higher rate a larger share of the measured requests
+// read from a warm cache.
 package bench

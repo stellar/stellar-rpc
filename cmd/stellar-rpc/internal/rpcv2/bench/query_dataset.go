@@ -74,8 +74,11 @@ func evictionState(requested bool) string {
 	}
 }
 
-// cacheScenario is the settings.cacheScenario value: the page-cache state the
-// measured iterations start from.
+// cacheScenario is the settings.cacheScenario value: the page-cache state when
+// measurement starts. cold-start means that eviction ran and no warmup ran.
+// warm-run means that warmup iterations ran, after the eviction when one ran.
+// existing-cache means that neither ran. The requests fill the cache during the
+// scenario, so the label does not describe the cache after measurement starts.
 func cacheScenario(warmup int, evict bool) string {
 	switch {
 	case warmup > 0:
