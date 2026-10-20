@@ -6,10 +6,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -417,6 +419,21 @@ func TestQueryReportBenchTextSingleOutcome(t *testing.T) {
 			"\t0 handler-p50-ns\t0 handler-p99-ns\t30000 p99-from-due-ns\t0 items/op\t0 dropped",
 		"",
 	}, strings.Split(q.benchText(), "\n"))
+}
+
+// Each outcome label and query type is a valid part of a benchstat name.
+func TestBenchNameParts(t *testing.T) {
+	procSuffix := regexp.MustCompile(`-[0-9]+$`)
+	parts := append(append([]string(nil), outcomeLabels[:]...), allQueryTypes...)
+	for _, part := range parts {
+		t.Run(part, func(t *testing.T) {
+			assert.NotEmpty(t, part)
+			assert.False(t, strings.ContainsFunc(part, unicode.IsSpace), "whitespace")
+			assert.NotContains(t, part, "/")
+			assert.NotContains(t, part, "=")
+			assert.False(t, procSuffix.MatchString(part), "a -N suffix reads as GOMAXPROCS")
+		})
+	}
 }
 
 // capturingLogger returns an Info-level logger and the buffer it writes to.
