@@ -155,7 +155,6 @@ the end.
 |---|---|
 | `tier` | `cold` or `hot` |
 | `format` | `--format` |
-| `warmup` | Effective warmup iterations: `--warmup`, or the tier default if `--warmup` is unset. `flags.warmup` is the flag value |
 | `handlerConcurrency` | Bridge handler slots (number of CPUs) |
 | `cacheScenario` | Cache state when measurement starts: `cold-start` (eviction, no warmup), `warm-run` (warmup > 0, after the eviction if one ran) or `existing-cache` (no eviction, no warmup) |
 | `pageCacheEviction` | `off` (`--evict-page-cache=false` or a hot dataset), `requested` or `unsupported-on-this-platform` (a cold dataset, not Linux) |
@@ -215,9 +214,9 @@ The pool builds are not timed.
 
 ## Cache controls
 
-- `--warmup` defaults to 0 on a cold dataset and to 20 on a hot dataset. If
-  `--warmup` is not set, the run checks each rate with 20 warmup iterations
-  before it opens the dataset.
+- `--warmup` defaults to 0 on both tiers. On a cold dataset, a warmup runs
+  after the eviction and loads pages back into the page cache, so the log
+  shows a warning. Use `--warmup 0` to start measurement after the eviction.
 - `--evict-page-cache` (default true) applies to a cold dataset on Linux only.
   Before each scenario, it requests `POSIX_FADV_DONTNEED` for the ledger and
   events files of the served chunks and for the frozen tx-hash index files.
