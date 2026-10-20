@@ -191,6 +191,7 @@ lookups use 32 random bytes; these have the outcome `not_found`.
 
 **Events pool.** Before the first `events` scenario, the run reads up to
 20,000 events as unfiltered `queryEvents` pages from random start ledgers.
+Each page uses the daemon maximum `queryEvents` limit, not `--events-limit`.
 From these events it makes the filter sets below. Each `events`
 request uses one set, and the label of the set is the outcome of the request.
 
