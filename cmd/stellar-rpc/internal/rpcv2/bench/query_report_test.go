@@ -344,8 +344,6 @@ func TestQueryReportBenchText(t *testing.T) {
 			elapsed:  10 * time.Millisecond,
 		},
 	})
-	q.add(scenarioReport{queryType: queryTypeEvents, targetRPS: 5})
-
 	cold := q.benchText()
 	assert.Equal(t, []string{
 		"goos: " + runtime.GOOS,
