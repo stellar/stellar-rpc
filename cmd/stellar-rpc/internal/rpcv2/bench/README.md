@@ -128,7 +128,7 @@ One row for each scenario, in run order.
 | `achieved_rps`, `completion_rps` | Rates |
 | `schedule_ns`, `elapsed_ns`, `overrun_ns` | Windows |
 | `process_cpu_ns` | `process_cpu` |
-| `page_cache_evict_ns` | Time of the eviction before the scenario; empty if the scenario advised no file (eviction off, not Linux, or no frozen file) |
+| `page_cache_evict_ns` | Time of the eviction before the scenario; empty if no eviction ran (`pageCacheEviction` is not `requested`) |
 
 ### `run.json`
 
@@ -157,8 +157,8 @@ the end.
 | `format` | `--format` |
 | `warmup` | Effective warmup iterations: `--warmup`, or the tier default if `--warmup` is unset. `flags.warmup` is the flag value |
 | `handlerConcurrency` | Bridge handler slots (number of CPUs) |
-| `cacheScenario` | `warm-run` (warmup > 0), `cold-start` (eviction, no warmup) or `existing-cache` |
-| `pageCacheEviction` | `off`, `requested` or `unsupported-on-this-platform` |
+| `cacheScenario` | Cache state when measurement starts: `cold-start` (eviction, no warmup), `warm-run` (warmup > 0, after the eviction if one ran) or `existing-cache` (no eviction, no warmup) |
+| `pageCacheEviction` | `off` (`--evict-page-cache=false` or a hot dataset), `requested` or `unsupported-on-this-platform` (a cold dataset, not Linux) |
 | `txhashPoolHashes` | Hashes in the txhash pool |
 | `eventsPool` | Labels of the events pool's filter sets, comma-joined, for example `unfiltered,frequent_contract,frequent_pair,rare_contract,no_match` |
 | `fixedReadRange` | Types whose requests read the same ledgers each time |
@@ -215,11 +215,16 @@ The pool builds are not timed.
 
 ## Cache controls
 
-- `--warmup` defaults to 0 on a cold dataset and to 20 on a hot dataset.
+- `--warmup` defaults to 0 on a cold dataset and to 20 on a hot dataset. If
+  `--warmup` is not set, the run checks each rate with 20 warmup iterations
+  before it opens the dataset.
 - `--evict-page-cache` (default true) applies to a cold dataset on Linux only.
-  Before each scenario, it requests `POSIX_FADV_DONTNEED` for the frozen files
-  of the served chunks and for the tx-hash index files. The kernel can keep
-  some pages.
+  Before each scenario, it requests `POSIX_FADV_DONTNEED` for the ledger and
+  events files of the served chunks and for the frozen tx-hash index files.
+  The kernel can keep some pages. On another platform, the log shows a
+  warning and the scenarios start with the existing cache.
+- When a cold dataset opens, each of these files must exist. A file that the
+  catalog lists as frozen but that does not exist fails the run.
 - Without eviction, a scenario starts with the pages that the dataset open, the
   pool builds and the earlier scenarios read.
 - On a hot dataset, the RocksDB block cache of each hot chunk (512 MB) also
@@ -228,6 +233,7 @@ The pool builds are not timed.
 - Eviction runs once, before the scenario. During the scenario, a request can
   read pages that earlier requests loaded, and this share grows with the rate.
   `txhash` found lookups read only the pool's ledgers and their index
-  entries, so they warm quickly. Thus a `cold-start` row is not cold-cache latency, and rows at
-  different rates differ in cache state as well as in load. Runs at the same
-  rate under the same conditions stay comparable.
+  entries, so they warm quickly. Thus `cacheScenario` gives the cache state
+  only when measurement starts. A `cold-start` row is not cold-cache latency,
+  and rows at different rates differ in cache state as well as in load. Runs
+  at the same rate under the same conditions stay comparable.
