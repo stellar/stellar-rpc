@@ -240,3 +240,19 @@ func TestTxHashRequestUnexpectedFound(t *testing.T) {
 		t.Context(), rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
 	require.ErrorContains(t, err, "found=true, expected false")
 }
+
+// An events request under the no_match set fails when queryEvents returns
+// events.
+func TestEventsRequestNoMatchReturnsEvents(t *testing.T) {
+	ds, _ := stubEventsDataset(t, func(protocol.QueryEventsRequest) protocol.QueryEventsResponse {
+		return protocol.QueryEventsResponse{Events: make([]protocol.EventInfo, 1)}
+	})
+	pool := &eventFilterPool{sets: []eventFilterSet{{
+		outcome: outcomeNoMatch,
+		filters: []protocol.QueryEventsFilter{{ContractID: "busy", Topic0: []byte(`"t"`)}},
+	}}}
+	_, err := eventsRequest(ds, testPlan(protocol.FormatBase64), pool)(
+		t.Context(), rand.New(rand.NewPCG(defaultSeed, defaultSeed)))
+	require.ErrorContains(t, err, "no_match filter")
+	require.ErrorContains(t, err, "returned 1 events")
+}

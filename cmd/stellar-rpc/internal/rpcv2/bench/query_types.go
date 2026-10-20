@@ -103,7 +103,8 @@ func txHashRequest(ds *queryDataset, p queryPlan, pool *txHashPool) queryRequest
 
 // eventsRequest calls queryEvents for one page of at most --events-limit events
 // from a random start ledger to the end of the dataset's range, under a filter
-// set from the pool whose label is the request's outcome.
+// set from the pool whose label is the request's outcome. A no_match request
+// that returns events fails.
 func eventsRequest(ds *queryDataset, p queryPlan, pool *eventFilterPool) queryRequest {
 	limit := uint(p.EventsLimit)
 	return func(ctx context.Context, rng *rand.Rand) (requestTiming, error) {
@@ -118,6 +119,10 @@ func eventsRequest(ds *queryDataset, p queryPlan, pool *eventFilterPool) queryRe
 		})
 		if err != nil {
 			return requestTiming{}, err
+		}
+		if set.outcome == outcomeNoMatch && timing.items > 0 {
+			return requestTiming{}, fmt.Errorf("%s filter %+v returned %d events from ledger %d",
+				outcomeNoMatch.label(), set.filters[0], timing.items, start)
 		}
 		timing.outcome = set.outcome
 		return timing, nil
