@@ -39,7 +39,7 @@ func TestQueryPlanPoolAndEventsFlags(t *testing.T) {
 		t.Run(strconv.Itoa(size), func(t *testing.T) {
 			f := validQueryFlags()
 			f.txHashPoolSize = size
-			p, err := f.plan(true)
+			p, err := f.plan()
 			if size < 1 || size > maxTxHashPoolSize {
 				require.ErrorContains(t, err, "--txhash-pool-size")
 			} else {
@@ -51,13 +51,13 @@ func TestQueryPlanPoolAndEventsFlags(t *testing.T) {
 	for _, fraction := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -0.1, 1.1} {
 		f := validQueryFlags()
 		f.notFoundFraction = fraction
-		_, err := f.plan(true)
+		_, err := f.plan()
 		require.ErrorContains(t, err, "--not-found-fraction")
 	}
 	for _, fraction := range []float64{0, 1} {
 		f := validQueryFlags()
 		f.notFoundFraction = fraction
-		p, err := f.plan(true)
+		p, err := f.plan()
 		require.NoError(t, err)
 		assert.InDelta(t, fraction, p.NotFoundFraction, 0)
 	}
@@ -67,7 +67,7 @@ func TestQueryPlanPoolAndEventsFlags(t *testing.T) {
 	} {
 		f := validQueryFlags()
 		f.eventsLimit = limit
-		_, err := f.plan(true)
+		_, err := f.plan()
 		if want == "" {
 			require.NoError(t, err)
 			continue
@@ -114,7 +114,7 @@ func TestPlanAcceptsLimitCaps(t *testing.T) {
 		f.ledgersLimit = uint32(maxLedgersLimit())
 		f.txPageLimit = uint32(maxTxPageLimit())
 		f.format = format
-		p, err := f.plan(true)
+		p, err := f.plan()
 		require.NoError(t, err)
 		assert.Equal(t, format, p.Format)
 	}
@@ -149,43 +149,14 @@ func TestPlanRejectsUnrunnableScenarios(t *testing.T) {
 			f.targetRPS = tc.targetRPS
 			f.duration = tc.duration
 			f.warmup = tc.warmup
-			_, err := f.plan(true)
+			_, err := f.plan()
 			require.ErrorContains(t, err, tc.want)
 		})
 	}
 }
 
-// Without --warmup, plan checks each rate against the hot warmup default, so a
-// scenario that only a cold dataset can run fails before the dataset opens.
-func TestPlanChecksHotWarmupDefault(t *testing.T) {
-	for _, tc := range []struct {
-		measured    int
-		warmupGiven bool
-		want        string
-	}{
-		{maxIterations - defaultHotWarmup, false, ""},
-		{
-			maxIterations - defaultHotWarmup + 1, false,
-			"--target-rps, --duration and the hot --warmup default: scenario plans more than 100000000 " +
-				"iterations: 20 warmup plus 99999981 measured",
-		},
-		{maxIterations - defaultHotWarmup + 1, true, ""},
-		{maxIterations, true, ""},
-	} {
-		f := validQueryFlags()
-		f.duration = time.Duration(tc.measured) * time.Second
-		_, err := f.plan(tc.warmupGiven)
-		if tc.want == "" {
-			require.NoError(t, err, "%d measured, --warmup given: %v", tc.measured, tc.warmupGiven)
-		} else {
-			require.EqualError(t, err, tc.want)
-		}
-	}
-}
-
-// --warmup defaults to 0 and --evict-page-cache to true. Without --warmup a hot
-// dataset warms up defaultHotWarmup iterations and a cold one none; a given
-// --warmup, or a plan built without the flags, keeps its warmup on both tiers.
+// --warmup defaults to 0 and --evict-page-cache to true, and cacheScenario
+// labels each combination of warmup and eviction.
 func TestQueryCacheControls(t *testing.T) {
 	cmd := newQueryCommand()
 	assert.Equal(t, "0", cmd.Flags().Lookup("warmup").DefValue)
@@ -193,19 +164,9 @@ func TestQueryCacheControls(t *testing.T) {
 
 	f := validQueryFlags()
 	f.evict = true
-	byTier, err := f.plan(false)
+	p, err := f.plan()
 	require.NoError(t, err)
-	assert.True(t, byTier.Evict)
-	assert.Equal(t, 0, byTier.forTier(tierCold).Warmup)
-	assert.Equal(t, defaultHotWarmup, byTier.forTier(tierHot).Warmup)
-
-	f.warmup = 3
-	given, err := f.plan(true)
-	require.NoError(t, err)
-	assert.Equal(t, 3, given.forTier(tierCold).Warmup)
-	assert.Equal(t, 3, given.forTier(tierHot).Warmup)
-	built := queryPlan{Warmup: 5}
-	assert.Equal(t, 5, built.forTier(tierHot).Warmup)
+	assert.True(t, p.Evict)
 
 	for _, tc := range []struct {
 		warmup int
@@ -222,37 +183,44 @@ func TestQueryCacheControls(t *testing.T) {
 }
 
 // cacheControls runs eviction only when it is requested on a dataset with
-// frozen files and the platform supports it, and warns when it does not.
+// frozen files and the platform supports it, and warns when the platform
+// cannot evict or a warmup follows the eviction.
 func TestCacheControls(t *testing.T) {
+	const (
+		unsupported = "cannot evict the page cache"
+		refill      = "refills the page cache"
+	)
 	onLinux := isLinux()
-	coldEviction, coldScenario := "unsupported-on-this-platform", "existing-cache"
+	coldEviction, coldScenario, coldWarn, warmupWarn := evictionUnsupported, "existing-cache", unsupported, unsupported
 	if onLinux {
-		coldEviction, coldScenario = "requested", "cold-start"
+		coldEviction, coldScenario, coldWarn, warmupWarn = evictionRequested, "cold-start", "", refill
 	}
 	for _, tc := range []struct {
-		name       string
-		warmup     int
-		evict      bool
-		paths      []string
-		eviction   string
-		scenario   string
-		runs, warn bool
+		name     string
+		warmup   int
+		evict    bool
+		paths    []string
+		eviction string
+		scenario string
+		runs     bool
+		warn     string
 	}{
-		{"not requested", 0, false, []string{"a.pack"}, "off", "existing-cache", false, false},
-		{"hot dataset", 0, true, nil, "off", "existing-cache", false, false},
-		{"cold dataset", 0, true, []string{"a.pack"}, coldEviction, coldScenario, onLinux, !onLinux},
-		{"cold dataset with warmup", 3, true, []string{"a.pack"}, coldEviction, "warm-run", onLinux, !onLinux},
+		{"not requested", 0, false, []string{"a.pack"}, evictionOff, "existing-cache", false, ""},
+		{"hot dataset", 0, true, nil, evictionOff, "existing-cache", false, ""},
+		{"hot dataset with warmup", 3, true, nil, evictionOff, "warm-run", false, ""},
+		{"cold dataset", 0, true, []string{"a.pack"}, coldEviction, coldScenario, onLinux, coldWarn},
+		{"cold dataset with warmup", 3, true, []string{"a.pack"}, coldEviction, "warm-run", onLinux, warmupWarn},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logger, output := capturingLogger()
 			settings := map[string]string{}
 			evict := cacheControls(logger, queryPlan{Warmup: tc.warmup, Evict: tc.evict},
 				&queryDataset{EvictPaths: tc.paths}, settings)
-			assert.Equal(t, map[string]string{
-				"warmup": strconv.Itoa(tc.warmup), "pageCacheEviction": tc.eviction, "cacheScenario": tc.scenario,
-			}, settings)
+			assert.Equal(t, map[string]string{"pageCacheEviction": tc.eviction, "cacheScenario": tc.scenario}, settings)
 			assert.Equal(t, tc.runs, evict != nil)
-			assert.Equal(t, tc.warn, strings.Contains(output.String(), "cannot evict the page cache"))
+			for _, warning := range []string{unsupported, refill} {
+				assert.Equal(t, warning == tc.warn, strings.Contains(output.String(), warning), warning)
+			}
 		})
 	}
 }

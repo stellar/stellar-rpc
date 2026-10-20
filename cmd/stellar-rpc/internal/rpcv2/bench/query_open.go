@@ -32,7 +32,7 @@ func newQueryCommand() *cobra.Command {
 		sampleLedgers uint32
 	)
 	opts := func() (queryOptions, error) {
-		plan, err := qf.plan(cmd.Flags().Changed("warmup"))
+		plan, err := qf.plan()
 		if err != nil {
 			return queryOptions{}, err
 		}

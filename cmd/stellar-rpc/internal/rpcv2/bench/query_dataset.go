@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"strconv"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -30,28 +29,9 @@ type queryPlan struct {
 	Passphrase       string
 	Seed             int64
 
-	// DefaultWarmup makes forTier replace Warmup with the default of the
-	// dataset's tier.
-	DefaultWarmup bool
-
 	// Evict requests page-cache eviction of a cold dataset's frozen files
 	// before each scenario.
 	Evict bool
-}
-
-// defaultHotWarmup is the --warmup default for a hot dataset; a cold one
-// defaults to 0.
-const defaultHotWarmup = 20
-
-// forTier returns p with the defaults for a dataset of tier.
-func (p queryPlan) forTier(tier string) queryPlan {
-	if p.DefaultWarmup {
-		p.Warmup = 0
-		if tier == tierHot {
-			p.Warmup = defaultHotWarmup
-		}
-	}
-	return p
 }
 
 // settings.pageCacheEviction values.
@@ -175,11 +155,14 @@ func cacheControls(
 	logger *supportlog.Entry, p queryPlan, ds *queryDataset, settings map[string]string,
 ) func(context.Context) error {
 	state := evictionState(p.Evict && len(ds.EvictPaths) > 0)
-	if state == evictionUnsupported {
+	switch {
+	case state == evictionUnsupported:
 		logger.Warn("--evict-page-cache is set, but this platform cannot evict the page cache; " +
 			"each scenario starts from the existing cache")
+	case state == evictionRequested && p.Warmup > 0:
+		logger.Warn("--warmup refills the page cache that the eviction dropped; " +
+			"pass --warmup 0 to measure from a cold cache")
 	}
-	settings["warmup"] = strconv.Itoa(p.Warmup)
 	settings["pageCacheEviction"] = state
 	settings["cacheScenario"] = cacheScenario(p.Warmup, state == evictionRequested)
 	if state != evictionRequested {

@@ -25,8 +25,8 @@
 //
 // Before each scenario, a cold run asks the kernel to drop the dataset's
 // frozen files from the page cache (--evict-page-cache, Linux only). Then the
-// --warmup iterations run: by default none on a cold dataset and 20 on a hot
-// one. run.json records the cache state when measurement starts as
+// --warmup iterations run, none by default. run.json records the cache state
+// when measurement starts as
 // settings.cacheScenario: cold-start (eviction, no warmup), warm-run (warmup,
 // after the eviction on a cold dataset) or existing-cache (no eviction, no
 // warmup). The label does not describe the rest of the scenario: the requests

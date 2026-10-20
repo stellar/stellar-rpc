@@ -286,8 +286,8 @@ func runQueryCommand(t *testing.T, args ...string) (runRecord, []map[string]stri
 	return record, rows
 }
 
-// A hot run records the store open time, the response format and the handler
-// concurrency.
+// A hot run records the store open time, the response format, the handler
+// concurrency and the cache settings.
 func TestQueryHotCommandRecordsRun(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
 	record, rows := runQueryCommand(t, "--data-dir", hotRoot,
@@ -299,21 +299,10 @@ func TestQueryHotCommandRecordsRun(t *testing.T) {
 	assert.Equal(t, protocol.FormatJSON, record.Settings["format"])
 	assert.Equal(t, tierHot, record.Settings["tier"])
 	assert.Equal(t, strconv.Itoa(runtime.NumCPU()), record.Settings["handlerConcurrency"])
-	assert.Equal(t, "warm-run", record.Settings["cacheScenario"], "a hot dataset warms up by default")
-	assert.Equal(t, strconv.Itoa(defaultHotWarmup), record.Settings["warmup"])
-	assert.Equal(t, strconv.Itoa(defaultHotWarmup), rows[0]["warmup_planned"])
+	assert.Equal(t, "existing-cache", record.Settings["cacheScenario"])
+	assert.Equal(t, "0", rows[0]["warmup_planned"])
 	assert.Equal(t, "off", record.Settings["pageCacheEviction"])
 	assert.Empty(t, rows[0]["page_cache_evict_ns"])
-}
-
-// An explicit --warmup 0 on a hot dataset overrides the hot default.
-func TestQueryHotCommandExplicitWarmup(t *testing.T) {
-	record, rows := runQueryCommand(t, "--data-dir", ingestHotChunk(t), "--warmup", "0",
-		"--types", queryTypeLedgers, "--target-rps", "1000", "--duration", "10ms")
-	require.Len(t, rows, 1)
-	assert.Equal(t, "0", rows[0]["warmup_planned"])
-	assert.Equal(t, "0", record.Settings["warmup"])
-	assert.Equal(t, "existing-cache", record.Settings["cacheScenario"])
 }
 
 // A hot run whose ledgers limit covers the whole sampled dataset records

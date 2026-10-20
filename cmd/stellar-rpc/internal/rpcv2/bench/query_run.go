@@ -187,7 +187,6 @@ func runQueryBench(
 	}
 	defer release()
 	env.SetupTimes["storeOpen"] = time.Since(start)
-	p = p.forTier(ds.Tier)
 	evict := cacheControls(logger, p, ds, env.Settings)
 	logger.Infof("serving ledgers [%d, %d] over %d %s chunk(s)", ds.FirstLedger, ds.LastLedger, len(ds.Chunks), ds.Tier)
 	env.Settings["tier"] = ds.Tier

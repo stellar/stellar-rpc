@@ -67,8 +67,7 @@ func (f *queryFlags) bind(cmd *cobra.Command) {
 	fs.DurationVar(&f.duration, "duration", defaultScenarioDuration,
 		"measured duration of each --target-rps scenario; the --warmup iterations run before it")
 	fs.IntVar(&f.warmup, "warmup", 0,
-		"unmeasured iterations per scenario, started at the scenario's rate before measurement starts; "+
-			"default: 0 on a cold dataset, "+strconv.Itoa(defaultHotWarmup)+" on a hot one")
+		"unmeasured iterations per scenario, started at the scenario's rate before measurement starts")
 	fs.Uint32Var(&f.ledgersLimit, "ledgers-limit", defaultLedgersLimit,
 		"getLedgers limit of one ledgers request, in [1, "+strconv.FormatUint(uint64(maxLedgersLimit()), 10)+
 			"] (1 = a point read)")
@@ -88,12 +87,11 @@ func (f *queryFlags) bind(cmd *cobra.Command) {
 	fs.Int64Var(&f.seed, "seed", defaultSeed,
 		"seed for the work each request picks, so a re-run reads the same ledgers")
 	fs.BoolVar(&f.evict, "evict-page-cache", true,
-		"request best-effort OS page-cache eviction of a cold dataset's files before each scenario (Linux only)")
+		"request best-effort OS page-cache eviction of a cold dataset's frozen files before each scenario (Linux only)")
 }
 
-// plan parses and validates the flags. warmupGiven reports whether --warmup was
-// given; when it was not, the dataset's tier sets the warmup.
-func (f *queryFlags) plan(warmupGiven bool) (queryPlan, error) {
+// plan parses and validates the flags.
+func (f *queryFlags) plan() (queryPlan, error) {
 	types, err := parseQueryTypes(f.types)
 	if err != nil {
 		return queryPlan{}, err
@@ -102,7 +100,7 @@ func (f *queryFlags) plan(warmupGiven bool) (queryPlan, error) {
 	if err != nil {
 		return queryPlan{}, err
 	}
-	if err = f.checkScenarioFlags(rates, warmupGiven); err != nil {
+	if err = f.checkScenarioFlags(rates); err != nil {
 		return queryPlan{}, err
 	}
 	if err = f.checkRequestFlags(); err != nil {
@@ -124,29 +122,22 @@ func (f *queryFlags) plan(warmupGiven bool) (queryPlan, error) {
 		Format:           f.format,
 		Passphrase:       f.passphrase,
 		Seed:             f.seed,
-		DefaultWarmup:    !warmupGiven,
 		Evict:            f.evict,
 	}, nil
 }
 
 // checkScenarioFlags checks --duration and --warmup, and that each rate gives
 // a scenario that runConstantArrivalRate can run.
-func (f *queryFlags) checkScenarioFlags(rates []float64, warmupGiven bool) error {
+func (f *queryFlags) checkScenarioFlags(rates []float64) error {
 	switch {
 	case f.duration <= 0:
 		return fmt.Errorf("--duration must be > 0, got %v", f.duration)
 	case f.warmup < 0:
 		return fmt.Errorf("--warmup must be >= 0, got %d", f.warmup)
 	}
-	warmup, source := f.warmup, "--warmup"
-	if !warmupGiven {
-		// The tier is not known before the dataset opens, so check the larger
-		// default, the hot one.
-		warmup, source = defaultHotWarmup, "the hot --warmup default"
-	}
 	for _, rps := range rates {
-		if _, _, err := validateScenario(rps, f.duration, warmup); err != nil {
-			return fmt.Errorf("--target-rps, --duration and %s: %w", source, err)
+		if _, _, err := validateScenario(rps, f.duration, f.warmup); err != nil {
+			return fmt.Errorf("--target-rps, --duration and --warmup: %w", err)
 		}
 	}
 	return nil
