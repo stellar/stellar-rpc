@@ -30,6 +30,8 @@ type queryRun struct {
 	// cpuProfile, when set, is the --cpuprofile path that scenarioProfilePath
 	// derives each scenario's CPU profile path from.
 	cpuProfile string
+	// evict, when set, runs before each scenario.
+	evict func(context.Context) error
 }
 
 // scenarios runs every type at every rate. A type's pool is built once and
@@ -52,9 +54,9 @@ func (r *queryRun) scenarios(ctx context.Context) error {
 	return nil
 }
 
-// scenario runs one type at one rate: page-cache eviction when the plan asks
-// for it, then plan.Warmup unmeasured iterations and the measured ones at rps
-// over plan.Duration. The seed mixes in the type.
+// scenario runs one type at one rate: r.evict when it is set, then plan.Warmup
+// unmeasured iterations and the measured ones at rps over plan.Duration. The
+// seed mixes in the type.
 //
 // A cancel after the first measured iteration adds the partial scenario to the
 // report, logs it PARTIAL and returns the context error. A cancel before it
@@ -63,10 +65,9 @@ func (r *queryRun) scenarios(ctx context.Context) error {
 func (r *queryRun) scenario(ctx context.Context, qtype string, rps float64, req queryRequest) error {
 	p := r.plan
 	sc := scenarioReport{queryType: qtype, targetRPS: rps}
-	if p.Evict {
+	if r.evict != nil {
 		start := r.clock.now()
-		evicted, err := r.ds.evictColdArtifacts(ctx)
-		if err != nil {
+		if err := r.evict(ctx); err != nil {
 			if isContextErr(err) {
 				r.logger.Warnf("query %s at %s rps canceled during page-cache eviction; no rows added",
 					qtype, formatRPS(rps))
@@ -74,7 +75,7 @@ func (r *queryRun) scenario(ctx context.Context, qtype string, rps float64, req 
 			return err
 		}
 		sc.pageCacheEvict = r.clock.now().Sub(start)
-		sc.evicted = evicted > 0
+		sc.evicted = true
 	}
 	r.logger.Infof("query %s at %s rps for %s, %d warmup iterations",
 		qtype, formatRPS(rps), p.Duration, p.Warmup)
@@ -187,9 +188,7 @@ func runQueryBench(
 	defer release()
 	env.SetupTimes["storeOpen"] = time.Since(start)
 	p = p.forTier(ds.Tier)
-	env.Settings["warmup"] = strconv.Itoa(p.Warmup)
-	env.Settings["pageCacheEviction"] = evictionState(p.Evict)
-	env.Settings["cacheScenario"] = p.cacheScenario()
+	evict := cacheControls(logger, p, ds, env.Settings)
 	logger.Infof("serving ledgers [%d, %d] over %d %s chunk(s)", ds.FirstLedger, ds.LastLedger, len(ds.Chunks), ds.Tier)
 	env.Settings["tier"] = ds.Tier
 	warnFixedReadRange(logger, ds, p, env.Settings)
@@ -199,7 +198,7 @@ func runQueryBench(
 	report := &queryReport{}
 	run := &queryRun{
 		logger: logger, ds: ds, plan: p, report: report, clock: timerClock{}, settings: env.Settings,
-		cpuProfile: cpuProfile,
+		cpuProfile: cpuProfile, evict: evict,
 	}
 	runErr := run.scenarios(ctx)
 	written, err := report.write(env.OutDir)

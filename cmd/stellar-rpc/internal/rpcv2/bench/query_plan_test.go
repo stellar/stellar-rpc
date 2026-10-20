@@ -3,6 +3,7 @@ package bench
 import (
 	"math"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -197,8 +198,6 @@ func TestQueryCacheControls(t *testing.T) {
 	assert.True(t, byTier.Evict)
 	assert.Equal(t, 0, byTier.forTier(tierCold).Warmup)
 	assert.Equal(t, defaultHotWarmup, byTier.forTier(tierHot).Warmup)
-	assert.True(t, byTier.forTier(tierCold).Evict)
-	assert.False(t, byTier.forTier(tierHot).Evict)
 
 	f.warmup = 3
 	given, err := f.plan(true)
@@ -214,22 +213,46 @@ func TestQueryCacheControls(t *testing.T) {
 		want   string
 	}{
 		{0, false, "existing-cache"},
-		{20, false, "warm-run"},
-		{20, true, "warm-run"},
+		{0, true, "cold-start"},
+		{1, false, "warm-run"},
+		{1, true, "warm-run"},
 	} {
-		p := queryPlan{Warmup: tc.warmup, Evict: tc.evict}
-		assert.Equal(t, tc.want, p.cacheScenario())
+		assert.Equal(t, tc.want, cacheScenario(tc.warmup, tc.evict), "warmup %d, evict %v", tc.warmup, tc.evict)
 	}
-	evicting := queryPlan{Evict: true}
-	if evictSupported {
-		assert.Equal(t, "cold-start", evicting.cacheScenario())
-	} else {
-		assert.Equal(t, "existing-cache", evicting.cacheScenario(), "eviction cannot be requested off Linux")
+}
+
+// cacheControls runs eviction only when it is requested on a dataset with
+// frozen files and the platform supports it, and warns when it does not.
+func TestCacheControls(t *testing.T) {
+	onLinux := isLinux()
+	coldEviction, coldScenario := "unsupported-on-this-platform", "existing-cache"
+	if onLinux {
+		coldEviction, coldScenario = "requested", "cold-start"
 	}
-	assert.Equal(t, "off", evictionState(false))
-	want := "unsupported-on-this-platform"
-	if evictSupported {
-		want = "requested"
+	for _, tc := range []struct {
+		name       string
+		warmup     int
+		evict      bool
+		paths      []string
+		eviction   string
+		scenario   string
+		runs, warn bool
+	}{
+		{"not requested", 0, false, []string{"a.pack"}, "off", "existing-cache", false, false},
+		{"hot dataset", 0, true, nil, "off", "existing-cache", false, false},
+		{"cold dataset", 0, true, []string{"a.pack"}, coldEviction, coldScenario, onLinux, !onLinux},
+		{"cold dataset with warmup", 3, true, []string{"a.pack"}, coldEviction, "warm-run", onLinux, !onLinux},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, output := capturingLogger()
+			settings := map[string]string{}
+			evict := cacheControls(logger, queryPlan{Warmup: tc.warmup, Evict: tc.evict},
+				&queryDataset{EvictPaths: tc.paths}, settings)
+			assert.Equal(t, map[string]string{
+				"warmup": strconv.Itoa(tc.warmup), "pageCacheEviction": tc.eviction, "cacheScenario": tc.scenario,
+			}, settings)
+			assert.Equal(t, tc.runs, evict != nil)
+			assert.Equal(t, tc.warn, strings.Contains(output.String(), "cannot evict the page cache"))
+		})
 	}
-	assert.Equal(t, want, evictionState(true))
 }

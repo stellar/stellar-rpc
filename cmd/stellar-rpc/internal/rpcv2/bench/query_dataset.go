@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strconv"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -33,7 +34,8 @@ type queryPlan struct {
 	// dataset's tier.
 	DefaultWarmup bool
 
-	// Evict requests page-cache eviction before each scenario.
+	// Evict requests page-cache eviction of a cold dataset's frozen files
+	// before each scenario.
 	Evict bool
 }
 
@@ -49,19 +51,36 @@ func (p queryPlan) forTier(tier string) queryPlan {
 			p.Warmup = defaultHotWarmup
 		}
 	}
-	if tier == tierHot {
-		p.Evict = false
-	}
 	return p
+}
+
+// settings.pageCacheEviction values.
+const (
+	evictionOff         = "off"
+	evictionRequested   = "requested"
+	evictionUnsupported = "unsupported-on-this-platform"
+)
+
+// evictionState is the settings.pageCacheEviction value. requested reports
+// whether the run asks to evict at least one file.
+func evictionState(requested bool) string {
+	switch {
+	case !requested:
+		return evictionOff
+	case evictSupported:
+		return evictionRequested
+	default:
+		return evictionUnsupported
+	}
 }
 
 // cacheScenario is the settings.cacheScenario value: the page-cache state the
 // measured iterations start from.
-func (p queryPlan) cacheScenario() string {
+func cacheScenario(warmup int, evict bool) string {
 	switch {
-	case p.Warmup > 0:
+	case warmup > 0:
 		return "warm-run"
-	case p.Evict && evictSupported:
+	case evict:
 		return "cold-start"
 	default:
 		return "existing-cache"
@@ -134,35 +153,36 @@ func (ds *queryDataset) verifyServes(types []string) error {
 	return nil
 }
 
-// evictColdArtifacts requests page-cache eviction of EvictPaths and returns how
-// many files it advised.
-func (ds *queryDataset) evictColdArtifacts(ctx context.Context) (int, error) {
-	if !evictSupported {
-		return 0, nil
-	}
-	evicted := 0
+// evictColdArtifacts requests page-cache eviction of EvictPaths.
+func (ds *queryDataset) evictColdArtifacts(ctx context.Context) error {
 	for _, path := range ds.EvictPaths {
 		if err := ctx.Err(); err != nil {
-			return evicted, err
+			return err
 		}
 		if err := evictFile(path); err != nil {
-			return evicted, fmt.Errorf("evict from the page cache: %w", err)
+			return fmt.Errorf("evict from the page cache: %w", err)
 		}
-		evicted++
 	}
-	return evicted, nil
+	return nil
 }
 
-// evictionState is the settings.pageCacheEviction value.
-func evictionState(requested bool) string {
-	switch {
-	case !requested:
-		return "off"
-	case evictSupported:
-		return "requested"
-	default:
-		return "unsupported-on-this-platform"
+// cacheControls records the run's cache settings and returns the eviction to
+// run before each scenario, or nil when no eviction runs.
+func cacheControls(
+	logger *supportlog.Entry, p queryPlan, ds *queryDataset, settings map[string]string,
+) func(context.Context) error {
+	state := evictionState(p.Evict && len(ds.EvictPaths) > 0)
+	if state == evictionUnsupported {
+		logger.Warn("--evict-page-cache is set, but this platform cannot evict the page cache; " +
+			"each scenario starts from the existing cache")
 	}
+	settings["warmup"] = strconv.Itoa(p.Warmup)
+	settings["pageCacheEviction"] = state
+	settings["cacheScenario"] = cacheScenario(p.Warmup, state == evictionRequested)
+	if state != evictionRequested {
+		return nil
+	}
+	return ds.evictColdArtifacts
 }
 
 // chunkRange returns the ascending chunk IDs in [start, end]. The caller must

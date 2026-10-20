@@ -135,19 +135,18 @@ func TestQueryScenarioCanceled(t *testing.T) {
 	}
 }
 
-// An eviction before a scenario is timed into its page_cache_evict_ns column.
-// Off Linux nothing is evicted and the column stays empty.
+// The eviction before a scenario is timed into its page_cache_evict_ns column.
 func TestQueryScenarioEviction(t *testing.T) {
-	artifact := filepath.Join(t.TempDir(), "ledgers.pack")
-	require.NoError(t, os.WriteFile(artifact, []byte("ledgers"), 0o600))
-	ds := &queryDataset{EvictPaths: []string{artifact}}
 	req := func(context.Context, *rand.Rand) (requestTiming, error) {
 		return requestTiming{latency: time.Microsecond, items: 1}, nil
 	}
 	logger, _ := capturingLogger()
-	p := queryPlan{Duration: 4 * time.Millisecond, Evict: true}
-	run := testQueryRun(logger, p, &fakeScenarioClock{step: time.Microsecond})
-	run.ds = ds
+	clock := &fakeScenarioClock{}
+	run := testQueryRun(logger, queryPlan{Duration: 4 * time.Millisecond}, clock)
+	run.evict = func(context.Context) error {
+		clock.advance(30 * time.Millisecond)
+		return nil
+	}
 	require.NoError(t, run.scenario(context.Background(), queryTypeLedgers, 1000, req))
 
 	out := t.TempDir()
@@ -155,11 +154,7 @@ func TestQueryScenarioEviction(t *testing.T) {
 	require.NoError(t, err)
 	_, rows := readCSVTable(t, filepath.Join(out, queryScenariosFile))
 	require.Len(t, rows, 1)
-	want := ""
-	if evictSupported {
-		want = "1000" // two fake-clock reads, a microsecond apart
-	}
-	assert.Equal(t, want, rows[0]["page_cache_evict_ns"])
+	assert.Equal(t, "30000000", rows[0]["page_cache_evict_ns"])
 }
 
 // Each latency row under minLatencyRowSamples warns, whatever its outcome;
@@ -355,12 +350,14 @@ func TestQueryColdCommandRecordsRun(t *testing.T) {
 	record, rows := runQueryCommand(t, "--data-dir", coldRoot,
 		"--types", strings.Join(allQueryTypes, ","), "--target-rps", "1000,2000", "--duration", "10ms")
 	assert.Equal(t, tierCold, record.Settings["tier"])
-	if evictSupported {
+	onLinux := isLinux()
+	if onLinux {
 		assert.Equal(t, "cold-start", record.Settings["cacheScenario"])
+		assert.Equal(t, "requested", record.Settings["pageCacheEviction"])
 	} else {
 		assert.Equal(t, "existing-cache", record.Settings["cacheScenario"])
+		assert.Equal(t, "unsupported-on-this-platform", record.Settings["pageCacheEviction"])
 	}
-	assert.Equal(t, evictionState(true), record.Settings["pageCacheEviction"])
 	hashes, err := strconv.Atoi(record.Settings["txhashPoolHashes"])
 	require.NoError(t, err)
 	assert.Positive(t, hashes)
@@ -371,7 +368,7 @@ func TestQueryColdCommandRecordsRun(t *testing.T) {
 		assert.Equal(t, allQueryTypes[i/2], row["query_type"], "row %d", i)
 		assert.Equal(t, []string{"1000", "2000"}[i%2], row["target_rps"], "row %d", i)
 		assert.Equal(t, "0", row["failed"], row["query_type"])
-		if evictSupported {
+		if onLinux {
 			assert.NotEmpty(t, row["page_cache_evict_ns"], row["query_type"])
 		} else {
 			assert.Empty(t, row["page_cache_evict_ns"], row["query_type"])
