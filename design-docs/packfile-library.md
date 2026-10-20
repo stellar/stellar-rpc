@@ -170,7 +170,7 @@ type WriterOptions struct {
     // dispatch on it to pick the matching decoder.
     Format Format
 
-    // NewRecordEncoder, if non-nil, returns a per-worker RecordEncoder.
+    // NewRecordEncoder, if non-nil, returns a per-worker RecordEncoder (never nil).
     // Called once per worker goroutine; the writer invokes Encode once per
     // record before write and Close on shutdown. Pass nil for passthrough
     // records (no encoding).

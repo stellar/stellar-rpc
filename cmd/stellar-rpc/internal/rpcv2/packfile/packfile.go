@@ -31,7 +31,7 @@ const (
 //	26:28 reserved
 //	28:32 indexSize       uint32
 //	32:36 appDataSize     uint32
-//	36:68 reserved
+//	36:68 reserved                 (holds a SHA-256 when legacyFlags bit 0 is set)
 //	68:72 appDataCRC      uint32   (CRC32C of the app-data section)
 //	72:76 crc32c          uint32   (over trailer[:trailerCRCEnd])
 const (
