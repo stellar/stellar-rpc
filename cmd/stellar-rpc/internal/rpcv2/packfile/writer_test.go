@@ -245,7 +245,7 @@ func TestTrailerFields(t *testing.T) {
 		wantFormat      Format
 	}{
 		{
-			name:            "passthrough_no_hash",
+			name:            "passthrough",
 			opts:            WriterOptions{Format: 5},
 			numItems:        100,
 			itemSize:        16,

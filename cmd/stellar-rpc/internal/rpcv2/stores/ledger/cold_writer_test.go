@@ -93,7 +93,7 @@ func TestColdWriter_CommitEmitsTrailerAndAppData(t *testing.T) {
 	}
 	require.NoError(t, w.Commit())
 
-	r := packfile.Open(path, packfile.ReaderOptions{RecordDecoder: coldPackDecoder})
+	r := packfile.Open(path, packfile.ReaderOptions{})
 	t.Cleanup(func() { _ = r.Close() })
 
 	total, err := r.TotalItems()
