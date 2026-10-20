@@ -95,6 +95,12 @@ pq                  = s[ceil(q × n) − 1]             for q = 0.50, 0.90, 0.99
 A failed measured request fails the run after its scenario is in the report.
 A failed warmup request does not fail the run.
 
+SIGINT or SIGTERM cancels the run. The report holds the scenarios that reached
+a measured iteration, and the log marks the canceled scenario and the report
+as PARTIAL. A scenario canceled before its first measured iteration has no
+rows. `run.json` has `status` `failed`; a request that the cancel stops counts
+as failed only if it returns an error.
+
 ### `latency.csv`
 
 One row for each scenario, metric and outcome that has samples.
