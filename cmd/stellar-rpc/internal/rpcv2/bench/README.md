@@ -215,6 +215,9 @@ The pool builds are not timed.
   some pages.
 - Without eviction, a scenario starts with the pages that the dataset open, the
   pool builds and the earlier scenarios read.
+- On a hot dataset, the RocksDB block cache of each hot chunk (512 MB) also
+  keeps the blocks that earlier reads loaded. Page-cache eviction does not
+  clear this cache, and eviction is off on a hot dataset.
 - Eviction runs once, before the scenario. During the scenario, a request can
   read pages that earlier requests loaded, and this share grows with the rate.
   `txhash` warms fastest, because its found lookups read only the pool's
