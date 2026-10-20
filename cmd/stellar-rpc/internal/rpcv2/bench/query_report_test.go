@@ -307,10 +307,30 @@ func TestQueryReportAllDropped(t *testing.T) {
 }
 
 // TestQueryReportBenchText tests the bench.txt lines of each scenario and
-// txhash outcome.
+// outcome.
 func TestQueryReportBenchText(t *testing.T) {
 	q := twoScenarioReport()
 	q.tier = tierCold
+	q.add(scenarioReport{
+		queryType: queryTypeEvents,
+		targetRPS: 2,
+		result: scenarioResult{
+			scenarioRecord: scenarioRecord{
+				startDelays: []time.Duration{0, 0},
+				timings: []requestTiming{
+					{
+						latency: 30 * time.Microsecond, latencyFromDue: 31 * time.Microsecond, items: 3,
+						outcome: outcomeFrequentContract,
+					},
+					{latency: 10 * time.Microsecond, latencyFromDue: 11 * time.Microsecond, outcome: outcomeNoMatch},
+				},
+				measured: phaseCounts{started: 2},
+			},
+			planned:  2,
+			schedule: time.Second,
+			elapsed:  time.Second,
+		},
+	})
 	q.add(scenarioReport{
 		queryType: queryTypeLedgers,
 		targetRPS: 100,
@@ -338,6 +358,12 @@ func TestQueryReportBenchText(t *testing.T) {
 			"\t10000 p99-ns\t0 handler-p50-ns\t0 handler-p99-ns\t12000 p99-from-due-ns\t1 items/op",
 		"BenchmarkQuery/tier=cold/type=txhash/rps=0.5/outcome=not_found\t1\t20000 ns/op\t20000 p50-ns" +
 			"\t20000 p99-ns\t0 handler-p50-ns\t0 handler-p99-ns\t21000 p99-from-due-ns\t0 items/op",
+		"BenchmarkQuery/tier=cold/type=events/rps=2\t2\t20000 ns/op\t10000 p50-ns\t30000 p99-ns" +
+			"\t0 handler-p50-ns\t0 handler-p99-ns\t31000 p99-from-due-ns\t1.5 items/op\t0 dropped",
+		"BenchmarkQuery/tier=cold/type=events/rps=2/outcome=frequent_contract\t1\t30000 ns/op\t30000 p50-ns" +
+			"\t30000 p99-ns\t0 handler-p50-ns\t0 handler-p99-ns\t31000 p99-from-due-ns\t3 items/op",
+		"BenchmarkQuery/tier=cold/type=events/rps=2/outcome=no_match\t1\t10000 ns/op\t10000 p50-ns" +
+			"\t10000 p99-ns\t0 handler-p50-ns\t0 handler-p99-ns\t11000 p99-from-due-ns\t0 items/op",
 		"BenchmarkQuery/tier=cold/type=ledgers/rps=100\t1\t1 dropped",
 		"",
 	}, strings.Split(cold, "\n"))
