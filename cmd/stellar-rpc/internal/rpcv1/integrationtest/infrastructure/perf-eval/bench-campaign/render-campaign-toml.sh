@@ -83,16 +83,38 @@ QUERY_LEG_DURATION_SECONDS="${QUERY_LEG_DURATION_SECONDS:-60}"
 # The query grid the runner builds (runner/internal/plan/plan.go): one leg per
 # dataset, per run, per tier (cold and hot), per query type, and the four types
 # are ledgers, txpage, txhash and events.
-query_tiers=2
 query_type_count=4
-# Every leg sweeps the ladder in the benchmarks repo's docs/targets.json, which
-# holds three multipliers (0.5x, 1x, 2x of the phase floor), and it holds each
-# one for QUERY_LEG_DURATION_SECONDS.
-query_rate_steps=3
-# Time a leg spends outside its paced windows: building the query corpus,
-# dropping the page cache for a cold leg, and the warmup. A minute per leg
-# covers that on both box sizes.
-query_leg_overhead_secs=60
+# The rate ladders come from docs/targets.json in stellar-rpc-benchmarks:
+# ledgers, txpage and events sweep three rates, and txhash sweeps the union of
+# its SLA and end-to-end ladders, whose size depends on the profile.
+non_txhash_rate_steps=9
+# A leg's time outside its paced windows: corpus build, page-cache eviction or
+# warmup, measured at ~1-15 s per leg on the phase 3b e2e runs.
+query_leg_overhead_secs=15
+# A hot leg opens the hot DB once per leg, and that open grows with the
+# ledgers it holds.
+max_hot_open_ms_per_ledger=61
+
+# profile_txhash_rate_steps <dataset> prints how many rates its txhash leg sweeps.
+profile_txhash_rate_steps() {
+  case "${1%-*}" in
+    sac) echo 6 ;;
+    custom_token) echo 4 ;;
+    soroswap) echo 3 ;;
+    *) echo 6 ;;
+  esac
+}
+
+# profile_hot_open_ms_per_ledger <dataset> prints its hot-DB open cost per
+# ledger in ms, measured on the phase 3b e2e runs at f0509550.
+profile_hot_open_ms_per_ledger() {
+  case "${1%-*}" in
+    sac) echo 61 ;;
+    custom_token) echo 28 ;;
+    soroswap) echo 33 ;;
+    *) echo "$max_hot_open_ms_per_ledger" ;;
+  esac
+}
 
 case "$INGEST" in
   both | cold | hot | none) ;;
@@ -174,38 +196,46 @@ esac
 # Two parts of the campaign run at a rate the campaign chooses, so their wall
 # clock is known here. The hot ingest legs replay `ledgers` ledgers at the phase
 # close interval, one leg per dataset per run. The query legs each hold a fixed
-# arrival rate for a fixed duration, once per rate on the ladder. The cold
-# ingest legs run as fast as the box allows, so they stay in the setup margin
+# arrival rate for a fixed duration, once per rate on the ladder, plus a
+# per-leg overhead and, on a hot leg, a DB open that grows with the hot
+# ledgers. The cold ingest legs run as fast as the box allows, so they stay in the setup margin
 # together with the toolchain install, the build and the dataset sync.
 dataset_count=0
 for _p in $profiles; do
   dataset_count=$((dataset_count + 1))
 done
 
+if [ "$HOT_NUM_LEDGERS" -gt 0 ]; then
+  ledgers="$HOT_NUM_LEDGERS"
+else
+  ledgers=10000
+fi
+
 if [ "$INGEST" = hot ] || [ "$INGEST" = both ]; then
-  if [ "$HOT_NUM_LEDGERS" -gt 0 ]; then
-    ledgers="$HOT_NUM_LEDGERS"
-  else
-    ledgers=10000
-  fi
   hot_secs=$(((dataset_count * RUNS * ledgers * interval_ms + 999) / 1000))
 else
   hot_secs=0
 fi
 
+query_legs=0
+query_secs=0
 if [ "$QUERY" = yes ]; then
-  query_legs=$((dataset_count * RUNS * query_tiers * query_type_count))
-  query_secs=$((query_legs * (query_rate_steps * QUERY_LEG_DURATION_SECONDS + query_leg_overhead_secs)))
-else
-  query_legs=0
-  query_secs=0
+  for _p in $profiles; do
+    rate_steps=$((non_txhash_rate_steps + $(profile_txhash_rate_steps "$_p")))
+    paced_secs=$((rate_steps * QUERY_LEG_DURATION_SECONDS))
+    hot_open_secs=$(((query_type_count * ledgers * $(profile_hot_open_ms_per_ledger "$_p") + 999) / 1000))
+    cold_tier_secs=$((paced_secs + query_type_count * query_leg_overhead_secs))
+    hot_tier_secs=$((paced_secs + query_type_count * query_leg_overhead_secs + hot_open_secs))
+    query_secs=$((query_secs + RUNS * (cold_tier_secs + hot_tier_secs)))
+    query_legs=$((query_legs + RUNS * 2 * query_type_count))
+  done
 fi
 budget_minutes=$(((hot_secs + query_secs + 59) / 60 + SETUP_MARGIN_MINUTES))
 
 if [ "$budget_minutes" -gt "$CAPACITY_MINUTES" ]; then
   hint="shrink runs (${RUNS}), cap hot_num_ledgers (${HOT_NUM_LEDGERS}), or split the phase into separate dispatches"
   if [ "$QUERY" = yes ]; then
-    hint="$hint; the ${query_legs} query legs (${query_rate_steps} rates of ${QUERY_LEG_DURATION_SECONDS}s each) cost ~$((query_secs / 60))m of it, so query=no is the other lever"
+    hint="$hint; the ${query_legs} query legs (${QUERY_LEG_DURATION_SECONDS}s per rate) cost ~$((query_secs / 60))m of it, so query=no is the other lever"
   fi
   die "estimated budget ${budget_minutes}m exceeds the ${CAPACITY_MINUTES}m relay-chain ceiling;" "$hint"
 fi
