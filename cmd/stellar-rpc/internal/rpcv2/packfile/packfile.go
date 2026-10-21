@@ -11,10 +11,10 @@ const (
 	// may change in place and artifacts are rebuilt; bump on any breaking
 	// trailer/index change after that.
 	version     = 1
-	trailerSize = 76
+	trailerSize = 44
 )
 
-// Trailer field byte offsets. The 76-byte trailer is the single source of
+// Trailer field byte offsets. The 44-byte trailer is the single source of
 // truth that the writer emits and the reader parses; both sides MUST use
 // these constants instead of hard-coded indices so the layout can never
 // drift between encode and decode.
@@ -31,9 +31,8 @@ const (
 //	26:28 reserved
 //	28:32 indexSize       uint32
 //	32:36 appDataSize     uint32
-//	36:68 reserved
-//	68:72 appDataCRC      uint32   (CRC32C of the app-data section)
-//	72:76 crc32c          uint32   (over trailer[:trailerCRCEnd])
+//	36:40 appDataCRC      uint32   (CRC32C of the app-data section)
+//	40:44 crc32c          uint32   (over trailer[:trailerCRCEnd])
 const (
 	tOffMagic          = 0
 	tOffVersion        = 4
@@ -45,8 +44,8 @@ const (
 	tOffIndexGroupSize = 24
 	tOffIndexSize      = 28
 	tOffAppDataSize    = 32
-	tOffAppDataCRC     = 68
-	tOffCRC            = 72
+	tOffAppDataCRC     = 36
+	tOffCRC            = 40
 	trailerCRCEnd      = tOffCRC // bytes [0:trailerCRCEnd] are CRC-covered
 )
 
@@ -103,7 +102,7 @@ func (t Trailer) marshal(dst []byte) {
 	binary.LittleEndian.PutUint32(dst[tOffCRC:], crc32c(dst[:trailerCRCEnd]))
 }
 
-// unmarshalTrailer parses a 76-byte trailer from the tail of src (src must be
+// unmarshalTrailer parses a 44-byte trailer from the tail of src (src must be
 // at least trailerSize bytes). Validates magic, version, CRC32C, unknown flag
 // bits, and indexGroupSize. Returns ErrMagic, ErrVersion, ErrChecksum, or a
 // wrapped ErrCorrupt on validation failure.

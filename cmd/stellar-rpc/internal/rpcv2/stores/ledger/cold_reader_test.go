@@ -390,11 +390,11 @@ func TestColdReader_WithLedgerPassesCallbackErrorThrough(t *testing.T) {
 func TestColdReader_CorruptAppDataIsCorrupt(t *testing.T) {
 	path, _ := writeFixturePack(t, 100, 8)
 
-	// App data sits immediately before the 76-byte trailer; the reader now
+	// App data sits immediately before the 44-byte trailer; the reader now
 	// covers it with a CRC32C, so one flipped bit must fail the open.
 	b, err := os.ReadFile(path)
 	require.NoError(t, err)
-	const trailerSize = 76
+	const trailerSize = 44
 	b[len(b)-trailerSize-1] ^= 0x01
 	require.NoError(t, os.WriteFile(path, b, 0o600))
 

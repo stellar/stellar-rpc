@@ -17,7 +17,7 @@ import (
 
 // --- helpers -----------------------------------------------------------------
 
-// parsedTrailer mirrors the fields packed into the 76-byte trailer.
+// parsedTrailer mirrors the fields packed into the 44-byte trailer.
 type parsedTrailer struct {
 	magic          uint32
 	version        uint8

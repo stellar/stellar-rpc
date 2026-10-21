@@ -887,7 +887,7 @@ func TestColdReader_CorruptIndexOffsetsIsCorrupt(t *testing.T) {
 	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
 
 	// The offsets index sits between the last record and the trailer; app data
-	// is empty for index.pack, so it ends 76 bytes before EOF.
+	// is empty for index.pack, so it ends 44 bytes before EOF.
 	indexPath := filepath.Join(dir, IndexPackName(chunkID))
 	b, err := os.ReadFile(indexPath)
 	require.NoError(t, err)
@@ -896,7 +896,7 @@ func TestColdReader_CorruptIndexOffsetsIsCorrupt(t *testing.T) {
 	tr, err := pr.Trailer()
 	require.NoError(t, err)
 	require.Positive(t, tr.IndexSize)
-	flipByteAt(t, indexPath, len(b)-76-int(tr.IndexSize))
+	flipByteAt(t, indexPath, len(b)-44-int(tr.IndexSize))
 
 	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
@@ -922,7 +922,7 @@ func TestColdReader_CloseOnlySurfacesCorrupt(t *testing.T) {
 	tr, err := pr.Trailer()
 	require.NoError(t, err)
 	require.Positive(t, tr.IndexSize)
-	flipByteAt(t, indexPath, len(b)-76-int(tr.IndexSize))
+	flipByteAt(t, indexPath, len(b)-44-int(tr.IndexSize))
 
 	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
@@ -935,9 +935,9 @@ func TestColdReader_CloseOnlySurfacesCorrupt(t *testing.T) {
 func clearRecordChecksumFlag(t *testing.T, path string) {
 	t.Helper()
 	const (
-		trailerSize = 76
+		trailerSize = 44
 		offFlags    = 5
-		offCRC      = 72
+		offCRC      = 40
 		flagRecord  = 1 << 1
 	)
 	b, err := os.ReadFile(path)

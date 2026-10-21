@@ -366,7 +366,7 @@ Reads throughout this section use `pread` — positioned read at a specific file
 ├──────────────────────────────────┤  (optional)
 │ app data                         │
 ├──────────────────────────────────┤
-│ trailer (76 bytes)               │
+│ trailer (44 bytes)               │
 └──────────────────────────────────┘  EOF
 ```
 
@@ -480,8 +480,8 @@ File layout:
   191     Record 1  (≈ 246 B)
   437     Record 2  (≈ 125 B)
   562     Offset index (12 B)
-  574     Trailer (76 B)
-  650     EOF
+  574     Trailer (44 B)
+  618     EOF
 ```
 
 **With `ItemsPerRecord=1`** (5 records, same items):
@@ -504,13 +504,13 @@ File layout:
   347     Record 3  (≈ 70 B)
   417     Record 4  (≈ 125 B)
   542     Offset index (14 B)
-  556     Trailer (76 B)
-  632     EOF
+  556     Trailer (44 B)
+  600     EOF
 ```
 
 Key difference: with `ItemsPerRecord=2`, each multi-item record carries an item size index so the reader can find individual items inside the decompressed payload. With `ItemsPerRecord=1`, that disappears entirely — each read fetches exactly one item, no slicing needed. The tradeoff is 5 index entries instead of 3.
 
-### Trailer (76 bytes at EOF)
+### Trailer (44 bytes at EOF)
 
 ```
 Offset  Size  Type      Field
@@ -526,9 +526,8 @@ Offset  Size  Type      Field
 26      2     —         reserved
 28      4     uint32    indexSize (offset index bytes + 4-byte CRC32C)
 32      4     uint32    appDataSize (0 if none)
-36      32    —         reserved
-68      4     uint32    appDataCRC (CRC32C of the app data section)
-72      4     uint32    CRC32C of trailer[0:72]
+36      4     uint32    appDataCRC (CRC32C of the app data section)
+40      4     uint32    CRC32C of trailer[0:40]
 ```
 
 Flags (uint8):
@@ -536,13 +535,13 @@ Flags (uint8):
 
 All other bits are reserved. The reader validates flags against `knownFlags` and rejects files with unknown flag bits.
 
-The `Checksum` at offset 72 covers `trailer[0:72]`.
+The `Checksum` at offset 40 covers `trailer[0:40]`.
 
 ### Integrity
 
 **Index checksum:** CRC32C of the raw offset index bytes. Verified on open before decoding. After decoding, the reader also asserts that the running offset sum equals `indexBase` — an independent structural invariant that catches encode/decode logic bugs.
 
-**Trailer checksum:** CRC32C of `trailer[0:72]` protects all structural fields, including `appDataCRC`.
+**Trailer checksum:** CRC32C of `trailer[0:40]` protects all structural fields, including `appDataCRC`.
 
 **App data checksum:** CRC32C of the app-data section, stored in the trailer and verified on open, unconditionally. The section is opaque to the library, so nothing here can check it structurally, and a consumer's own decoder cannot tell plausible corruption from real data. An artifact built before this fails to open and gets rebuilt.
 
