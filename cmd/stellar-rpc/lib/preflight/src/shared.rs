@@ -13,15 +13,14 @@
 // `crate::`.
 use super::soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
 use super::soroban_env_host::xdr::{
-    AccountId, ExtendFootprintTtlOp, HostFunction, InvokeHostFunctionOp, LedgerEntry,
-    LedgerFootprint, LedgerKey, OperationBody, ReadXdr, ScErrorCode, ScErrorType,
-    SorobanTransactionData, WriteXdr,
+    AccountId, Error as XdrError, ExtendFootprintTtlOp, HostFunction, InvokeHostFunctionOp,
+    LedgerEntry, LedgerFootprint, LedgerKey, Limits, OperationBody, ReadXdr, ScErrorCode,
+    ScErrorType, SorobanTransactionData, WriteXdr,
 };
 use super::soroban_env_host::{LedgerInfo, DEFAULT_XDR_RW_LIMITS};
 use super::soroban_simulation::simulation::{
     simulate_extend_ttl_op, simulate_invoke_host_function_op, simulate_restore_op,
-    InvokeHostFunctionSimulationResult, LedgerEntryDiff, RestoreOpSimulationResult,
-    SimulationAdjustmentConfig,
+    InvokeHostFunctionSimulationResult, RestoreOpSimulationResult, SimulationAdjustmentConfig,
 };
 use super::soroban_simulation::{AutoRestoringSnapshotSource, NetworkConfig};
 
@@ -30,12 +29,10 @@ use super::soroban_simulation::{AutoRestoringSnapshotSource, NetworkConfig};
 // of the `shared` module import the same definitions for these.
 
 use crate::{
-    anyhow, extract_error_string, from_c_string, from_c_xdr, string_to_c, vec_to_c_array,
-    CLedgerInfo, CPreflightResult, CResourceConfig, CXDRDiff, CXDRDiffVector, CXDRVector, Digest,
-    GoLedgerStorage, Result, Sha256, CXDR,
+    anyhow, extract_error_string, from_c_string, from_c_xdr, CLedgerInfo, CResourceConfig, Digest,
+    GoLedgerStorage, PreflightOutput, Result, Sha256, CXDR, MAX_RESULT_BYTES,
 };
 use std::convert::TryFrom;
-use std::ptr::null_mut;
 use std::rc::Rc;
 
 #[derive(Clone, Copy)]
@@ -59,58 +56,58 @@ fn fill_ledger_info(c_ledger_info: CLedgerInfo, network_config: &NetworkConfig) 
     ledger_info
 }
 
-// This has to be a free function rather than a method on an impl because there
-// are two copies of this file mounted in the module tree and we can't define a
-// same-named method on a single Self-type twice.
-fn new_cpreflight_result_from_invoke_host_function(
-    invoke_hf_result: InvokeHostFunctionSimulationResult,
-    restore_preamble: Option<RestoreOpSimulationResult>,
+fn output_from_invoke_host_function(
+    invoke_hf_result: &InvokeHostFunctionSimulationResult,
     error: String,
-) -> CPreflightResult {
-    let mut result = CPreflightResult {
-        error: string_to_c(error),
-        auth: xdr_vec_to_c(&invoke_hf_result.auth),
-        result: option_xdr_to_c(invoke_hf_result.invoke_result.ok().as_ref()),
+) -> Result<PreflightOutput> {
+    let mut remaining = MAX_RESULT_BYTES;
+    Ok(PreflightOutput {
+        error,
+        auth: encode_all(&invoke_hf_result.auth, &mut remaining)?,
+        result: encode_option(invoke_hf_result.invoke_result.as_ref().ok(), &mut remaining)?,
         min_fee: invoke_hf_result
             .transaction_data
             .as_ref()
-            .map_or_else(|| 0, |r| r.resource_fee),
-        transaction_data: option_xdr_to_c(invoke_hf_result.transaction_data.as_ref()),
+            .map_or(0, |r| r.resource_fee),
+        transaction_data: encode_option(
+            invoke_hf_result.transaction_data.as_ref(),
+            &mut remaining,
+        )?,
         // TODO: Diagnostic and contract events should be separated in the response
-        events: xdr_vec_to_c(&invoke_hf_result.diagnostic_events),
+        events: encode_all(&invoke_hf_result.diagnostic_events, &mut remaining)?,
         cpu_instructions: u64::from(invoke_hf_result.simulated_instructions),
         memory_bytes: u64::from(invoke_hf_result.simulated_memory),
-        ledger_entry_diff: ledger_entry_diff_vec_to_c(&invoke_hf_result.modified_entries),
-        pre_restore_transaction_data: CXDR::default(),
-        pre_restore_min_fee: 0,
-    };
-    if let Some(p) = restore_preamble {
-        result.pre_restore_min_fee = p.transaction_data.resource_fee;
-        result.pre_restore_transaction_data = xdr_to_c(&p.transaction_data);
-    }
-    result
+        ledger_entry_diff: invoke_hf_result
+            .modified_entries
+            .iter()
+            .map(|diff| {
+                Ok((
+                    encode_option(diff.state_before.as_ref(), &mut remaining)?,
+                    encode_option(diff.state_after.as_ref(), &mut remaining)?,
+                ))
+            })
+            .collect::<Result<_>>()?,
+        ..Default::default()
+    })
 }
 
-// This has to be a free function rather than a method on an impl because there
-// are two copies of this file mounted in the module tree and we can't define a
-// same-named method on a single Self-type twice.
-fn new_cpreflight_result_from_transaction_data(
+fn output_from_transaction_data(
     transaction_data: Option<&SorobanTransactionData>,
     restore_preamble: Option<&RestoreOpSimulationResult>,
     error: String,
-) -> CPreflightResult {
-    let min_fee = transaction_data.map_or(0, |d| d.resource_fee);
-    let mut result = CPreflightResult {
-        transaction_data: option_xdr_to_c(transaction_data),
-        min_fee,
+) -> Result<PreflightOutput> {
+    let mut remaining = MAX_RESULT_BYTES;
+    Ok(PreflightOutput {
+        error,
+        transaction_data: encode_option(transaction_data, &mut remaining)?,
+        min_fee: transaction_data.map_or(0, |d| d.resource_fee),
+        pre_restore_transaction_data: encode_option(
+            restore_preamble.map(|p| &p.transaction_data),
+            &mut remaining,
+        )?,
+        pre_restore_min_fee: restore_preamble.map_or(0, |p| p.transaction_data.resource_fee),
         ..Default::default()
-    };
-    result.set_error(error);
-    if let Some(p) = restore_preamble {
-        result.pre_restore_min_fee = p.transaction_data.resource_fee;
-        result.pre_restore_transaction_data = xdr_to_c(&p.transaction_data);
-    }
-    result
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -123,7 +120,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
     enable_debug: bool,
     auth_mode: AuthMode,
     use_upgraded_auth: bool,
-) -> Result<CPreflightResult> {
+) -> Result<PreflightOutput> {
     let invoke_hf_op =
         InvokeHostFunctionOp::from_xdr(unsafe { from_c_xdr(invoke_hf_op) }, DEFAULT_XDR_RW_LIMITS)
             .unwrap();
@@ -177,7 +174,7 @@ pub(crate) fn preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
     auth_mode: RecordingInvocationAuthMode,
     source_account: &AccountId,
     enable_debug: bool,
-) -> Result<CPreflightResult> {
+) -> Result<PreflightOutput> {
     // TODO: A restore preamble should be generated when network limits are surpassed.
     //       See https://github.com/stellar/stellar-rpc/issues/464
     let invoke_hf_result: InvokeHostFunctionSimulationResult = simulate_invoke_host_function_op(
@@ -196,11 +193,7 @@ pub(crate) fn preflight_invoke_hf_op_post_autorestore_or_maybe_panic(
         .as_ref()
         .map_err(|e| anyhow!("HostError: {:?}", e.error));
     let error_str = extract_error_string(&invoke_result, go_storage.as_ref());
-    Ok(new_cpreflight_result_from_invoke_host_function(
-        invoke_hf_result,
-        None,
-        error_str,
-    ))
+    output_from_invoke_host_function(&invoke_hf_result, error_str)
 }
 
 pub(crate) fn preflight_footprint_ttl_op_or_maybe_panic(
@@ -208,7 +201,7 @@ pub(crate) fn preflight_footprint_ttl_op_or_maybe_panic(
     op_body: CXDR,
     footprint: CXDR,
     c_ledger_info: CLedgerInfo,
-) -> Result<CPreflightResult> {
+) -> Result<PreflightOutput> {
     let op_body = OperationBody::from_xdr(unsafe { from_c_xdr(op_body) }, DEFAULT_XDR_RW_LIMITS)?;
     let footprint =
         LedgerFootprint::from_xdr(unsafe { from_c_xdr(footprint) }, DEFAULT_XDR_RW_LIMITS)?;
@@ -224,7 +217,7 @@ pub(crate) fn preflight_footprint_ttl_op_or_maybe_panic(
             preflight_extend_ttl_op(&extend_op, footprint.read_only.as_slice(), &go_storage, &network_config, &ledger_info)
         }
         OperationBody::RestoreFootprint(_) => {
-            Ok(preflight_restore_op(footprint.read_write.as_slice(), &go_storage, &network_config, &ledger_info))
+            preflight_restore_op(footprint.read_write.as_slice(), &go_storage, &network_config, &ledger_info)
         }
         _ => Err(anyhow!("encountered unsupported operation type: '{:?}', instead of 'ExtendFootprintTtl' or 'RestoreFootprint' operations.",
             op_body.discriminant()))
@@ -237,7 +230,7 @@ fn preflight_extend_ttl_op(
     go_storage: &Rc<GoLedgerStorage>,
     network_config: &NetworkConfig,
     ledger_info: &LedgerInfo,
-) -> Result<CPreflightResult> {
+) -> Result<PreflightOutput> {
     let auto_restore_snapshot = AutoRestoringSnapshotSource::new(go_storage.clone(), ledger_info)?;
     let simulation_result = simulate_extend_ttl_op(
         &auto_restore_snapshot,
@@ -260,11 +253,11 @@ fn preflight_extend_ttl_op(
     };
 
     let error_str = extract_error_string(&maybe_restore_result, go_storage);
-    Ok(new_cpreflight_result_from_transaction_data(
+    output_from_transaction_data(
         maybe_transaction_data.as_ref(),
         maybe_restore_result.ok().flatten().as_ref(),
         error_str,
-    ))
+    )
 }
 
 fn preflight_restore_op(
@@ -272,7 +265,7 @@ fn preflight_restore_op(
     go_storage: &Rc<GoLedgerStorage>,
     network_config: &NetworkConfig,
     ledger_info: &LedgerInfo,
-) -> CPreflightResult {
+) -> Result<PreflightOutput> {
     let simulation_result = simulate_restore_op(
         go_storage.as_ref(),
         network_config,
@@ -281,51 +274,36 @@ fn preflight_restore_op(
         keys_to_restore,
     );
     let error_str = extract_error_string(&simulation_result, go_storage.as_ref());
-    new_cpreflight_result_from_transaction_data(
+    output_from_transaction_data(
         simulation_result.ok().map(|r| r.transaction_data).as_ref(),
         None,
         error_str,
     )
 }
 
-// TODO: We could use something like https://github.com/sonos/ffi-convert-rs
-//       to replace all the free_* , *_to_c and from_c_* functions by implementations of CDrop,
-//       CReprOf and AsRust
-fn xdr_to_c(v: &impl WriteXdr) -> CXDR {
-    let (xdr, len) = vec_to_c_array(v.to_xdr(DEFAULT_XDR_RW_LIMITS).unwrap());
-    CXDR { xdr, len }
+// Encodes `v` within the `remaining` byte budget shared by every field of a
+// preflight result.
+fn encode(v: &impl WriteXdr, remaining: &mut usize) -> Result<Vec<u8>> {
+    let limits = Limits {
+        depth: DEFAULT_XDR_RW_LIMITS.depth,
+        len: *remaining,
+    };
+    let xdr = v.to_xdr(limits).map_err(|e| match e {
+        XdrError::LengthLimitExceeded => {
+            anyhow!("simulation result exceeds {MAX_RESULT_BYTES} bytes")
+        }
+        e => e.into(),
+    })?;
+    *remaining -= xdr.len();
+    Ok(xdr)
 }
 
-fn option_xdr_to_c(v: Option<&impl WriteXdr>) -> CXDR {
-    v.map_or(
-        CXDR {
-            xdr: null_mut(),
-            len: 0,
-        },
-        xdr_to_c,
-    )
+fn encode_option(v: Option<&impl WriteXdr>, remaining: &mut usize) -> Result<Option<Vec<u8>>> {
+    v.map(|v| encode(v, remaining)).transpose()
 }
 
-fn ledger_entry_diff_to_c(v: &LedgerEntryDiff) -> CXDRDiff {
-    CXDRDiff {
-        before: option_xdr_to_c(v.state_before.as_ref()),
-        after: option_xdr_to_c(v.state_after.as_ref()),
-    }
-}
-
-fn xdr_vec_to_c(v: &[impl WriteXdr]) -> CXDRVector {
-    let c_v = v.iter().map(xdr_to_c).collect();
-    let (array, len) = vec_to_c_array(c_v);
-    CXDRVector { array, len }
-}
-
-fn ledger_entry_diff_vec_to_c(modified_entries: &[LedgerEntryDiff]) -> CXDRDiffVector {
-    let c_diffs = modified_entries
-        .iter()
-        .map(ledger_entry_diff_to_c)
-        .collect();
-    let (array, len) = vec_to_c_array(c_diffs);
-    CXDRDiffVector { array, len }
+fn encode_all(v: &[impl WriteXdr], remaining: &mut usize) -> Result<Vec<Vec<u8>>> {
+    v.iter().map(|v| encode(v, remaining)).collect()
 }
 
 impl From<u32> for AuthMode {
@@ -394,5 +372,61 @@ impl super::soroban_env_host::storage::SnapshotSource for crate::GoLedgerStorage
         super::soroban_env_host::HostError,
     > {
         get_fallible_from_go_ledger_storage(self, key.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::soroban_env_host::xdr::{
+        ContractEvent, ContractEventBody, ContractEventType, ContractEventV0, DiagnosticEvent,
+        ExtensionPoint, ScBytes, ScVal, VecM,
+    };
+    use super::*;
+
+    fn bytes(len: usize) -> ScVal {
+        ScVal::Bytes(ScBytes(vec![0; len].try_into().unwrap()))
+    }
+
+    fn event(data: ScVal) -> DiagnosticEvent {
+        DiagnosticEvent {
+            in_successful_contract_call: true,
+            event: ContractEvent {
+                ext: ExtensionPoint::V0,
+                contract_id: None,
+                type_: ContractEventType::Diagnostic,
+                body: ContractEventBody::V0(ContractEventV0 {
+                    topics: VecM::default(),
+                    data,
+                }),
+            },
+        }
+    }
+
+    #[test]
+    fn events_count_toward_the_result_limit() {
+        let half = bytes(MAX_RESULT_BYTES / 2);
+        let simulation = InvokeHostFunctionSimulationResult {
+            invoke_result: Ok(half.clone()),
+            auth: vec![],
+            contract_events: vec![],
+            diagnostic_events: vec![event(half)],
+            transaction_data: None,
+            simulated_instructions: 0,
+            simulated_memory: 0,
+            modified_entries: vec![],
+        };
+        let err = output_from_invoke_host_function(&simulation, String::new())
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn fields_share_one_byte_budget() {
+        let half = bytes(MAX_RESULT_BYTES / 2);
+        let mut remaining = MAX_RESULT_BYTES;
+        assert!(encode_all(std::slice::from_ref(&half), &mut remaining).is_ok());
+        let err = encode_all(&[half], &mut remaining).unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err}");
     }
 }

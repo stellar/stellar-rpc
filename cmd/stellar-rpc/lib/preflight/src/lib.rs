@@ -81,9 +81,8 @@ mod prev {
 }
 
 use std::cell::RefCell;
-use std::mem;
 use std::panic;
-use std::ptr::null_mut;
+use std::ptr::{null_mut, slice_from_raw_parts_mut};
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -103,15 +102,6 @@ pub struct CXDRVector {
     pub len: libc::size_t,
 }
 
-impl Default for CXDRVector {
-    fn default() -> Self {
-        CXDRVector {
-            array: null_mut(),
-            len: 0,
-        }
-    }
-}
-
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct CXDRDiff {
@@ -124,15 +114,6 @@ pub struct CXDRDiff {
 pub struct CXDRDiffVector {
     pub array: *mut CXDRDiff,
     pub len: libc::size_t,
-}
-
-impl Default for CXDRDiffVector {
-    fn default() -> Self {
-        CXDRDiffVector {
-            array: null_mut(),
-            len: 0,
-        }
-    }
 }
 
 #[repr(C)]
@@ -166,35 +147,83 @@ pub struct CPreflightResult {
     pub ledger_entry_diff: CXDRDiffVector,
 }
 
-impl Default for CPreflightResult {
-    fn default() -> Self {
+/// The most XDR bytes a preflight result may carry back to Go, summed over all
+/// of its fields.
+const MAX_RESULT_BYTES: usize = 16 * 1024 * 1024;
+
+/// The XDR of a ledger entry before and after the simulation changed it.
+type EntryDiff = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// A preflight result while it is still owned by Rust. It is converted to a
+/// `CPreflightResult` only once complete, so a failure part-way through
+/// building it leaks nothing.
+#[derive(Default)]
+struct PreflightOutput {
+    error: String,
+    auth: Vec<Vec<u8>>,
+    result: Option<Vec<u8>>,
+    transaction_data: Option<Vec<u8>>,
+    min_fee: i64,
+    events: Vec<Vec<u8>>,
+    cpu_instructions: u64,
+    memory_bytes: u64,
+    pre_restore_transaction_data: Option<Vec<u8>>,
+    pre_restore_min_fee: i64,
+    ledger_entry_diff: Vec<EntryDiff>,
+}
+
+impl PreflightOutput {
+    fn error(error: String) -> Self {
         Self {
-            error: safe_cstring(String::new()).into_raw(),
-            auth: CXDRVector::default(),
-            result: CXDR::default(),
-            transaction_data: CXDR::default(),
-            min_fee: 0,
-            events: CXDRVector::default(),
-            cpu_instructions: 0,
-            memory_bytes: 0,
-            pre_restore_transaction_data: CXDR::default(),
-            pre_restore_min_fee: 0,
-            ledger_entry_diff: CXDRDiffVector::default(),
+            error,
+            ..Default::default()
+        }
+    }
+
+    // TODO: We could use something like https://github.com/sonos/ffi-convert-rs
+    //       to replace all the free_* , *_to_c and from_c_* functions by implementations of CDrop,
+    //       CReprOf and AsRust
+    fn into_c(self) -> CPreflightResult {
+        let diffs = self
+            .ledger_entry_diff
+            .into_iter()
+            .map(|(before, after)| CXDRDiff {
+                before: option_bytes_to_c(before),
+                after: option_bytes_to_c(after),
+            })
+            .collect();
+        let (diff_array, diff_len) = vec_to_c_array(diffs);
+        CPreflightResult {
+            error: string_to_c(self.error),
+            auth: bytes_vec_to_c(self.auth),
+            result: option_bytes_to_c(self.result),
+            transaction_data: option_bytes_to_c(self.transaction_data),
+            min_fee: self.min_fee,
+            events: bytes_vec_to_c(self.events),
+            cpu_instructions: self.cpu_instructions,
+            memory_bytes: self.memory_bytes,
+            pre_restore_transaction_data: option_bytes_to_c(self.pre_restore_transaction_data),
+            pre_restore_min_fee: self.pre_restore_min_fee,
+            ledger_entry_diff: CXDRDiffVector {
+                array: diff_array,
+                len: diff_len,
+            },
         }
     }
 }
 
-impl CPreflightResult {
-    /// Safely sets the error on the internal structure. By default, error
-    /// is an empty string, so setting it with
-    ///
-    ///     { error: message, ..Default::default() }
-    ///
-    /// syntax causes a memory leak. This method ensures memory is managed correctly.
-    fn set_error(&mut self, error: String) {
-        unsafe { free_c_string(self.error) };
-        self.error = safe_cstring(error).into_raw();
-    }
+fn bytes_to_c(v: Vec<u8>) -> CXDR {
+    let (xdr, len) = vec_to_c_array(v);
+    CXDR { xdr, len }
+}
+
+fn option_bytes_to_c(v: Option<Vec<u8>>) -> CXDR {
+    v.map_or_else(CXDR::default, bytes_to_c)
+}
+
+fn bytes_vec_to_c(v: Vec<Vec<u8>>) -> CXDRVector {
+    let (array, len) = vec_to_c_array(v.into_iter().map(bytes_to_c).collect());
+    CXDRVector { array, len }
 }
 
 #[no_mangle]
@@ -267,17 +296,6 @@ pub extern "C" fn preflight_footprint_ttl_op(
     })
 }
 
-fn preflight_error(str: String) -> CPreflightResult {
-    let mut result = CPreflightResult::default();
-    result.set_error(str);
-    result
-}
-
-// Safety: CPreflightResult is constructed on the worker thread and returned
-// via join(). All raw pointers it contains are Rust-allocated and ownership
-// is transferred to the caller. No concurrent access occurs.
-unsafe impl Send for CPreflightResult {}
-
 /// A zero-cost wrapper that asserts the contained value is safe to send across
 /// thread boundaries.
 ///
@@ -319,57 +337,55 @@ const SIMULATION_THREAD_STACK_SIZE: usize = 100 * 1024 * 1024;
 /// Go callbacks (`SnapshotSourceGet`, `FreeGoLedgerEntryAndTTL`) invoked from
 /// the worker thread are handled by Go's `needm`/`dropm` mechanism, which is
 /// the well-tested path for C->Go callbacks originating outside of a goroutine.
-fn catch_preflight_panic(op: &dyn Fn() -> Result<CPreflightResult>) -> *mut CPreflightResult {
+fn catch_preflight_panic(op: &dyn Fn() -> Result<PreflightOutput>) -> *mut CPreflightResult {
     // Wrap the reference in AssertSend so it can be moved into the scoped
     // thread. Soundness argument is in the `AssertSend` doc comment above.
     let op = AssertSend(op);
-    let c_preflight_result = std::thread::scope(|s| {
+    let output = std::thread::scope(|s| {
         let join_handle = std::thread::Builder::new()
             .name("preflight-worker".into())
             .stack_size(SIMULATION_THREAD_STACK_SIZE)
             .spawn_scoped(s, move || {
                 // catch panics before they reach foreign callers (which otherwise would result in
                 // undefined behavior)
-                let res: std::thread::Result<Result<CPreflightResult>> =
+                let res: std::thread::Result<Result<PreflightOutput>> =
                     panic::catch_unwind(panic::AssertUnwindSafe(op.into_inner()));
                 match res {
                     Err(panic) => match panic.downcast::<String>() {
-                        Ok(panic_msg) => {
-                            preflight_error(format!("panic during preflight() call: {panic_msg}"))
-                        }
-                        Err(_) => preflight_error(
+                        Ok(panic_msg) => PreflightOutput::error(format!(
+                            "panic during preflight() call: {panic_msg}"
+                        )),
+                        Err(_) => PreflightOutput::error(
                             "panic during preflight() call: unknown cause".to_string(),
                         ),
                     },
                     // See https://docs.rs/anyhow/latest/anyhow/struct.Error.html#display-representations
-                    Ok(r) => r.unwrap_or_else(|e| preflight_error(format!("{e:?}"))),
+                    Ok(r) => r.unwrap_or_else(|e| PreflightOutput::error(format!("{e:#}"))),
                 }
             });
         match join_handle {
             Ok(handle) => handle.join().unwrap_or_else(|_| {
-                preflight_error("preflight worker thread panicked".to_string())
+                PreflightOutput::error("preflight worker thread panicked".to_string())
             }),
-            Err(e) => preflight_error(format!("failed to spawn preflight worker thread: {e}")),
+            Err(e) => {
+                PreflightOutput::error(format!("failed to spawn preflight worker thread: {e}"))
+            }
         }
     });
     // transfer ownership to caller
     // caller needs to invoke free_preflight_result(result) when done
-    Box::into_raw(Box::new(c_preflight_result))
+    Box::into_raw(Box::new(output.into_c()))
 }
 
-fn vec_to_c_array<T>(mut v: Vec<T>) -> (*mut T, libc::size_t) {
-    // Make sure length and capacity are the same
-    // (this allows using the length as the capacity when deallocating the vector)
-    v.shrink_to_fit();
+fn vec_to_c_array<T>(v: Vec<T>) -> (*mut T, libc::size_t) {
+    // Go throws if a goroutine stack it copies holds Rust's dangling
+    // empty-slice pointer, so empty slices cross as null.
+    if v.is_empty() {
+        return (null_mut(), 0);
+    }
+    // The free_* functions rebuild the boxed slice from the pointer and length.
     let len = v.len();
-    assert_eq!(len, v.capacity());
-
-    // Get the pointer to our vector, we will deallocate it in free_c_null_terminated_char_array()
-    // TODO: replace by `out_vec.into_raw_parts()` once the API stabilizes
-    let ptr = v.as_mut_ptr();
-    mem::forget(v);
-
-    (ptr, len)
+    (Box::into_raw(v.into_boxed_slice()).cast::<T>(), len)
 }
 
 /// .
@@ -396,24 +412,16 @@ fn free_c_xdr(xdr: CXDR) {
     if xdr.xdr.is_null() {
         return;
     }
-    unsafe {
-        // We intentionally use len for both length and capacity because the
-        // allocation was shrunk to fit (see vec_to_c_array).
-        #[allow(clippy::same_length_and_capacity)]
-        drop(Vec::from_raw_parts(xdr.xdr, xdr.len, xdr.len));
-    }
+    unsafe { drop(Box::from_raw(slice_from_raw_parts_mut(xdr.xdr, xdr.len))) };
 }
 
 fn free_c_xdr_array(xdr_array: CXDRVector) {
     if xdr_array.array.is_null() {
         return;
     }
-    unsafe {
-        #[allow(clippy::same_length_and_capacity)]
-        let v = Vec::from_raw_parts(xdr_array.array, xdr_array.len, xdr_array.len);
-        for xdr in v {
-            free_c_xdr(xdr);
-        }
+    let v = unsafe { Box::from_raw(slice_from_raw_parts_mut(xdr_array.array, xdr_array.len)) };
+    for &xdr in &*v {
+        free_c_xdr(xdr);
     }
 }
 
@@ -421,13 +429,10 @@ fn free_c_xdr_diff_array(xdr_array: CXDRDiffVector) {
     if xdr_array.array.is_null() {
         return;
     }
-    unsafe {
-        #[allow(clippy::same_length_and_capacity)]
-        let v = Vec::from_raw_parts(xdr_array.array, xdr_array.len, xdr_array.len);
-        for diff in v {
-            free_c_xdr(diff.before);
-            free_c_xdr(diff.after);
-        }
+    let v = unsafe { Box::from_raw(slice_from_raw_parts_mut(xdr_array.array, xdr_array.len)) };
+    for diff in &*v {
+        free_c_xdr(diff.before);
+        free_c_xdr(diff.after);
     }
 }
 
@@ -512,7 +517,7 @@ mod tests {
         // 10_000 frames x 4 KiB ~= 40 MiB of stack
         let result = catch_preflight_panic(&|| {
             let _ = recurse(10_000);
-            Ok(CPreflightResult::default())
+            Ok(PreflightOutput::default())
         });
 
         unsafe {
@@ -524,5 +529,14 @@ mod tests {
             );
             free_preflight_result(result);
         }
+    }
+
+    #[test]
+    fn empty_arrays_cross_as_null() {
+        let result = PreflightOutput::default().into_c();
+        assert!(result.auth.array.is_null());
+        assert!(result.events.array.is_null());
+        assert!(result.ledger_entry_diff.array.is_null());
+        unsafe { free_preflight_result(Box::into_raw(Box::new(result))) };
     }
 }
