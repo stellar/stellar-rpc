@@ -186,7 +186,7 @@ func newBenchCommand(
 		},
 	}
 	cmd.Flags().StringVar(&outDir, "out", "bench-out",
-		"output dir for the CSV report and run.json; must be missing or empty")
+		"output dir for the report files and run.json; must be missing or empty")
 	prof.bind(cmd)
 	return cmd
 }
