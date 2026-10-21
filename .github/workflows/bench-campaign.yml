@@ -894,6 +894,8 @@ jobs:
           EXCERPT: ${{ steps.result.outputs.excerpt }}
           HARNESS_SHA: ${{ github.sha }}
           WEBHOOK: ${{ secrets.SLACK_BENCH_WEBHOOK_URL }}
+          # Slack posts are off unless the repo variable BENCH_SLACK_ENABLED is "true".
+          SLACK_ENABLED: ${{ vars.BENCH_SLACK_ENABLED || 'false' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
@@ -926,6 +928,10 @@ jobs:
           TEXT=$(jq -r '.attachments[0].fallback' /tmp/slack.json)
           echo "$TEXT"
           echo "$TEXT" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SLACK_ENABLED" != "true" ]; then
+            echo "Slack posts are disabled (BENCH_SLACK_ENABLED is not \"true\"); notification not delivered"
+            exit 0
+          fi
           if [ -z "$WEBHOOK" ]; then
             echo "::warning::SLACK_BENCH_WEBHOOK_URL is unset; notification not delivered"
             exit 0
