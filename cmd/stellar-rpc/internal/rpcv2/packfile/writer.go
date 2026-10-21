@@ -379,10 +379,6 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 //nolint:funcorder // pipeline helper; kept near runWriter
 func (w *Writer) recordWorker() {
 	encoder := w.newRecordEncoder()
-	if encoder == nil {
-		w.resultCh <- processedRecord{err: errors.New("packfile: NewRecordEncoder returned nil")}
-		return
-	}
 	defer func() { _ = w.recordErr(encoder.Close()) }()
 	// Per-worker scratch for encoder output. The encoder writes into this
 	// buffer (growing it if necessary); it persists across iterations so

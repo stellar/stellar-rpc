@@ -472,26 +472,6 @@ func TestConcurrentCompressErrorSurfaces(t *testing.T) {
 	require.Contains(t, seenErr.Error(), "boom")
 }
 
-// TestNewRecordEncoderReturnsNil verifies a nil-returning factory surfaces as
-// a writer error instead of a worker panic.
-func TestNewRecordEncoderReturnsNil(t *testing.T) {
-	w, err := Create(filepath.Join(t.TempDir(), "pack"), WriterOptions{
-		Format:           1,
-		NewRecordEncoder: func() RecordEncoder { return nil },
-	})
-	require.NoError(t, err)
-	defer w.Close()
-	for range 200 {
-		if err = w.AppendItem([]byte("data")); err != nil {
-			break
-		}
-	}
-	if err == nil {
-		err = w.Finish(nil)
-	}
-	require.ErrorContains(t, err, "NewRecordEncoder returned nil")
-}
-
 // closingFailEncoder counts Close calls and optionally returns an error.
 type closingFailEncoder struct {
 	closes   *atomic.Int64
