@@ -288,16 +288,9 @@ func (q *queryReport) write(outDir string) ([]string, error) {
 // when every scenario succeeded.
 func (q *queryReport) writeBench(outDir string) (string, error) {
 	path := filepath.Join(outDir, queryBenchFile)
-	f, err := os.Create(path)
-	if err != nil {
-		return "", fmt.Errorf("create %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-	if _, err := f.WriteString(q.benchText()); err != nil {
+	//nolint:gosec // readable like the CSVs, which os.Create writes; the report is not secret
+	if err := os.WriteFile(path, []byte(q.benchText()), 0o666); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		return "", fmt.Errorf("close %s: %w", path, err)
 	}
 	return path, nil
 }
