@@ -202,16 +202,20 @@ func doOpen(path string, firstRead func(int64) int) openResult {
 	if err != nil {
 		return openResult{err: fmt.Errorf("packfile: open %q: %w", path, err)}
 	}
+	var res openResult
+	// Closes f unless res took it; a panic in openFile leaves res empty, so it
+	// closes then too.
+	defer func() {
+		if res.file == nil {
+			_ = f.Close()
+		}
+	}()
 	adviseRandom(f)
 	fi, err := f.Stat()
 	if err != nil {
-		_ = f.Close()
 		return openResult{err: fmt.Errorf("packfile: stat: %w", err)}
 	}
-	res := openFile(f, fi.Size(), firstRead)
-	if res.err != nil {
-		_ = f.Close()
-	}
+	res = openFile(f, fi.Size(), firstRead)
 	return res
 }
 
