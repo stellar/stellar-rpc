@@ -207,7 +207,9 @@ at the end.
 ### `bench.txt`
 
 `bench query` writes `bench.txt` in Go benchmark format, for `benchstat`. It
-writes the file only when `run.json` has `status` `ok`.
+writes the file only when every scenario succeeds. Use it only when `run.json`
+has `status` `ok`: if the process stops or the last `run.json` write fails,
+`status` stays `running`.
 
 After the `goos` and `goarch` lines, the file has one line for each scenario,
 in run order. For `txhash` and `events`, when two or more outcomes have

@@ -284,11 +284,22 @@ func (q *queryReport) write(outDir string) ([]string, error) {
 	return written, nil
 }
 
-// stageBench stages bench.txt under outDir in staged and returns its final
-// path. Call it only for a run that succeeded.
-func (q *queryReport) stageBench(outDir string, staged *stagedFiles) (string, error) {
+// writeBench writes bench.txt under outDir and returns its path. Call it only
+// when every scenario succeeded.
+func (q *queryReport) writeBench(outDir string) (string, error) {
 	path := filepath.Join(outDir, queryBenchFile)
-	return path, staged.stage(path, []byte(q.benchText()))
+	f, err := os.Create(path)
+	if err != nil {
+		return "", fmt.Errorf("create %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteString(q.benchText()); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("close %s: %w", path, err)
+	}
+	return path, nil
 }
 
 // benchText renders bench.txt: the scenarios in Go benchmark format, for

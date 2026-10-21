@@ -214,7 +214,7 @@ func runQueryBench(
 	if err != nil {
 		return err
 	}
-	path, err := report.stageBench(env.OutDir, env.Staged)
+	path, err := report.writeBench(env.OutDir)
 	if err != nil {
 		return err
 	}

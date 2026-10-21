@@ -373,12 +373,9 @@ func TestQueryReportBenchText(t *testing.T) {
 	assert.Equal(t, strings.ReplaceAll(cold, "/tier=cold/", "/tier=hot/"), hot)
 
 	outDir := t.TempDir()
-	staged := &stagedFiles{}
-	path, err := q.stageBench(outDir, staged)
+	path, err := q.writeBench(outDir)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(outDir, queryBenchFile), path)
-	assert.NoFileExists(t, path, "a staged file has no final name before publish")
-	require.NoError(t, staged.publish())
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, q.benchText(), string(data))
