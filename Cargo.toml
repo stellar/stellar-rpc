@@ -12,14 +12,14 @@ libc = "0.2.147"
 anyhow = "1.0.75"
 serde_json = "1.0"
 
-# Keep each host's `version` line directly after `package`:
-# scripts/check-dependencies.bash reads the protocol from it.
 [workspace.dependencies.soroban-env-host-prev]
 package = "soroban-env-host"
 version = "=29.0.2"
 
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "0c99950e96128beba3319aa96b116646ce974e69"
 version = "=30.0.0"
 
 [workspace.dependencies.soroban-simulation-prev]
@@ -28,15 +28,13 @@ version = "=29.0.2"
 
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
-version = "=30.0.0"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "0c99950e96128beba3319aa96b116646ce974e69"
 features = ["unstable-next-api"]
+version = "=30.0.0"
 
 [workspace.dependencies.stellar-xdr]
-# The stellar-xdr release soroban-env-host-curr depends on.
 version = "=30.0.0"
-# `type_enum` provides the `Type`/`TypeVariant` reflection enums used by
-# xdr2json. It was enabled by default in stellar-xdr v26 but is opt-in since
-# v27.
 features = ["serde", "type_enum"]
 
 [workspace.dependencies.rand]
