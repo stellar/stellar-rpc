@@ -118,6 +118,27 @@ newest_bundle_tarball() {
   printf '%s' "$newest"
 }
 
+# sync_partial_results copies the results written so far to the run's partial/
+# prefix every 10 minutes, so a box that dies mid-campaign keeps its finished
+# legs. It uses `s3 cp`, not `s3 sync`, because the box role has PutObject but
+# no ListBucket on this bucket; every failure is swallowed.
+sync_partial_results() {
+  [ -n "$BUCKET" ] && [ -n "$RESULT_KEY" ] || return 0
+  while sleep 600; do
+    aws s3 cp --recursive --only-show-errors /mnt/nvme/bench/results/ \
+      "s3://$BUCKET/${RESULT_KEY%/*}/partial/" >/dev/null 2>&1 || true
+  done
+}
+
+# stop_partial_sync ends the sync loop; safe to call more than once.
+stop_partial_sync() {
+  kill "${PARTIAL_SYNC_PID:-}" 2>/dev/null || true
+}
+
+sync_partial_results &
+PARTIAL_SYNC_PID=$!
+trap 'stop_partial_sync; upload_box_log' EXIT TERM
+
 # The runner keeps its own campaign.log inside the bundle; this tee is for the
 # lines this fragment parses (`published:`) and the tail it puts in a failure
 # comment. pipefail is active so the `if` sees the runner's exit code, and the
@@ -127,6 +148,7 @@ log "running campaign"
 if (cd /root/stellar-rpc-benchmarks/runner \
     && BENCH_ROOT=/mnt/nvme/bench go run ./cmd/campaign run /root/bench-campaign.toml) \
     2>&1 | tee /tmp/campaign-console.log; then
+  stop_partial_sync
 
   # Exit 0 means every leg, the tarball, and the publish all succeeded, so the
   # runner printed `published: <dest>`. A missing line is defensive only.
@@ -162,6 +184,7 @@ if (cd /root/stellar-rpc-benchmarks/runner \
   poweroff
 
 else
+  stop_partial_sync
   # Non-zero: a leg failed, the tarball failed, or the publish failed. The
   # runner's epilogue runs after a failed leg — it writes the bundle's metadata,
   # tars /mnt/nvme/bench/results/<run id> into /tmp/bench-results-<run id>.tgz,
