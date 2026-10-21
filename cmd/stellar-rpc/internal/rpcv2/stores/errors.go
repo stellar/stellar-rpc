@@ -27,8 +27,8 @@ var ErrStoreClosed = errors.New("stores: store is closed")
 var ErrInvalidConfig = errors.New("stores: invalid config")
 
 // ErrCorrupt — data-integrity sentinel. Returned when the backing
-// primitive reports corruption (packfile trailer/index, content
-// hash, or decompression failure on read). Per-domain stores
+// primitive reports corruption (packfile trailer/index, record
+// checksum, or decompression failure on read). Per-domain stores
 // translate the underlying corruption signal into this at the L2
 // boundary.
 var ErrCorrupt = errors.New("stores: data corrupt")
