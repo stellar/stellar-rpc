@@ -50,9 +50,13 @@ func TestReadsMergeBySizeAlone(t *testing.T) {
 		sizes []int
 		reads [][2]int64 // (offset, length), in file order
 	}{
-		// 26 records (260,000 bytes) fit in 256 KiB (262,144) and 27 do not.
+		// From offsets 0 and 260,000, 26 records touch 64 pages; from 520,000 they would touch 65, so the read takes 25.
 		{"equal records", slices.Repeat([]int{10_000}, 100), [][2]int64{
-			{0, 260_000}, {260_000, 260_000}, {520_000, 260_000}, {780_000, 220_000},
+			{0, 260_000}, {260_000, 260_000}, {520_000, 250_000}, {770_000, 230_000},
+		}},
+		// 256 KiB of records starting 1,000 bytes into a page touch 65 pages.
+		{"read starting mid-page", []int{300<<10 + 1_000, 128 << 10, 128 << 10}, [][2]int64{
+			{0, 300<<10 + 1_000}, {308_200, 128 << 10}, {439_272, 128 << 10},
 		}},
 		{"larger record read alone", []int{100 << 10, 300 << 10, 100 << 10, 100 << 10}, [][2]int64{
 			{0, 100 << 10}, {100 << 10, 300 << 10}, {400 << 10, 200 << 10},
@@ -93,7 +97,7 @@ func TestReadsMergeBySizeAlone(t *testing.T) {
 			assert.Equal(t, len(items), i)
 			assert.Equal(t, tc.reads, log.reads)
 
-			// Nothing is read ahead of the consumer.
+			// A consumer that stops in its first read makes one read.
 			log.reads = nil
 			for _, err := range r.ReadRange(0, len(items)) {
 				require.NoError(t, err)

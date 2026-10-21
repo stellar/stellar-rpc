@@ -17,6 +17,7 @@ import (
 const (
 	maxRunBytes      = 256 << 10 // largest merged read: one EBS I/O
 	defaultFirstRead = 256 << 10
+	pageSize         = 4 << 10 // the page cache reads files in whole pages
 )
 
 // Reader-side errors that come from trailer parsing on Open. All three
@@ -79,7 +80,8 @@ type ReaderOptions struct {
 
 	// FirstRead sizes Open's first read from the end of the file, given the
 	// file size; nil means 256 KiB. Results are clamped to [trailer size,
-	// file size]; a tail that does not fit takes one more read for the rest.
+	// file size] and shortened to start on a page boundary; a tail that does
+	// not fit takes one more read for the rest.
 	FirstRead func(fileSize int64) int
 }
 
@@ -201,6 +203,7 @@ func doOpen(path string, firstRead func(int64) int) openResult {
 	if err != nil {
 		return openResult{err: fmt.Errorf("packfile: open %q: %w", path, err)}
 	}
+	adviseRandom(f)
 	fi, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
@@ -224,8 +227,13 @@ func openFile(f readAtCloser, fileSize int64, firstRead func(int64) int) openRes
 		first = int64(firstRead(fileSize))
 	}
 	first = min(max(first, trailerSize), fileSize)
+	// Start on a page boundary: a read ending mid-page that also starts mid-page
+	// touches one more page, which at 256 KiB is a second I/O.
+	if start := (fileSize - first + pageSize - 1) &^ (pageSize - 1); fileSize-start >= trailerSize {
+		first = fileSize - start
+	}
 	tail := make([]byte, first)
-	if _, err := f.ReadAt(tail, fileSize-first); err != nil {
+	if _, err := readAt(f, tail, fileSize-first); err != nil {
 		return openResult{err: fmt.Errorf("packfile: read trailer region: %w", err)}
 	}
 
@@ -252,7 +260,7 @@ func openFile(f readAtCloser, fileSize int64, firstRead func(int64) int) openRes
 	} else {
 		full := make([]byte, tailSize)
 		copy(full[tailSize-first:], tail)
-		if _, err := f.ReadAt(full[:tailSize-first], indexBase); err != nil {
+		if _, err := readAt(f, full[:tailSize-first], indexBase); err != nil {
 			return openResult{err: fmt.Errorf("packfile: read index region: %w", err)}
 		}
 		tail = full
@@ -408,7 +416,8 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 }
 
 // ReadRange returns an iterator over count contiguous items starting at start.
-// Adjacent records merge into reads of up to 256 KiB, made one at a time.
+// Adjacent records merge into reads that touch at most 256 KiB of pages,
+// made one at a time, and nothing past the range is fetched.
 // Each yielded []byte is valid only until the loop body ends, break included — copy if you
 // need to retain it. Safe to break early.
 //
@@ -448,14 +457,16 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 		defer r.putRecord(rec)
 
 		for first := firstRecord; first <= lastRecord; {
-			last := first
-			for last < lastRecord && r.offsets[last+2]-r.offsets[first] <= maxRunBytes {
-				last++
-			}
+			last := r.runEnd(first, lastRecord)
 			buf, err := r.readRecords(rec, first, last)
 			if err != nil {
 				yield(nil, err)
 				return
+			}
+			// From the second read on, so a consumer that stops in its first read pays no extra I/O.
+			if first > firstRecord && last < lastRecord {
+				next := r.runEnd(last+1, lastRecord)
+				prefetch(r.file, r.offsets[last+1], r.offsets[next+1]-r.offsets[last+1])
 			}
 			for j := first; j <= last; j++ {
 				lo := r.offsets[j] - r.offsets[first]
@@ -483,8 +494,8 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 // fn runs on up to min(ReaderOptions.Concurrency, number of reads)
 // goroutines, concurrently and in arbitrary order; with Concurrency 1 or a
 // single read, it runs on the calling goroutine. Positions in one record
-// share one read and decode, and adjacent records merge into reads of up to
-// 256 KiB.
+// share one read and decode, and adjacent records merge into reads that touch
+// at most 256 KiB of pages.
 //
 // positions must be sorted ascending with no duplicates. Returns
 // ErrPositionOutOfRange if any position is outside [0, TotalItems) or
@@ -521,7 +532,7 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 			if rec == last {
 				continue
 			}
-			if rec != last+1 || r.offsets[rec+1]-r.offsets[first] > maxRunBytes {
+			if rec != last+1 || pageSpan(r.offsets[first], r.offsets[rec+1]) > maxRunBytes {
 				break
 			}
 			last = rec
@@ -637,6 +648,31 @@ func (r *Reader) Close() error {
 	return r.closeErr
 }
 
+// runEnd returns the last record of the read that starts at record first:
+// adjacent records join it while the pages they touch fit in maxRunBytes.
+func (r *Reader) runEnd(first, lastRecord int) int {
+	last := first
+	for last < lastRecord && pageSpan(r.offsets[first], r.offsets[last+2]) <= maxRunBytes {
+		last++
+	}
+	return last
+}
+
+// pageSpan is the bytes the page cache reads to serve [start, end).
+func pageSpan(start, end int64) int64 {
+	return (end+pageSize-1)&^(pageSize-1) - start&^(pageSize-1)
+}
+
+// readAt reads len(buf) bytes at off. A read spanning more than one I/O hints
+// all of its pieces first, so they are in flight together; without readahead
+// the kernel would fetch them one at a time.
+func readAt(f readAtCloser, buf []byte, off int64) (int, error) {
+	if n := int64(len(buf)); pageSpan(off, off+n) > maxRunBytes {
+		prefetch(f, off, n)
+	}
+	return f.ReadAt(buf, off)
+}
+
 func (r *Reader) readRecords(rec *record, first, last int) ([]byte, error) {
 	start, end := r.offsets[first], r.offsets[last+1]
 	size := int(end - start)
@@ -645,7 +681,7 @@ func (r *Reader) readRecords(rec *record, first, last int) ([]byte, error) {
 	} else {
 		rec.scratch = rec.scratch[:size]
 	}
-	if _, err := r.file.ReadAt(rec.scratch, start); err != nil {
+	if _, err := readAt(r.file, rec.scratch, start); err != nil {
 		return nil, fmt.Errorf("packfile: read records [%d, %d]: %w", first, last, err)
 	}
 	return rec.scratch, nil

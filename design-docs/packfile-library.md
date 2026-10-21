@@ -643,7 +643,7 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 
 **Non-blocking Open.** `Open` returns a `*Reader` immediately. A background goroutine performs all I/O: open, stat, first read, trailer parse, CRC verification, index decode, app data read. A `sync.OnceValue` drains the result on the first query call. Errors are deferred to query time; `Open` itself never fails. This enables overlapped initialization: the caller can open multiple files or perform other setup while the goroutine runs.
 
-**First Read.** On open, one pread of the last `FirstRead(fileSize)` bytes (256 KiB when `FirstRead` is nil), clamped to [trailer size, file size]. If the index, app data and trailer fit, nothing else is read. Otherwise one more read fetches only the bytes in front of the first read.
+**First Read.** On open, one pread of the last `FirstRead(fileSize)` bytes (256 KiB when `FirstRead` is nil), clamped to [trailer size, file size] and shortened to start on a page boundary, so it touches no page it doesn't need. If the index, app data and trailer fit, nothing else is read. Otherwise one more read fetches only the bytes in front of the first read.
 
 **Index Decode OOM Guard.** Before decoding the offset index, validates that `recordCount` is plausible given `indexSize`. Each FOR group of up to 128 records requires at least 6 bytes. This prevents crafted trailers from causing huge allocations.
 
@@ -657,9 +657,11 @@ The `Checksum` at offset 72 covers `trailer[0:72]`.
 
 All of steps 2-5 are a single I/O operation. A `*record` workspace is borrowed from a package-level pool and returned after the callback.
 
-**Merged Reads.** ReadRange and ReadItems merge adjacent records, by size alone, into one `ReadAt` of up to 256 KiB, read into the workspace's scratch buffer. A larger record is read alone.
+**Merged Reads.** ReadRange and ReadItems merge adjacent records, by size alone, into one `ReadAt` whose pages fit in 256 KiB, read into the workspace's scratch buffer. The page cache reads whole 4 KiB pages, so a read that starts partway into a page counts that whole page. A larger record is read alone.
 
-**ReadRange.** Makes its reads one at a time, in order. Nothing is read ahead of the consumer.
+**Readahead.** Open advises the file `POSIX_FADV_RANDOM`, so the kernel reads exactly the pages each `ReadAt` touches. Without it, the kernel reads past the end of reads it guesses are sequential. A read that spans more than one I/O, such as a large record or a tail read ending mid-page, first hints all of its 256 KiB pieces with `POSIX_FADV_WILLNEED`; without readahead the kernel would fetch them one at a time. The hints are Linux-only and no-ops elsewhere.
+
+**ReadRange.** Makes its reads one at a time, in order. From the second read on, it asks the kernel (`POSIX_FADV_WILLNEED`) to start the next read while the consumer works through the current one. The first read prefetches nothing, so a consumer that stops inside it costs no extra I/O, and nothing past the requested range is fetched.
 
 **ReadItems.** Single-pass partition of sorted positions into reads. With `Concurrency == 1` or a single read, the reads are processed serially in the calling goroutine (no goroutine spawn, no errgroup overhead). Otherwise an `errgroup.WithContext` drives up to `Concurrency` workers; each worker claims reads via an atomic counter, decodes, and calls `fn(idx, data)`. The derived context propagates cancellation; the first non-nil error wins.
 

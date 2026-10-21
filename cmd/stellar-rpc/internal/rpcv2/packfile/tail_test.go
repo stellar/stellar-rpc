@@ -45,6 +45,8 @@ func TestOpenFirstRead(t *testing.T) {
 	fixed := func(n int) func(int64) int { return func(int64) int { return n } }
 
 	trailerThenRest := [][2]int64{{fileSize - trailerSize, trailerSize}, {tailStart, tailSize - trailerSize}}
+	// The default read starts on the first page boundary inside the last 256 KiB.
+	defaultStart := (fileSize - 256<<10 + pageSize - 1) &^ (pageSize - 1)
 	cases := []struct {
 		name      string
 		firstRead func(int64) int
@@ -55,7 +57,7 @@ func TestOpenFirstRead(t *testing.T) {
 		{"zero", fixed(0), trailerThenRest},
 		{"negative", fixed(-1), trailerThenRest},
 		{"past the file", fixed(int(fileSize) + 1), [][2]int64{{0, fileSize}}},
-		{"nil means 256 KiB", nil, [][2]int64{{fileSize - 256<<10, 256 << 10}}},
+		{"nil means 256 KiB", nil, [][2]int64{{defaultStart, fileSize - defaultStart}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
