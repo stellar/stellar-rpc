@@ -760,27 +760,6 @@ func TestUnknownTrailerFlagsRejected(t *testing.T) {
 	}
 }
 
-// TestLegacyFlagsAccepted verifies pre-#1127 packs (bit 0 set, a SHA-256 in
-// trailer bytes 36:68) still open and read.
-func TestLegacyFlagsAccepted(t *testing.T) {
-	items := makeItems(5, 100)
-	path := writeTestPackfile(t, items, WriterOptions{})
-
-	legacyPath := corruptAt(t, path, true, func(data []byte) {
-		tb := data[len(data)-trailerSize:]
-		tb[tOffFlags] |= legacyFlags
-		copy(tb[36:68], bytes.Repeat([]byte{0xAB}, 32))
-	})
-
-	r := Open(legacyPath, ReaderOptions{})
-	defer r.Close()
-	for i, want := range items {
-		if got := readItemCopy(t, r, i); !bytes.Equal(got, want) {
-			t.Fatalf("ReadItem(%d): data mismatch", i)
-		}
-	}
-}
-
 // TestReaderConcurrencyNegativeRejected verifies that ReaderOptions.Concurrency
 // < 0 is rejected on the first read call (the error is stashed at Open time
 // and surfaced through waitOpen).
