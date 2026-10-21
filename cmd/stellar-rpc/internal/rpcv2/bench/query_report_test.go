@@ -454,3 +454,23 @@ func TestQueryReportLogSummary(t *testing.T) {
 	assert.Contains(t, output.String(), "txhash   target_rps=0.5      warmup failed=1 first_error=warmup boom")
 	assert.Contains(t, output.String(), "txhash   target_rps=0.5      measured failed=1 first_error=measured boom")
 }
+
+// ns/op is the mean latency in whole nanoseconds.
+func TestQueryReportBenchMeanWholeNanos(t *testing.T) {
+	q := &queryReport{tier: tierCold}
+	q.add(scenarioReport{
+		queryType: queryTypeLedgers,
+		targetRPS: 1,
+		result: scenarioResult{
+			scenarioRecord: scenarioRecord{
+				startDelays: []time.Duration{0, 0, 0},
+				timings:     []requestTiming{{latency: 1}, {latency: 1}, {latency: 2}},
+				measured:    phaseCounts{started: 3},
+			},
+			planned:  3,
+			schedule: 3 * time.Second,
+			elapsed:  3 * time.Second,
+		},
+	})
+	assert.Contains(t, q.benchText(), "BenchmarkQuery/tier=cold/type=ledgers/rps=1\t3\t1 ns/op\t")
+}

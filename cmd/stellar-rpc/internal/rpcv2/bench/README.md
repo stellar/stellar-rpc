@@ -225,7 +225,7 @@ BenchmarkQuery/tier=cold/type=ledgers/rps=10	600	812345 ns/op	790123 p50-ns	2345
 |---|---|
 | Name | `tier` is `settings.tier`. `type` and `rps` are `query_type` and `target_rps`. |
 | Iterations | `succeeded`. On an outcome line, `count` of the outcome. When no request succeeded, `planned`. |
-| `ns/op` | `total_ns / count` of `latency` |
+| `ns/op` | `total_ns / count` of `latency`, in whole nanoseconds |
 | `p50-ns`, `p99-ns` | `latency` percentiles |
 | `handler-p50-ns`, `handler-p99-ns` | `handler_latency` percentiles |
 | `p99-from-due-ns` | `latency_from_due` p99 |

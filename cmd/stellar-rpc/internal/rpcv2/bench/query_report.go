@@ -197,7 +197,7 @@ func (s scenarioSummary) latencyMetrics(outcome string) []benchMetric {
 		return nil
 	}
 	out := []benchMetric{
-		{formatFloat(float64(lat.total.Nanoseconds()) / float64(lat.n)), "ns/op"},
+		{nanos(lat.total / time.Duration(lat.n)), "ns/op"},
 		{nanos(lat.p50), "p50-ns"},
 		{nanos(lat.p99), "p99-ns"},
 	}
