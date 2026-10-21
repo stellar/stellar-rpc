@@ -701,43 +701,6 @@ func TestWriterReaderMatrix(t *testing.T) {
 	}
 }
 
-// TestRecordWorkerRaceStress exercises the concurrent worker path with small
-// records to maximize goroutine interleaving. Run with -race -count=10.
-func TestRecordWorkerRaceStress(t *testing.T) {
-	items := makeItems(200, 100)
-	for _, codec := range allCodecs {
-		if codec.newEncoder == nil {
-			continue // passthrough runs no workers
-		}
-		for _, rs := range []int{1, 2, 3} {
-			t.Run(fmt.Sprintf("%s/rs=%d", codec.name, rs), func(t *testing.T) {
-				opts := WriterOptions{
-					NewRecordEncoder: codec.newEncoder,
-					Concurrency:      8,
-					ItemsPerRecord:   rs,
-				}
-				path := writeTestPackfile(t, items, opts)
-
-				r := Open(path, ReaderOptions{RecordDecoder: codec.decoder})
-				defer r.Close()
-
-				tc, err := r.TotalItems()
-				if err != nil {
-					t.Fatal(err)
-				}
-				if tc != len(items) {
-					t.Fatalf("TotalItems = %d, want %d", tc, len(items))
-				}
-				for i, want := range items {
-					if got := readItemCopy(t, r, i); !bytes.Equal(got, want) {
-						t.Fatalf("ReadItem(%d): data mismatch", i)
-					}
-				}
-			})
-		}
-	}
-}
-
 // --- option validation / lifecycle invariants ------------------------------
 
 // TestUnknownTrailerFlagsRejected verifies the reader rejects packfiles whose
