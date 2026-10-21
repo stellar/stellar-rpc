@@ -14,6 +14,9 @@ const (
 	relayStateRunning = "running" // window closed with budget left: the next poll job takes over
 )
 
+// relayDeadlineOutput marks a fail state that the campaign deadline caused.
+const relayDeadlineOutput = "deadline=true"
+
 // Relay lets long campaigns span multiple workflow jobs by reporting one
 // polling window's outcome through the state output: ok, fail, or running.
 // The caller uses that output to fail the job or schedule another window.
@@ -59,7 +62,7 @@ func (r *relay) poll(ctx context.Context) error {
 		return ctx.Err()
 	}
 	if err != nil {
-		return r.reportFault(ctx, fmt.Sprintf("❌ Result polling failed: %v", err))
+		return r.reportFault(ctx, fmt.Sprintf("❌ Result polling failed: %v", err), false)
 	}
 	if res != nil {
 		return r.reportVerdict(res)
@@ -79,21 +82,25 @@ func (r *relay) poll(ctx context.Context) error {
 	}
 	if lerr != nil {
 		return r.reportFault(ctx,
-			fmt.Sprintf("❌ Campaign deadline passed; final result fetch failed: %v", lerr))
+			fmt.Sprintf("❌ Campaign deadline passed; final result fetch failed: %v", lerr), true)
 	}
 	if last != nil {
 		return r.reportVerdict(last)
 	}
 	return r.reportFault(ctx, fmt.Sprintf(
 		"❌ Campaign budget deadline passed with no verdict (this window waited %s).",
-		time.Since(start).Round(time.Second)))
+		time.Since(start).Round(time.Second)), true)
 }
 
-// reportFault writes context for the workflow summary and relays a fail state.
-func (r *relay) reportFault(ctx context.Context, headline string) error {
+// reportFault writes context for the workflow summary and relays a fail state,
+// marked as a deadline fail when pastDeadline is set.
+func (r *relay) reportFault(ctx context.Context, headline string, pastDeadline bool) error {
 	logger.Warnf("%s", headline)
 	if err := r.poller.writeNoVerdictComment(ctx, headline); err != nil {
 		return err
+	}
+	if pastDeadline {
+		return appendOutputs(r.githubOutput, "state="+relayStateFail, relayDeadlineOutput)
 	}
 	return appendOutputs(r.githubOutput, "state="+relayStateFail)
 }

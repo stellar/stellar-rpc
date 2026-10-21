@@ -326,6 +326,7 @@ jobs:
     timeout-minutes: 330
     outputs:
       state: ${{ steps.relay.outputs.state || steps.handoff.outputs.state }}
+      deadline: ${{ steps.relay.outputs.deadline }}
     steps:
       # First, so the poll window below is measured from the job's own start.
       - name: Record the job start
@@ -403,6 +404,7 @@ jobs:
     timeout-minutes: 330
     outputs:
       state: ${{ steps.relay.outputs.state || steps.handoff.outputs.state }}
+      deadline: ${{ steps.relay.outputs.deadline }}
     steps:
       # First, so the poll window below is measured from the job's own start.
       - name: Record the job start
@@ -477,6 +479,7 @@ jobs:
     timeout-minutes: 330
     outputs:
       state: ${{ steps.relay.outputs.state || steps.handoff.outputs.state }}
+      deadline: ${{ steps.relay.outputs.deadline }}
     steps:
       # First, so the poll window below is measured from the job's own start.
       - name: Record the job start
@@ -551,6 +554,7 @@ jobs:
     timeout-minutes: 330
     outputs:
       state: ${{ steps.relay.outputs.state || steps.handoff.outputs.state }}
+      deadline: ${{ steps.relay.outputs.deadline }}
     steps:
       # First, so the poll window below is measured from the job's own start.
       - name: Record the job start
@@ -636,7 +640,8 @@ jobs:
       # result object, the rest are skipped (empty state) or handed off.
       # `rescued` mirrors the cleanup job's box-left-up condition (a poll saw
       # a fail verdict) so the notification only claims a rescuable box when
-      # cleanup actually left one running.
+      # cleanup actually left one running. A deadline fail is not rescued: the
+      # box is still running the campaign and dies at its self-terminate ceiling.
       - name: Decide the campaign verdict
         id: verdict
         env:
@@ -644,6 +649,7 @@ jobs:
           S2: ${{ needs.poll2.outputs.state }}
           S3: ${{ needs.poll3.outputs.state }}
           S4: ${{ needs.poll4.outputs.state }}
+          DEADLINE_HIT: ${{ needs.poll1.outputs.deadline || needs.poll2.outputs.deadline || needs.poll3.outputs.deadline || needs.poll4.outputs.deadline }}
           VALIDATE_RESULT: ${{ needs.validate.result }}
           LAUNCH_RESULT: ${{ needs.launch.result }}
         run: |
@@ -658,6 +664,8 @@ jobs:
               REASON="input validation failed"
             elif [ "$LAUNCH_RESULT" != "success" ]; then
               REASON="box launch failed"
+            elif [ "$DEADLINE_HIT" = "true" ]; then
+              REASON="campaign deadline passed with no verdict"
             elif [ "$S1" = "fail" ] || [ "$S2" = "fail" ] || [ "$S3" = "fail" ] || [ "$S4" = "fail" ]; then
               REASON="the campaign reported a failing verdict"
               RESCUED=true

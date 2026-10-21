@@ -104,7 +104,11 @@ func TestRelayWindowDeadline(t *testing.T) {
 				require.NoError(t, r.poll(t.Context()))
 				data, err := os.ReadFile(output)
 				require.NoError(t, err)
-				require.Equal(t, "state="+tc.state+"\n", string(data))
+				want := "state=" + tc.state + "\n"
+				if tc.state == "fail" {
+					want += "deadline=true\n"
+				}
+				require.Equal(t, want, string(data))
 				require.Equal(t, tc.calls, calls)
 				if tc.state == "running" {
 					require.Equal(t, time.Minute, time.Since(start))
@@ -231,7 +235,7 @@ func TestRelayNoVerdict(t *testing.T) {
 				require.Equal(t, 1, calls)
 				data, err := os.ReadFile(output)
 				require.NoError(t, err)
-				require.Equal(t, "state=fail\n", string(data))
+				require.Equal(t, "state=fail\ndeadline=true\n", string(data))
 				data, err = os.ReadFile(filepath.Join(dir, "timeout-comment.md"))
 				require.NoError(t, err)
 				if kind == "missing" || kind == "stale" {
@@ -244,6 +248,28 @@ func TestRelayNoVerdict(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestRelayFaultBeforeDeadline checks that a polling fault inside the budget
+// relays a fail state without the deadline mark.
+func TestRelayFaultBeforeDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("RESULTS_FILE", filepath.Join(dir, "results.md"))
+		output := filepath.Join(dir, "outputs")
+		p := testPoller(func(*http.Request) (*http.Response, error) {
+			return accessDenied()
+		})
+		p.runner = testDebugRunner()
+		r := &relay{poller: p, githubOutput: output, window: time.Minute, deadline: time.Now().Add(time.Hour)}
+		require.NoError(t, r.poll(t.Context()))
+		data, err := os.ReadFile(output)
+		require.NoError(t, err)
+		require.Equal(t, "state=fail\n", string(data))
+		data, err = os.ReadFile(filepath.Join(dir, "timeout-comment.md"))
+		require.NoError(t, err)
+		require.Contains(t, string(data), "Result polling failed")
+	})
 }
 
 func TestGatherNoVerdictOutputs(t *testing.T) {
@@ -287,7 +313,7 @@ func TestReportCancellationDuringDiagnostics(t *testing.T) {
 					err = reportGather(ctx, p, output, time.Minute, nil, nil)
 				} else {
 					r := &relay{poller: p, githubOutput: output}
-					err = r.reportFault(ctx, "polling failed")
+					err = r.reportFault(ctx, "polling failed", false)
 				}
 				require.ErrorIs(t, err, context.Canceled)
 				require.Equal(t, time.Second, time.Since(start))
