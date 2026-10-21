@@ -532,7 +532,6 @@ Offset  Size  Type      Field
 ```
 
 Flags (uint8):
-- Bit 0 (`legacyFlags`): retired. Packs written before #1127 set it and carry a SHA-256 in bytes 36:68. The reader accepts it and ignores those bytes. Never reuse it.
 - Bit 1 (`flagRecordChecksum`): each record's trailing CRC32C covers the whole record, not just its item size index
 
 All other bits are reserved. The reader validates flags against `knownFlags` and rejects files with unknown flag bits.

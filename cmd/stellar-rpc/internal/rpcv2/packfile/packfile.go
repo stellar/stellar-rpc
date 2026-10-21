@@ -31,7 +31,7 @@ const (
 //	26:28 reserved
 //	28:32 indexSize       uint32
 //	32:36 appDataSize     uint32
-//	36:68 reserved                 (holds a SHA-256 when legacyFlags bit 0 is set)
+//	36:68 reserved
 //	68:72 appDataCRC      uint32   (CRC32C of the app-data section)
 //	72:76 crc32c          uint32   (over trailer[:trailerCRCEnd])
 const (
@@ -53,8 +53,6 @@ const (
 // On-disk flag bits (uint8 at trailer offset 5). The remaining bits are
 // reserved for future use.
 const (
-	// legacyFlags are retired bits, accepted and ignored on read and never reused: bit 0 was the pre-#1127 content hash.
-	legacyFlags uint8 = 1 << 0
 	// flagRecordChecksum widens the CRC32C in each record's last four bytes
 	// to cover the whole record instead of the FOR-encoded item sizes alone.
 	// See RecordChecksum for the two layouts.
@@ -68,7 +66,7 @@ const (
 //
 // HasRecordChecksum is the typed view of its flag bit; the raw flags byte is
 // not exposed because no caller can act on unknown bits (Open rejects them via
-// knownFlags), and legacy bits are accepted but not surfaced.
+// knownFlags).
 type Trailer struct {
 	Version           uint8
 	Format            Format
