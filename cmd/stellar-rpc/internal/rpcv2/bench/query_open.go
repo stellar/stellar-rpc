@@ -93,7 +93,7 @@ type queryOptions struct {
 	// Plan is the validated flags.
 	Plan queryPlan
 
-	// CPUProfile is the --cpuprofile path; see runQueryBench.
+	// CPUProfile is the --cpuprofile path; see runQuery.
 	CPUProfile string
 }
 
@@ -119,16 +119,6 @@ func (o queryOptions) validate() error {
 		return fmt.Errorf("read --data-dir catalog %s: %w", path, err)
 	}
 	return nil
-}
-
-// runQuery benchmarks reads over the dataset under --data-dir.
-func runQuery(ctx context.Context, logger *supportlog.Entry, env runEnv, opts queryOptions) error {
-	if err := opts.validate(); err != nil {
-		return err
-	}
-	return runQueryBench(ctx, logger, env, opts.Plan, opts.CPUProfile, func() (*queryDataset, func(), error) {
-		return openDataset(logger, opts)
-	})
 }
 
 // openDataset opens the dataset under opts.DataDir the way daemon startup opens

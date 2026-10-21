@@ -427,7 +427,7 @@ func TestQueryRunBuildsEachPoolOnce(t *testing.T) {
 
 // A run that fails after a scenario is added still writes that scenario's
 // CSVs, logs them PARTIAL, writes no bench.txt and returns the run error.
-func TestQueryBenchWritesPartialReport(t *testing.T) {
+func TestQueryWritesPartialReport(t *testing.T) {
 	hotRoot := ingestHotChunk(t)
 	env := runEnv{OutDir: t.TempDir(), Settings: map[string]string{}, SetupTimes: map[string]time.Duration{}}
 	plan := queryPlan{
@@ -439,11 +439,8 @@ func TestQueryBenchWritesPartialReport(t *testing.T) {
 		Passphrase:   network.PublicNetworkPassphrase,
 		Seed:         defaultSeed,
 	}
-	open := func() (*queryDataset, func(), error) {
-		return openDataset(testLogger(), queryOptions{DataDir: hotRoot, Plan: plan})
-	}
 	logger, output := capturingLogger()
-	err := runQueryBench(context.Background(), logger, env, plan, "", open)
+	err := runQuery(context.Background(), logger, env, queryOptions{DataDir: hotRoot, Plan: plan})
 	require.ErrorContains(t, err, "prepare the unknown benchmark")
 
 	_, rows := readCSVTable(t, filepath.Join(env.OutDir, queryScenariosFile))

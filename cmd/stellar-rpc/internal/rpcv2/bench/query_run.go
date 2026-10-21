@@ -171,33 +171,33 @@ func warnFixedReadRange(logger *supportlog.Entry, ds *queryDataset, p queryPlan,
 	settings["fixedReadRange"] = strings.Join(fixed, ",")
 }
 
-// runQueryBench is the bench query body: open the dataset, run the
-// scenarios, write the report. The open time goes into setupNs.storeOpen. A
-// failure after the dataset opens still writes the CSVs of the scenarios added
-// so far, logged as PARTIAL, but no bench.txt. A non-empty cpuProfile writes
-// one CPU profile per scenario at the path scenarioProfilePath returns.
-func runQueryBench(
-	ctx context.Context, logger *supportlog.Entry, env runEnv, p queryPlan, cpuProfile string,
-	open func() (*queryDataset, func(), error),
-) error {
+// runQuery benchmarks reads over the dataset under --data-dir and writes the
+// report. The open time goes into env.SetupTimes["storeOpen"]. A failure after
+// the dataset opens still writes the CSVs of the scenarios added so far, logged
+// as PARTIAL, but no bench.txt. A non-empty opts.CPUProfile writes one CPU
+// profile per scenario at the path scenarioProfilePath returns.
+func runQuery(ctx context.Context, logger *supportlog.Entry, env runEnv, opts queryOptions) error {
+	if err := opts.validate(); err != nil {
+		return err
+	}
 	start := time.Now()
-	ds, release, err := open()
+	ds, release, err := openDataset(logger, opts)
 	if err != nil {
 		return err
 	}
 	defer release()
 	env.SetupTimes["storeOpen"] = time.Since(start)
-	evict := cacheControls(logger, p, ds, env.Settings)
+	evict := cacheControls(logger, opts.Plan, ds, env.Settings)
 	logger.Infof("serving ledgers [%d, %d] over %d %s chunk(s)", ds.FirstLedger, ds.LastLedger, len(ds.Chunks), ds.Tier)
 	env.Settings["tier"] = ds.Tier
-	warnFixedReadRange(logger, ds, p, env.Settings)
-	env.Settings["format"] = p.Format
+	warnFixedReadRange(logger, ds, opts.Plan, env.Settings)
+	env.Settings["format"] = opts.Plan.Format
 	env.Settings["handlerConcurrency"] = strconv.Itoa(ds.server.bridge.MaxHandlers())
 
 	report := &queryReport{tier: ds.Tier}
 	run := &queryRun{
-		logger: logger, ds: ds, plan: p, report: report, clock: timerClock{}, settings: env.Settings,
-		cpuProfile: cpuProfile, evict: evict,
+		logger: logger, ds: ds, plan: opts.Plan, report: report, clock: timerClock{}, settings: env.Settings,
+		cpuProfile: opts.CPUProfile, evict: evict,
 	}
 	runErr := run.scenarios(ctx)
 	written, err := report.write(env.OutDir)
