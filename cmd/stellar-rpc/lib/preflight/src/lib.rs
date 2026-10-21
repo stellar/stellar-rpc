@@ -481,18 +481,13 @@ impl GoLedgerStorage {
 }
 
 fn extract_error_string<T>(simulation_result: &Result<T>, go_storage: &GoLedgerStorage) -> String {
-    match simulation_result {
-        Ok(_) => String::new(),
-        Err(e) => {
-            // Override any simulation result with a storage error (if any). Simulation does not propagate the storage
-            // errors, but these provide more exact information on the root cause.
-            if let Some(e) = go_storage.internal_error.borrow().as_ref() {
-                format!("{e:?}")
-            } else {
-                format!("{e:?}")
-            }
-        }
-    }
+    let Err(e) = simulation_result else {
+        return String::new();
+    };
+    // Override any simulation result with a storage error (if any). Simulation does not propagate the storage
+    // errors, but these provide more exact information on the root cause.
+    let storage_error = go_storage.internal_error.borrow();
+    format!("{:#}", storage_error.as_ref().unwrap_or(e))
 }
 
 #[cfg(test)]

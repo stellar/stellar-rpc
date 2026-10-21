@@ -296,18 +296,17 @@ func TestGetPreflightDebug(t *testing.T) {
 			resultWithDebug, err := GetPreflight(t.Context(), params)
 			require.NoError(t, err)
 			require.NotEmpty(t, resultWithDebug.Error)
-			require.Contains(t, resultWithDebug.Error, "Event log")
-			require.Contains(t, resultWithDebug.Error, "Diagnostic Event")
-			require.NotContains(t, resultWithDebug.Error, "DebugInfo not available")
+			require.NotEmpty(t, resultWithDebug.Events)
 
 			// Disable debug
 			params.EnableDebug = false
 			resultWithoutDebug, err := GetPreflight(t.Context(), params)
 			require.NoError(t, err)
-			require.NotEmpty(t, resultWithoutDebug.Error)
-			require.NotContains(t, resultWithoutDebug.Error, "Event log")
-			require.NotContains(t, resultWithoutDebug.Error, "Diagnostic Event")
-			require.Contains(t, resultWithoutDebug.Error, "DebugInfo not available")
+			require.Empty(t, resultWithoutDebug.Events)
+
+			// The error is only the host error code. The events are returned as XDR.
+			require.Equal(t, "HostError: Error(WasmVm, MissingValue)", resultWithDebug.Error)
+			require.Equal(t, resultWithDebug.Error, resultWithoutDebug.Error)
 		})
 	}
 }

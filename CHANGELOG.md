@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 * JSON-RPC batches with more than `MAX_REQUEST_BATCH_SIZE` calls (default 10) are now rejected with one error, and none of their calls run. Notifications (calls without an `id`) now get an error instead of running.
+* `simulateTransaction` error strings no longer include the event log or a backtrace. They now hold only the host error, such as `HostError: Error(WasmVm, MissingValue)`. The diagnostic events are still returned in the `events` field when `--preflight-enable-debug` is on.
 * `getEvents` no longer returns the `inSuccessfulContractCall` field, deprecated since protocol 23 ([#1050](https://github.com/stellar/stellar-rpc/pull/1050)).
 
 ### Added

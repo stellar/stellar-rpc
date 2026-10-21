@@ -14,11 +14,9 @@ base64 = { workspace = true }
 libc = { workspace = true }
 sha2 = { workspace = true }
 
-# we need the testutils feature in order to get backtraces in the preflight library
-# when stellar rpc is configured to run with --preflight-enable-debug
-soroban-env-host-prev = { workspace = true, features = ["recording_mode", "testutils"]}
+soroban-env-host-prev = { workspace = true, features = ["recording_mode"]}
 soroban-simulation-prev = { workspace = true }
-soroban-env-host-curr = { workspace = true, features = ["recording_mode", "testutils"]}
+soroban-env-host-curr = { workspace = true, features = ["recording_mode"]}
 soroban-simulation-curr = { workspace = true }
 
 anyhow = { workspace = true }

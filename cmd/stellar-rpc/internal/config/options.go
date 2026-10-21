@@ -423,7 +423,7 @@ func (cfg *Config) options() Options {
 		},
 		{
 			Name:         "preflight-enable-debug",
-			Usage:        "Enable debug information in preflighting (provides more detailed errors). It should not be enabled in production deployments.",
+			Usage:        "Include diagnostic events in simulateTransaction responses",
 			ConfigKey:    &cfg.PreflightEnableDebug,
 			DefaultValue: true,
 		},

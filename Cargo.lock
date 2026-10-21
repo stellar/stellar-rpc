@@ -36,15 +36,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
-dependencies = [
- "derive_arbitrary",
-]
-
-[[package]]
 name = "ark-bls12-381"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -470,17 +461,6 @@ checksum = "a41953f86f8a05768a6cda24def994fd2f424b04ec5c719cf89989779f199071"
 dependencies = [
  "powerfmt",
  "serde_core",
-]
-
-[[package]]
-name = "derive_arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -1387,7 +1367,6 @@ name = "soroban-env-common"
 version = "29.0.0"
 source = "git+https://github.com/stellar/rs-soroban-env?rev=a721944b5a4ea830a4bf5c2dbb8dbe8c1e1354c5#a721944b5a4ea830a4bf5c2dbb8dbe8c1e1354c5"
 dependencies = [
- "arbitrary",
  "crate-git-revision 0.0.9",
  "ethnum",
  "num-derive",
@@ -1404,7 +1383,6 @@ name = "soroban-env-common"
 version = "30.0.0"
 source = "git+https://github.com/stellar/rs-soroban-env?rev=8abed902b850b7c1aebddf131a6521684231bb93#8abed902b850b7c1aebddf131a6521684231bb93"
 dependencies = [
- "arbitrary",
  "crate-git-revision 0.0.9",
  "ethnum",
  "num-derive",
@@ -1624,7 +1602,6 @@ version = "28.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f93d09ff8b9f919b084f664003c4c546ac66a76affd5429460dbe29f4b326f8e"
 dependencies = [
- "arbitrary",
  "base64",
  "crate-git-revision 0.0.9",
  "escape-bytes",
@@ -1639,7 +1616,6 @@ name = "stellar-xdr"
 version = "28.0.0"
 source = "git+https://github.com/stellar/rs-stellar-xdr?rev=28f34cf5a963e3cb13a25456eb9bbda7e0e1ad64#28f34cf5a963e3cb13a25456eb9bbda7e0e1ad64"
 dependencies = [
- "arbitrary",
  "base64",
  "cfg_eval",
  "crate-git-revision 0.0.9",
