@@ -49,19 +49,17 @@ linters:
         rpcv1-tree:
           files:
             - "**/cmd/stellar-rpc/internal/rpcv1/**"
-            - "**/cmd/stellar-rpc/rpcv1/**"
             - "!$test"
           deny:
             - pkg: github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2
-              desc: the rpcv1 tree and the v1 binary must not import the rpcv2 tree
+              desc: the rpcv1 tree must not import the rpcv2 tree
         rpcv2-tree:
           files:
             - "**/cmd/stellar-rpc/internal/rpcv2/**"
-            - "**/cmd/stellar-rpc/rpcv2/**"
             - "!$test"
           deny:
             - pkg: github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1
-              desc: the rpcv2 tree and the v2 binary must not import the rpcv1 tree
+              desc: the rpcv2 tree must not import the rpcv1 tree
     cyclop:
       max-complexity: 15
     dogsled:

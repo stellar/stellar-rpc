@@ -42,7 +42,7 @@ All chunk and window ids use uniform `%08d` zero-padding. Example (window = 1,00
 
 ## Configuration
 
-One TOML file configures the daemon, passed as `--config` to the v2 binary (`stellar-rpc-v2 --config <path>`). Decoding is strict: an unknown key or section is a startup error, so a stale or mistyped config fails loudly instead of being half-read. A fully-commented sample lives at `cmd/stellar-rpc/rpcv2/rpc-v2-sample-config.toml`.
+One TOML file configures the daemon, passed as `--config-path` to the binary in rpcv2 mode (`stellar-rpc --enable-rpcv2 --config-path <path>`). Decoding is strict: an unknown key or section is a startup error, so a stale or mistyped config fails loudly instead of being half-read. A fully-commented sample lives at `cmd/stellar-rpc/internal/rpcv2/config/rpc-v2-sample-config.toml`.
 
 Every TOML leaf is also settable from the command line:
 
@@ -50,7 +50,7 @@ Every TOML leaf is also settable from the command line:
 - The flag set is derived from the config structs by reflection, so it can never drift from the file schema.
 - Precedence: specificity beats source; within a tier, a set flag beats the file; compiled defaults are the last tier.
 - Map-valued keys merge per entry (`--backfill.datastore.params=region=x` sets one param and keeps the file's others); list-valued keys are replaced wholesale.
-- `--config` stays required — the file is the source of truth, flags are one-off overrides.
+- `--config-path` stays required — the file is the source of truth, flags are one-off overrides.
 - No environment variables.
 
 **[service]** — the JSON-RPC read-serving policy (#882; the read server enforces the serving limits — #908 — and live ingestion feeds the `[service.fee_stats]` windows — #881). Key naming: camelCase only for the JSON-RPC method table names, snake_case elsewhere. Durations are strings (`"10s"`); any duration under 1ms is rejected (a bare TOML integer parses as nanoseconds).
@@ -150,7 +150,7 @@ Every TOML leaf is also settable from the command line:
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--config` | string | **required** | Path to TOML config file. |
+| `--config-path` | string | **required** | Path to TOML config file. |
 | `--<section>.<key>` | per key | — | One auto-derived override flag per TOML leaf (see above). |
 
 ---

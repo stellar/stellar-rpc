@@ -34,17 +34,17 @@ var (
 	errNoSuchMethod = &jrpc2.Error{Code: jrpc2.MethodNotFound, Message: jrpc2.MethodNotFound.String()}
 )
 
-// bridge serves JSON-RPC 2.0 over HTTP POST by calling the handlers of an
-// Assigner directly, so a result is encoded once and a json.RawMessage result
-// is written as is. It stands in for jhttp.Bridge, which ran every request
-// through an in-memory client and server and re-encoded each response on the
-// way, and keeps its wire behavior; TestBridge_ParityWithJHTTP checks that.
-// It enforces the global duration limit itself, so a response is never
-// buffered to be swapped for a 504.
-type bridge struct {
-	methods jrpc2.Assigner
-	sem     *semaphore.Weighted // bounds the handlers running at once, as jrpc2.Server does
-	limits  durationLimits
+// Bridge serves JSON-RPC 2.0 over HTTP POST by calling an Assigner's handlers
+// directly, at most one per CPU. The zero value is not usable; build it with
+// NewBridge.
+type Bridge struct {
+	// Bridge keeps jhttp.Bridge's wire behavior (TestBridge_ParityWithJHTTP)
+	// but encodes each result once. It enforces the duration limit itself, so a
+	// response is never buffered to be swapped for a 504.
+	methods     jrpc2.Assigner
+	sem         *semaphore.Weighted // bounds the handlers running at once, as jrpc2.Server does
+	maxHandlers int
+	limits      durationLimits
 
 	mu     sync.RWMutex // read-held while a request's handlers run
 	closed bool
@@ -60,20 +60,31 @@ type durationLimits struct {
 	logger             *log.Entry
 }
 
-func newBridge(methods jrpc2.Assigner, limits durationLimits) *bridge {
+// NewBridge returns a Bridge over methods with no request duration limit.
+// logger receives panic stacks. The caller must Close it.
+func NewBridge(methods jrpc2.Assigner, logger *log.Entry) *Bridge {
+	return newBridge(methods, durationLimits{limit: network.RequestDurationLimiterNoLimit, logger: logger})
+}
+
+func newBridge(methods jrpc2.Assigner, limits durationLimits) *Bridge {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &bridge{
-		methods: methods,
-		sem:     semaphore.NewWeighted(int64(runtime.NumCPU())),
-		limits:  limits,
-		ctx:     ctx,
-		cancel:  cancel,
+	maxHandlers := runtime.NumCPU()
+	return &Bridge{
+		methods:     methods,
+		sem:         semaphore.NewWeighted(int64(maxHandlers)),
+		maxHandlers: maxHandlers,
+		limits:      limits,
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
+// MaxHandlers returns how many handlers b runs at once.
+func (b *Bridge) MaxHandlers() int { return b.maxHandlers }
+
 // Close cancels the requests in flight, waits for their handlers to return,
 // and fails later requests.
-func (b *bridge) Close() {
+func (b *Bridge) Close() {
 	b.cancel()
 	b.mu.Lock()
 	b.closed = true
@@ -81,7 +92,7 @@ func (b *bridge) Close() {
 }
 
 // ServeHTTP implements http.Handler.
-func (b *bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer b.recoverPanic(w)
 	w.Header().Set("Accept-Post", contentTypeJSON)
 	if r.Method != http.MethodPost {
@@ -121,7 +132,7 @@ func (b *bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // serve runs the requests in r's body on ctx and returns their responses.
-func (b *bridge) serve(ctx context.Context, r *http.Request) (bool, []*response, error) {
+func (b *Bridge) serve(ctx context.Context, r *http.Request) (bool, []*response, error) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		return false, nil, err
@@ -163,13 +174,13 @@ func (l durationLimits) timedOut(r *http.Request, elapsed time.Duration) bool {
 
 // recoverPanic answers 500 to a request whose serving panicked outside a
 // handler call and logs the stack, as network's HTTP limiter did.
-func (b *bridge) recoverPanic(w http.ResponseWriter) {
+func (b *Bridge) recoverPanic(w http.ResponseWriter) {
 	p := recover()
 	if p == nil {
 		return
 	}
 	w.WriteHeader(http.StatusInternalServerError)
-	for _, line := range util.CallStack(p, "", "(*bridge).ServeHTTP", 8) {
+	for _, line := range util.CallStack(p, "", "(*Bridge).ServeHTTP", 8) {
 		b.limits.logger.Warn(line)
 	}
 }
@@ -184,7 +195,7 @@ func rank(pr *jrpc2.ParsedRequest) int {
 
 // run calls the handlers for reqs, on a context that also ends at Close, and
 // returns the responses in request order. Notifications get none.
-func (b *bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*response, error) {
+func (b *Bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*response, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if b.closed {
@@ -210,7 +221,7 @@ func (b *bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*respo
 			defer b.sem.Release(1)
 			defer func() {
 				if p := recover(); p != nil { // answer just this call, as the duration limiter does
-					for _, line := range util.CallStack(p, pr.Method, "(*bridge).run.func", 8) {
+					for _, line := range util.CallStack(p, pr.Method, "(*Bridge).run.func", 8) {
 						b.limits.logger.Warn(line)
 					}
 					rsps[i] = respond(pr, nil, network.ErrFailToProcessDueToInternalIssue)
@@ -231,7 +242,7 @@ func (b *bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*respo
 
 // route returns pr's handler, or else the response pr gets without one:
 // invalid requests are always answered, notifications to unknown methods never.
-func (b *bridge) route(ctx context.Context, pr *jrpc2.ParsedRequest) (jrpc2.Handler, *response) {
+func (b *Bridge) route(ctx context.Context, pr *jrpc2.ParsedRequest) (jrpc2.Handler, *response) {
 	if pr.Error != nil {
 		return nil, &response{id: pr.ID, err: pr.Error}
 	}

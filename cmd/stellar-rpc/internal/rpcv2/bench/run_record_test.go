@@ -52,6 +52,14 @@ func TestCommandRecordsFailedRun(t *testing.T) {
 	}
 }
 
+// nonEmptyDir returns a new directory that holds one file.
+func nonEmptyDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "leftover"), nil, 0o600))
+	return dir
+}
+
 // TestCommandRejectsBadFlagsBeforeOut checks that a flag error creates no --out.
 func TestCommandRejectsBadFlagsBeforeOut(t *testing.T) {
 	for _, tc := range []struct {
@@ -68,6 +76,12 @@ func TestCommandRejectsBadFlagsBeforeOut(t *testing.T) {
 			"--hot-dir", t.TempDir(),
 		}, "--source=bogus"},
 		{"hot missing required flags", []string{"hot"}, `required flag(s) "hot-dir", "start-chunk" not set`},
+		{"cold non-empty dataset dir", []string{
+			"cold", "--start-chunk", "0", "--cold-out-dir", nonEmptyDir(t), "--pack-dir", t.TempDir(),
+		}, "--cold-out-dir"},
+		{"hot non-empty dataset dir", []string{
+			"hot", "--start-chunk", "0", "--hot-dir", nonEmptyDir(t), "--pack-dir", t.TempDir(),
+		}, "--hot-dir"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			outDir := filepath.Join(t.TempDir(), "csv")
@@ -81,16 +95,44 @@ func TestCommandRejectsBadFlagsBeforeOut(t *testing.T) {
 	}
 }
 
+// TestIngestCommandsRefuseOutInDataset checks that cold and hot refuse an --out
+// that is the dataset dir or inside it, and create nothing.
+func TestIngestCommandsRefuseOutInDataset(t *testing.T) {
+	for _, tc := range []struct{ cmd, rootFlag string }{
+		{"cold", "cold-out-dir"},
+		{"hot", "hot-dir"},
+	} {
+		for _, place := range []string{"equal", "inside"} {
+			t.Run(tc.cmd+" "+place, func(t *testing.T) {
+				root := filepath.Join(t.TempDir(), "dataset")
+				out := root
+				if place == "inside" {
+					out = filepath.Join(root, "report")
+				}
+				cmd := newIngestCommand()
+				cmd.SetOut(io.Discard)
+				cmd.SetErr(io.Discard)
+				cmd.SetArgs([]string{
+					tc.cmd, "--start-chunk", "0", "--" + tc.rootFlag, root, "--pack-dir", t.TempDir(),
+					"--out", out,
+				})
+				require.ErrorContains(t, cmd.Execute(), "must be outside --"+tc.rootFlag)
+				require.NoDirExists(t, root)
+			})
+		}
+	}
+}
+
 // TestCommandRecordsSuccessfulRun checks run.json during and after a run.
 func TestCommandRecordsSuccessfulRun(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "csv")
 	var ran bool
 
-	cmd := newBenchCommand("probe", "", &sourceFlags{}, &profileFlags{},
-		func() error { return nil },
-		func(_ context.Context, _ *supportlog.Entry, out string) error {
+	cmd := newBenchCommand("probe", "", &profileFlags{},
+		func(string) error { return nil },
+		func(_ context.Context, _ *supportlog.Entry, env runEnv) error {
 			ran = true
-			data, err := os.ReadFile(filepath.Join(out, runRecordFile))
+			data, err := os.ReadFile(filepath.Join(env.OutDir, runRecordFile))
 			require.NoError(t, err)
 
 			var record runRecord
@@ -124,8 +166,8 @@ func TestCommandRecordsSuccessfulRun(t *testing.T) {
 	assert.NotContains(t, raw, "error")
 }
 
-// TestRequireEmptyOut checks which --out dirs requireEmptyOut accepts.
-func TestRequireEmptyOut(t *testing.T) {
+// TestRequireEmptyDir checks which dirs requireEmptyDir accepts.
+func TestRequireEmptyDir(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		files []string
@@ -149,7 +191,7 @@ func TestRequireEmptyOut(t *testing.T) {
 			for _, name := range tc.dirs {
 				require.NoError(t, os.Mkdir(filepath.Join(out, name), 0o700))
 			}
-			err := requireEmptyOut(out)
+			err := requireEmptyDir("out", out)
 			if tc.held == "" {
 				require.NoError(t, err)
 				return
@@ -162,7 +204,7 @@ func TestRequireEmptyOut(t *testing.T) {
 	t.Run("out is a file", func(t *testing.T) {
 		out := filepath.Join(t.TempDir(), "out")
 		require.NoError(t, os.WriteFile(out, nil, 0o600))
-		require.ErrorContains(t, requireEmptyOut(out), "read --out dir")
+		require.ErrorContains(t, requireEmptyDir("out", out), "read --out ")
 	})
 }
 
@@ -181,9 +223,9 @@ func TestIngestCommandsRefuseUsedOut(t *testing.T) {
 }
 
 // requireRefusesUsedOut requires cmd to refuse an --out that holds the run.json
-// of a killed run, without changing --out. An error that names missing means
-// the run body ran.
-func requireRefusesUsedOut(t *testing.T, cmd *cobra.Command, args []string, missing string) {
+// of a killed run, without changing --out. An error that names input means the
+// run body ran.
+func requireRefusesUsedOut(t *testing.T, cmd *cobra.Command, args []string, input string) {
 	t.Helper()
 	out := t.TempDir()
 	killed := []byte(`{"command":"earlier run","status":"running"}`)
@@ -195,7 +237,7 @@ func requireRefusesUsedOut(t *testing.T, cmd *cobra.Command, args []string, miss
 	err := cmd.Execute()
 	require.ErrorContains(t, err, "is not empty")
 	require.ErrorContains(t, err, runRecordFile)
-	assert.NotContains(t, err.Error(), missing, "the run body must not run")
+	assert.NotContains(t, err.Error(), input, "the run body must not run")
 
 	got, readErr := os.ReadFile(filepath.Join(out, runRecordFile))
 	require.NoError(t, readErr)
@@ -233,7 +275,7 @@ func TestWriteRunRecordInProgress(t *testing.T) {
 
 	var raw map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &raw))
-	for _, key := range []string{"finishedAt", "peakRssBytes", "error"} {
+	for _, key := range []string{"finishedAt", "peakRssBytes", "settings", "setupNs", "error"} {
 		assert.NotContains(t, raw, key)
 	}
 }
@@ -250,9 +292,13 @@ func TestWriteRunRecord(t *testing.T) {
 	flags := map[string]string{"start-chunk": "1000", "num-chunks": "10", "workers": "4"}
 	startedAt := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	finishedAt := time.Date(2026, 7, 21, 12, 5, 30, 0, time.UTC)
+	env := runEnv{
+		Settings:   map[string]string{"fixedReadRange": "ledgers,txpage"},
+		SetupTimes: map[string]time.Duration{"storeOpen": 1500 * time.Millisecond},
+	}
 
 	record := newRunRecord(cmd, flags, startedAt)
-	record.finish(finishedAt, 4096, nil)
+	record.finish(finishedAt, env, 4096, nil)
 	require.NoError(t, writeRunRecord(outDir, record))
 
 	data, err := os.ReadFile(filepath.Join(outDir, runRecordFile))
@@ -264,6 +310,8 @@ func TestWriteRunRecord(t *testing.T) {
 	assert.Equal(t, "bench ingest cold", got.Command) // CommandPath joins every ancestor
 	assert.Equal(t, "1000", got.Flags["start-chunk"])
 	assert.Equal(t, "10", got.Flags["num-chunks"])
+	assert.Equal(t, "ledgers,txpage", got.Settings["fixedReadRange"])
+	assert.Equal(t, int64(1_500_000_000), got.SetupNs["storeOpen"])
 	assert.Equal(t, uint64(4096), got.PeakRSSBytes)
 	assert.Equal(t, "2026-07-21T12:00:00Z", got.StartedAt)
 	assert.Equal(t, "2026-07-21T12:05:30Z", got.FinishedAt)
@@ -283,7 +331,7 @@ func TestWriteRunRecordWithError(t *testing.T) {
 
 	runErr := errors.New("backfill [chunk 3, chunk 3]: boom")
 	record := newRunRecord(cmd, nil, now)
-	record.finish(now, 0, runErr)
+	record.finish(now, runEnv{}, 0, runErr)
 	require.NoError(t, writeRunRecord(outDir, record))
 
 	data, err := os.ReadFile(filepath.Join(outDir, runRecordFile))
@@ -296,7 +344,9 @@ func TestWriteRunRecordWithError(t *testing.T) {
 
 	var raw map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &raw))
-	assert.NotContains(t, raw, "peakRssBytes")
+	for _, key := range []string{"settings", "setupNs", "peakRssBytes"} {
+		assert.NotContains(t, raw, key)
+	}
 }
 
 // TestCaptureFlags checks captureFlags.

@@ -88,22 +88,20 @@ runs:
       run: PREFIX="$HOME/.rocksdb" ZSTD_HOME="$HOME/.zstd" ./scripts/install-rocksdb.sh
 
     # ~/.zstd and ~/.rocksdb aren't on the default search path, so pass them
-    # explicitly.
+    # explicitly. CGO_CPPFLAGS, not CGO_CFLAGS: setting CGO_CFLAGS replaces
+    # Go's default "-O2 -g" for every cgo compile, go-sqlite3's SQLite included.
     - name: Configure CGO for native libs (Linux)
       if: runner.os == 'Linux'
       shell: bash
       run: |
-        echo "CGO_CFLAGS=-I$HOME/.zstd/include -I$HOME/.rocksdb/include" >> "$GITHUB_ENV"
+        echo "CGO_CPPFLAGS=-I$HOME/.zstd/include -I$HOME/.rocksdb/include" >> "$GITHUB_ENV"
         echo "CGO_LDFLAGS=-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib" >> "$GITHUB_ENV"
-        echo "LD_LIBRARY_PATH=$HOME/.zstd/lib:$HOME/.rocksdb/lib" >> "$GITHUB_ENV"
 
-    # No DYLD_LIBRARY_PATH: SIP strips DYLD_* when /bin/bash is exec'd, and
-    # CI only links the binary (never runs it), so it isn't needed.
     - name: Configure CGO for native libs (macOS)
       if: runner.os == 'macOS'
       shell: bash
       run: |
-        echo "CGO_CFLAGS=-I$HOME/.zstd/include -I$HOME/.rocksdb/include" >> "$GITHUB_ENV"
+        echo "CGO_CPPFLAGS=-I$HOME/.zstd/include -I$HOME/.rocksdb/include" >> "$GITHUB_ENV"
         echo "CGO_LDFLAGS=-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib" >> "$GITHUB_ENV"
 
     - name: Set up Go

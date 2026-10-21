@@ -36,4 +36,11 @@ func TestNewCommand(t *testing.T) {
 				"%s: flag --%s not marked required", name, fn)
 		}
 	}
+
+	query, _, err := root.Find([]string{"query"})
+	require.NoError(t, err)
+	require.Equal(t, "query", query.Use)
+	f := query.Flags().Lookup("data-dir")
+	require.NotNil(t, f, "query: flag --data-dir missing")
+	require.Contains(t, f.Annotations, cobra.BashCompOneRequiredFlag, "query: flag --data-dir not marked required")
 }

@@ -38,15 +38,9 @@ type coldOptions struct {
 	// index builds.
 	Workers int
 
-	// ColdRoot is the output root the artifacts land under, laid out by
-	// geometry.NewLayout. It is scratch: a re-run over the same range
-	// overwrites freely, but artifacts from other ranges are left in place and
-	// can look valid to later tooling, so point each run at a fresh dir.
+	// ColdRoot is the dataset root, laid out by geometry.NewLayout: the
+	// catalog and the artifacts. It must be missing or empty.
 	ColdRoot string
-
-	// CatalogDir is the base dir the run-scoped scratch catalog is created
-	// under. Empty means ColdRoot.
-	CatalogDir string
 
 	// OutDir receives the CSV report.
 	OutDir string
@@ -72,6 +66,14 @@ func (o coldOptions) validate() error {
 	if o.ColdRoot == "" {
 		return errors.New("--cold-out-dir is required")
 	}
+	if err := requireEmptyDir("cold-out-dir", o.ColdRoot); err != nil {
+		return err
+	}
+	if o.OutDir != "" {
+		if err := requireOutOutside("cold-out-dir", o.ColdRoot, o.OutDir); err != nil {
+			return err
+		}
+	}
 	// Refuse re-packing a source pack tree in place: the backfill always
 	// materializes ledger packs, the cold ledger writer overwrites its
 	// destination, and destination == source would corrupt the pack mid-read.
@@ -84,12 +86,8 @@ func (o coldOptions) validate() error {
 	return nil
 }
 
-// runCold benchmarks the cold path: one backfill.RunBackfill over the
-// requested chunk range, against a fresh scratch catalog so the run is a clean
-// backfill from empty. As the backfill runs, the sink collects its per-stage
-// MetricSink timings and the scheduler's observability metrics. On success
-// runCold writes the CSV report and logs a summary, including the effective
-// chunk concurrency for multi-chunk runs.
+// runCold times the daemon's backfill of the requested chunk range into the
+// dataset under ColdRoot and writes the CSV report.
 func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) error {
 	if err := opts.validate(); err != nil {
 		return err
@@ -97,32 +95,26 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	// Create and fsync the write roots up front — the daemon's own root prep.
 	layout := geometry.NewLayout(opts.ColdRoot)
 	if err := config.PrepareRoots(
-		layout.LedgersRoot(), layout.EventsRoot(), layout.EventsIndexRoot(),
-		layout.TxHashRawRoot(), layout.TxHashIndexRoot(),
+		layout.CatalogPath(), layout.LedgersRoot(), layout.EventsRoot(), layout.EventsIndexRoot(),
+		layout.TxHashRawRoot(), layout.TxHashIndexRoot(), layout.HotRoot(),
 	); err != nil {
 		return fmt.Errorf("prepare --cold-out-dir write roots: %w", err)
 	}
-
-	catalogBase := opts.CatalogDir
-	if catalogBase == "" {
-		catalogBase = opts.ColdRoot
-	}
-	cat, releaseCat, err := openScratchCatalog(catalogBase, layout, logger)
+	cat, err := openDatasetCatalog(layout, logger)
 	if err != nil {
 		return err
 	}
-	defer releaseCat()
-
+	defer func() { _ = cat.Close() }()
 	backend, release, err := openSource(ctx, opts.Source)
 	if err != nil {
 		return err
 	}
 	defer release()
+	first := opts.StartChunk
+	//nolint:gosec // validate() proved StartChunk+NumChunks-1 <= maxChunkID
+	end := first + chunk.ID(uint32(opts.NumChunks-1))
 
 	sink := newCSVSink()
-	//nolint:gosec // validate() proved StartChunk+NumChunks-1 <= maxChunkID
-	end := opts.StartChunk + chunk.ID(uint32(opts.NumChunks-1))
-
 	start := time.Now()
 	err = backfill.RunBackfill(ctx, backfill.ExecConfig{
 		Catalog: cat,
@@ -133,13 +125,16 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		// Benchmarks measure one clean attempt; retries would fold failure +
 		// backoff time into the samples.
 		MaxRetries: 0,
-	}, opts.StartChunk, end)
+	}, first, end)
 	if err != nil {
 		writePartialCSVs(logger, sink, opts.OutDir)
-		return fmt.Errorf("backfill [%s,%s]: %w", opts.StartChunk, end, err)
+		return fmt.Errorf("backfill [%s,%s]: %w", first, end, err)
 	}
 	totalWall := time.Since(start)
 
+	if err := finishIngest(cat, first, logger); err != nil {
+		return err
+	}
 	sink.logSummary(logger)
 	logColdWall(logger, sink, opts.NumChunks, totalWall)
 	written, err := sink.writeCSVs(opts.OutDir)

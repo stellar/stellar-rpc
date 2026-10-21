@@ -100,12 +100,12 @@ func txhashIndexPath(t *testing.T, layout geometry.Layout, lo, hi chunk.ID) stri
 
 // TestRunColdFromPack is the end-to-end cold path: fabricate a full chunk's
 // source pack, run the production backfill (RunBackfill: chunk freeze + txhash
-// index build) through runCold, and check the CSV report and the cold
-// artifacts.
+// index build) through runCold into a missing dataset directory, and check the
+// CSV report, the cold artifacts and the finished catalog.
 func TestRunColdFromPack(t *testing.T) {
 	chunkID := chunk.ID(0)
 	packDir, txLedgers := writeSourcePack(t, t.TempDir(), chunkID, chunk.LedgersPerChunk)
-	outRoot := t.TempDir()
+	outRoot := filepath.Join(t.TempDir(), "dataset")
 	csvDir := filepath.Join(t.TempDir(), "csv")
 
 	err := runCold(context.Background(), testLogger(), coldOptions{
@@ -171,6 +171,7 @@ func TestRunColdFromPack(t *testing.T) {
 		assert.FileExists(t, p)
 	}
 	assert.FileExists(t, txhashIndexPath(t, layout, chunkID, chunkID))
+	requireFinishedDataset(t, outRoot, chunkID, chunkID+1)
 }
 
 // TestRunColdMultiChunk exercises the scheduler fan-out: two chunks backfilled
@@ -224,7 +225,7 @@ func TestRunColdRefusesInPlaceRepack(t *testing.T) {
 }
 
 // TestBenchRejectsInvalidSourceEarly asserts a bad --source invocation fails in
-// validate(), before either driver creates its output or scratch directories.
+// validate(), before either driver creates its output or dataset directories.
 func TestBenchRejectsInvalidSourceEarly(t *testing.T) {
 	base := t.TempDir()
 	coldRoot := filepath.Join(base, "cold")
@@ -289,8 +290,9 @@ func TestPackBackendMultiChunkRange(t *testing.T) {
 }
 
 // TestRunHotFromPack is the end-to-end hot path: a capped run over a fixture
-// pack through the production ingestion loop into a fresh hot RocksDB,
-// checking the per-phase report and the fixed-starting-state semantics.
+// pack through the production ingestion loop into an empty dataset directory,
+// checking the per-phase report, the finished catalog and that a second run
+// into the same directory is refused.
 func TestRunHotFromPack(t *testing.T) {
 	const numLedgers = 200
 	chunkID := chunk.ID(0)
@@ -334,9 +336,9 @@ func TestRunHotFromPack(t *testing.T) {
 	// facto contract, and pace_lag belongs to --close-interval runs only.
 	assert.NotContains(t, driver, "pace_lag")
 
-	// A second run against the same hot root succeeds from a fixed (empty)
-	// starting state: the production create bracket wipes the leftover DB.
-	require.NoError(t, runHot(context.Background(), testLogger(), opts))
+	// The live chunk is chunk 0 itself: the capped run ends mid-chunk.
+	requireFinishedDataset(t, hotRoot, chunkID, chunkID)
+	require.ErrorContains(t, runHot(context.Background(), testLogger(), opts), "is not empty")
 }
 
 // TestRunHotIncompleteStream asserts an undersized source is a hard error, not

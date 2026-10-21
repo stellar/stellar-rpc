@@ -135,7 +135,7 @@ func prepareFixtures(
 		return "", fmt.Errorf("make build-libs failed: %w", err)
 	}
 	if err := harness.RunStreaming(ctx, repoRoot, nil, 40,
-		"go", "build", "-o", binaryPath, "./cmd/stellar-rpc/rpcv1"); err != nil {
+		"go", "build", "-o", binaryPath, "./cmd/stellar-rpc"); err != nil {
 		return "", fmt.Errorf("go build failed: %w", err)
 	}
 

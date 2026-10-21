@@ -1,6 +1,7 @@
 package packfile
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,8 +15,9 @@ import (
 )
 
 const (
-	readBufSize         = 1 << 20    // 1 MiB pooled coalesced-read buffer
-	speculativeReadSize = 256 * 1024 // 256 KiB tail prefetch on Open
+	maxRunBytes      = 256 << 10 // largest merged read: one EBS I/O
+	defaultFirstRead = 256 << 10
+	pageSize         = 4 << 10 // the page cache reads files in whole pages
 )
 
 // Reader-side errors that come from trailer parsing on Open. All three
@@ -41,17 +43,6 @@ var (
 // understands. Files with unknown bits set are rejected as corrupt.
 const knownFlags = flagRecordChecksum
 
-// readBufPool is a process-wide pool of 1 MiB read buffers used to coalesce
-// consecutive record reads in ReadRange and ReadItems.
-//
-//nolint:gochecknoglobals // process-wide read buffer pool
-var readBufPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, readBufSize)
-		return &b
-	},
-}
-
 // readAtCloser is the minimal interface needed by Reader to access packfile
 // data. *os.File satisfies it.
 type readAtCloser interface {
@@ -73,13 +64,16 @@ type ReaderOptions struct {
 	// Decode on it.
 	RecordDecoder RecordDecoder
 
-	// Concurrency sets the max parallel goroutines for ReadItems. The
-	// zero value is normalized to 1 (serial): ReadItems still coalesces
-	// consecutive records into single ReadAt calls but does not fan out
-	// across goroutines. Negative values are rejected (deferred error
-	// surfaced by the first read call). Callers who want parallel
-	// scattered I/O must set this explicitly to a value > 1.
+	// Concurrency is the most reads ReadItems keeps in flight; it does not
+	// change which reads it makes. Zero means 1, on the calling goroutine. A
+	// negative value is an error, returned by the first read call.
 	Concurrency int
+
+	// FirstRead sizes Open's first read from the end of the file, given the
+	// file size; nil means 256 KiB. Results are clamped to [trailer size,
+	// file size] and shortened to start on a page boundary; a tail that does
+	// not fit takes one more read for the rest.
+	FirstRead func(fileSize int64) int
 }
 
 // openResult is the transient result produced by doOpen and consumed once
@@ -97,15 +91,11 @@ type openResult struct {
 	err error
 }
 
-// ioBatch is one batch unit produced by ReadItems' batch partitioner and
-// consumed by Reader.processBatch. Kept at package level (rather than
-// scoped inside ReadItems) so processBatch can be a Reader method —
-// closures inside ReadItems escape to heap and add an allocation per
-// call.
-type ioBatch struct {
+// readRun is one ReadAt in ReadItems and the positions it serves.
+type readRun struct {
 	idxStart    int // index range in the caller's positions slice
 	idxEnd      int
-	firstRecord int // record range to read in one coalesced ReadAt
+	firstRecord int // inclusive record range
 	lastRecord  int
 }
 
@@ -176,7 +166,7 @@ func Open(path string, opts ReaderOptions) *Reader {
 	r.concurrency = max(opts.Concurrency, 1)
 
 	r.waitOpen = sync.OnceValue(func() error {
-		res := doOpen(path)
+		res := doOpen(path, opts.FirstRead)
 		if res.err != nil {
 			return res.err
 		}
@@ -197,39 +187,46 @@ func Open(path string, opts ReaderOptions) *Reader {
 
 // doOpen performs all synchronous I/O for opening a packfile.
 // On error it closes the file and returns openResult{err: ...}.
-//
-//nolint:cyclop,nestif,funlen // step-by-step open flow; splitting hurts readability
-func doOpen(path string) openResult {
+func doOpen(path string, firstRead func(int64) int) openResult {
 	f, err := os.Open(path)
 	if err != nil {
 		return openResult{err: fmt.Errorf("packfile: open %q: %w", path, err)}
 	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = f.Close()
-		}
-	}()
-
+	adviseRandom(f)
 	fi, err := f.Stat()
 	if err != nil {
+		_ = f.Close()
 		return openResult{err: fmt.Errorf("packfile: stat: %w", err)}
 	}
-	fileSize := fi.Size()
+	res := openFile(f, fi.Size(), firstRead)
+	if res.err != nil {
+		_ = f.Close()
+	}
+	return res
+}
 
+//nolint:cyclop // step-by-step open flow; splitting hurts readability
+func openFile(f readAtCloser, fileSize int64, firstRead func(int64) int) openResult {
 	if fileSize < trailerSize {
 		return openResult{err: ErrSize}
 	}
 
-	// Speculative read: last min(speculativeReadSize, fileSize) bytes.
-	speculativeSize := min(int64(speculativeReadSize), fileSize)
-	speculativeOff := fileSize - speculativeSize
-	speculativeBuf := make([]byte, speculativeSize)
-	if _, err := f.ReadAt(speculativeBuf, speculativeOff); err != nil {
+	first := int64(defaultFirstRead)
+	if firstRead != nil {
+		first = int64(firstRead(fileSize))
+	}
+	first = min(max(first, trailerSize), fileSize)
+	// Start on a page boundary: a read ending mid-page that also starts mid-page
+	// touches one more page, which at 256 KiB is a second I/O.
+	if start := (fileSize - first + pageSize - 1) &^ (pageSize - 1); fileSize-start >= trailerSize {
+		first = fileSize - start
+	}
+	tail := make([]byte, first)
+	if _, err := readAt(f, tail, fileSize-first); err != nil {
 		return openResult{err: fmt.Errorf("packfile: read trailer region: %w", err)}
 	}
 
-	trailer, err := unmarshalTrailer(speculativeBuf)
+	trailer, err := unmarshalTrailer(tail)
 	if err != nil {
 		return openResult{err: err}
 	}
@@ -239,39 +236,25 @@ func doOpen(path string) openResult {
 	indexSize := int(trailer.IndexSize)
 	appDataSize := int(trailer.AppDataSize)
 
-	indexBase := fileSize - int64(trailerSize) - int64(appDataSize) - int64(indexSize)
+	tailSize := int64(indexSize) + int64(appDataSize) + int64(trailerSize)
+	indexBase := fileSize - tailSize
 	if indexBase < 0 {
 		return openResult{err: ErrSize}
 	}
-
-	tailSize := int64(indexSize) + int64(appDataSize) + int64(trailerSize)
-	var indexBuf []byte
-	var appData []byte
-
-	if tailSize <= speculativeSize {
-		// Index + appData are already inside the speculative read.
-		tailStart := len(speculativeBuf) - int(tailSize)
-		indexBuf = make([]byte, indexSize)
-		copy(indexBuf, speculativeBuf[tailStart:tailStart+indexSize])
-		if appDataSize > 0 {
-			appData = make([]byte, appDataSize)
-			adStart := tailStart + indexSize
-			copy(appData, speculativeBuf[adStart:adStart+appDataSize])
-		}
+	if tailSize <= first {
+		tail = tail[first-tailSize:]
 	} else {
-		// Single fallback read for index + appData.
-		readSize := indexSize + appDataSize
-		buf := make([]byte, readSize)
-		if readSize > 0 {
-			if _, err := f.ReadAt(buf, indexBase); err != nil {
-				return openResult{err: fmt.Errorf("packfile: read index region: %w", err)}
-			}
+		full := make([]byte, tailSize)
+		copy(full[tailSize-first:], tail)
+		if _, err := readAt(f, full[:tailSize-first], indexBase); err != nil {
+			return openResult{err: fmt.Errorf("packfile: read index region: %w", err)}
 		}
-		indexBuf = buf[:indexSize]
-		if appDataSize > 0 {
-			appData = make([]byte, appDataSize)
-			copy(appData, buf[indexSize:indexSize+appDataSize])
-		}
+		tail = full
+	}
+	indexBuf := tail[:indexSize]
+	var appData []byte
+	if appDataSize > 0 {
+		appData = bytes.Clone(tail[indexSize : indexSize+appDataSize])
 	}
 
 	// App data is CRC-covered like the index and the trailer. It has to be:
@@ -316,7 +299,7 @@ func doOpen(path string) openResult {
 		internalItemsPerRecord = 1
 	}
 
-	res := openResult{
+	return openResult{
 		file:           f,
 		trailer:        trailer,
 		offsets:        offsets,
@@ -324,9 +307,6 @@ func doOpen(path string) openResult {
 		totalItems:     totalItems,
 		itemsPerRecord: internalItemsPerRecord,
 	}
-
-	cleanup = false
-	return res
 }
 
 // getRecord borrows a workspace from the process-wide pool and binds this
@@ -342,10 +322,7 @@ func (r *Reader) getRecord() *record {
 
 // putRecord returns a workspace to the pool. Owned slices (scratch,
 // payload, sizes, offsets) reset to length zero with their capacities
-// preserved for steady-state zero-alloc reuse. rec.current is cleared
-// because in passthrough mode it aliases the caller's read buffer; that
-// buffer is about to be returned to its own pool (readBufPool / scratch)
-// and must not stay reachable through the pooled workspace.
+// preserved for steady-state zero-alloc reuse.
 //
 //nolint:funcorder // paired with getRecord
 func (r *Reader) putRecord(rec *record) {
@@ -406,31 +383,25 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 	rec := r.getRecord()
 	defer r.putRecord(rec)
 
-	start, end := r.offsets[recordIdx], r.offsets[recordIdx+1]
-	size := int(end - start)
-	if cap(rec.scratch) < size {
-		rec.scratch = make([]byte, size)
-	} else {
-		rec.scratch = rec.scratch[:size]
+	buf, err := r.readRecords(rec, recordIdx, recordIdx)
+	if err != nil {
+		return err
 	}
-	if _, err := r.file.ReadAt(rec.scratch, start); err != nil {
-		return fmt.Errorf("packfile: read record %d: %w", recordIdx, err)
-	}
-	if err := rec.decode(rec.scratch, recordIdx); err != nil {
+	if err := rec.decode(buf, recordIdx); err != nil {
 		return err
 	}
 	return fn(rec.item(localIdx))
 }
 
 // ReadRange returns an iterator over count contiguous items starting at start.
-// Consecutive records are coalesced into single ReadAt calls using a pooled
-// 1MB buffer, minimizing I/O syscalls for large ranges.
+// Adjacent records merge into reads that touch at most 256 KiB of pages,
+// made one at a time, and nothing past the range is fetched.
 // Each yielded []byte is valid only until the loop body ends, break included — copy if you
 // need to retain it. Safe to break early.
 //
 // Concurrent ReadRange calls on the same Reader are safe; the returned
 // iterator itself is NOT safe for concurrent iteration (it closure-captures
-// a pooled record + read buffer) — iterate from one goroutine.
+// a pooled record). Iterate from one goroutine.
 //
 // Use ReadRange for in-order streaming reads (iter.Seq2 with break-early
 // semantics, no concurrency overhead). Use ReadItems for sorted-or-scattered
@@ -440,7 +411,7 @@ func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
 // Yields ErrPositionOutOfRange (one-shot) if start or count is negative or
 // the range falls outside [0, TotalItems).
 //
-//nolint:gocognit,cyclop // single batched-coalesce loop; splitting hurts readability
+//nolint:gocognit // single merged-read loop; splitting hurts readability
 func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
 		if err := r.waitOpen(); err != nil {
@@ -463,70 +434,33 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 		rec := r.getRecord()
 		defer r.putRecord(rec)
 
-		bp, _ := readBufPool.Get().(*[]byte)
-		buf := *bp
-		defer readBufPool.Put(bp)
-
-		globalIdx := start
-
-		// yieldRecord decodes a record and yields the items within the
-		// [globalIdx, end) range. Returns false if the consumer broke early.
-		yieldRecord := func(recData []byte, recIdx int) bool {
-			if err := rec.decode(recData, recIdx); err != nil {
+		for first := firstRecord; first <= lastRecord; {
+			last := r.runEnd(first, lastRecord)
+			buf, err := r.readRecords(rec, first, last)
+			if err != nil {
 				yield(nil, err)
-				return false
-			}
-			recStart := recIdx * r.itemsPerRecord
-			lo := globalIdx - recStart
-			hi := min(len(rec.sizes), end-recStart)
-			for i := lo; i < hi; i++ {
-				if !yield(rec.item(i), nil) {
-					return false
-				}
-				globalIdx++
-			}
-			return true
-		}
-
-		// Batch consecutive records into single ReadAt calls.
-		batchStart := firstRecord
-		for batchStart <= lastRecord {
-			batchEnd := batchStart + 1
-			for batchEnd <= lastRecord && r.offsets[batchEnd+1]-r.offsets[batchStart] <= int64(len(buf)) {
-				batchEnd++
-			}
-
-			// If a single record exceeds the buffer, allocate one-off.
-			recBytes := r.offsets[batchStart+1] - r.offsets[batchStart]
-			if recBytes > int64(len(buf)) {
-				oneOff := make([]byte, recBytes)
-				if _, err := r.file.ReadAt(oneOff, r.offsets[batchStart]); err != nil {
-					yield(nil, fmt.Errorf("packfile: read record %d: %w", batchStart, err))
-					return
-				}
-				if !yieldRecord(oneOff, batchStart) {
-					return
-				}
-				batchStart++
-				continue
-			}
-
-			batchBytes := r.offsets[batchEnd] - r.offsets[batchStart]
-			readBuf := buf[:batchBytes]
-			if _, err := r.file.ReadAt(readBuf, r.offsets[batchStart]); err != nil {
-				yield(nil, fmt.Errorf("packfile: read records [%d, %d): %w", batchStart, batchEnd, err))
 				return
 			}
-
-			for j := batchStart; j < batchEnd; j++ {
-				lo := r.offsets[j] - r.offsets[batchStart]
-				hi := r.offsets[j+1] - r.offsets[batchStart]
-				if !yieldRecord(readBuf[lo:hi], j) {
+			// From the second read on, so a consumer that stops in its first read pays no extra I/O.
+			if first > firstRecord && last < lastRecord {
+				next := r.runEnd(last+1, lastRecord)
+				prefetch(r.file, r.offsets[last+1], r.offsets[next+1]-r.offsets[last+1])
+			}
+			for j := first; j <= last; j++ {
+				lo := r.offsets[j] - r.offsets[first]
+				hi := r.offsets[j+1] - r.offsets[first]
+				if err := rec.decode(buf[lo:hi], j); err != nil {
+					yield(nil, err)
 					return
 				}
+				recStart := j * r.itemsPerRecord
+				for i := max(start-recStart, 0); i < min(len(rec.sizes), end-recStart); i++ {
+					if !yield(rec.item(i), nil) {
+						return
+					}
+				}
 			}
-
-			batchStart = batchEnd
+			first = last + 1
 		}
 	}
 }
@@ -535,22 +469,17 @@ func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
 // fn receives the index in the original positions slice and a borrowed data
 // slice valid only for the duration of the call — copy if needed.
 //
-// fn may be called concurrently from up to min(ReaderOptions.Concurrency,
-// number of I/O batches) goroutines, and in arbitrary order. With a single
-// batch the work runs entirely in the calling goroutine regardless of
-// configured Concurrency (no goroutine spawn). The idx argument identifies
-// which element in positions the data corresponds to.
-//
-// Batching notes: many positions inside the same record collapse into a
-// single batch (so one worker drains them serially regardless of
-// Concurrency). A single record larger than the 1 MiB coalesced-read
-// buffer falls back to a one-off allocation for that batch's ReadAt.
+// fn runs on up to min(ReaderOptions.Concurrency, number of reads)
+// goroutines, concurrently and in arbitrary order; with Concurrency 1 or a
+// single read, it runs on the calling goroutine. Positions in one record
+// share one read and decode, and adjacent records merge into reads that touch
+// at most 256 KiB of pages.
 //
 // positions must be sorted ascending with no duplicates. Returns
 // ErrPositionOutOfRange if any position is outside [0, TotalItems) or
 // ErrPositionsUnsorted if positions are not strictly sorted.
 //
-//nolint:gocognit,cyclop // batch partitioning + worker fan-out; splitting hurts readability
+//nolint:gocognit,cyclop // run formation + worker fan-out; splitting hurts readability
 func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int, data []byte) error) error {
 	if err := r.waitOpen(); err != nil {
 		return err
@@ -571,127 +500,68 @@ func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int
 		return nil
 	}
 
-	maxPerBatch := max(1, (len(positions)+r.concurrency-1)/r.concurrency)
-	batches := make([]ioBatch, 0, r.concurrency)
-	batchIdxStart := 0
-	firstRec := positions[0] / r.itemsPerRecord
-	lastRec := firstRec
-	batchBytes := r.offsets[firstRec+1] - r.offsets[firstRec]
-
-	for i := 1; i < len(positions); i++ {
-		rec := positions[i] / r.itemsPerRecord
-		if rec == lastRec {
-			continue
+	var runs []readRun
+	for i := 0; i < len(positions); {
+		first := positions[i] / r.itemsPerRecord
+		last := first
+		j := i + 1
+		for ; j < len(positions); j++ {
+			rec := positions[j] / r.itemsPerRecord
+			if rec == last {
+				continue
+			}
+			if rec != last+1 || pageSpan(r.offsets[first], r.offsets[rec+1]) > maxRunBytes {
+				break
+			}
+			last = rec
 		}
-		recBytes := r.offsets[rec+1] - r.offsets[rec]
-		if rec == lastRec+1 &&
-			batchBytes+recBytes <= int64(readBufSize) &&
-			i-batchIdxStart < maxPerBatch {
-			batchBytes += recBytes
-			lastRec = rec
-		} else {
-			batches = append(batches, ioBatch{batchIdxStart, i, firstRec, lastRec})
-			batchIdxStart = i
-			firstRec = rec
-			lastRec = rec
-			batchBytes = recBytes
-		}
+		runs = append(runs, readRun{i, j, first, last})
+		i = j
 	}
-	batches = append(batches, ioBatch{batchIdxStart, len(positions), firstRec, lastRec})
 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	numWorkers := min(len(batches), r.concurrency)
+	numWorkers := min(len(runs), r.concurrency)
 
 	// Serial fast path: no goroutine spawn, no atomic dispatch, no errgroup.
 	if numWorkers == 1 {
 		rec := r.getRecord()
 		defer r.putRecord(rec)
-		bp, _ := readBufPool.Get().(*[]byte)
-		defer readBufPool.Put(bp)
-		for i := range batches {
+		for i := range runs {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if err := r.processBatch(rec, *bp, positions, batches[i], fn); err != nil {
+			if err := r.processRun(rec, positions, runs[i], fn); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 
-	// Concurrent fan-out: workers steal batches via an atomic counter,
-	// errgroup captures the first error and cancels the derived ctx.
-	var nextBatch atomic.Int64
+	// Concurrent fan-out: workers take runs from an atomic counter.
+	var nextRun atomic.Int64
 	g, gctx := errgroup.WithContext(ctx)
 	for range numWorkers {
 		g.Go(func() error {
 			rec := r.getRecord()
 			defer r.putRecord(rec)
-			bp, _ := readBufPool.Get().(*[]byte)
-			defer readBufPool.Put(bp)
 			for {
-				bi := int(nextBatch.Add(1)) - 1
-				if bi >= len(batches) {
+				i := int(nextRun.Add(1)) - 1
+				if i >= len(runs) {
 					return nil
 				}
 				if err := gctx.Err(); err != nil {
 					return err
 				}
-				if err := r.processBatch(rec, *bp, positions, batches[bi], fn); err != nil {
+				if err := r.processRun(rec, positions, runs[i], fn); err != nil {
 					return err
 				}
 			}
 		})
 	}
 	return g.Wait()
-}
-
-// processBatch handles one batch's ReadAt + decode + fn loop. Shared
-// between ReadItems' serial fast path (Concurrency=1) and its worker
-// fan-out so the per-batch logic lives in one place. Made a method
-// (rather than a closure inside ReadItems) so it doesn't capture and
-// escape — one less heap alloc per ReadItems call.
-//
-//nolint:funcorder,lll // helper for ReadItems; positions/fn passed explicitly so processBatch isn't a closure (no escape)
-func (r *Reader) processBatch(
-	rec *record, buf []byte, positions []int, batch ioBatch, fn func(int, []byte) error,
-) error {
-	readStart := r.offsets[batch.firstRecord]
-	readEnd := r.offsets[batch.lastRecord+1]
-	readSize := readEnd - readStart
-
-	var readBuf []byte
-	if readSize <= int64(len(buf)) {
-		readBuf = buf[:readSize]
-	} else {
-		readBuf = make([]byte, readSize)
-	}
-
-	if _, err := r.file.ReadAt(readBuf, readStart); err != nil {
-		return fmt.Errorf("packfile: read records [%d, %d]: %w",
-			batch.firstRecord, batch.lastRecord, err)
-	}
-
-	prevRec := -1
-	for k := batch.idxStart; k < batch.idxEnd; k++ {
-		recIdx := positions[k] / r.itemsPerRecord
-		localIdx := positions[k] - recIdx*r.itemsPerRecord
-		if recIdx != prevRec {
-			recOff := r.offsets[recIdx] - readStart
-			recEnd := r.offsets[recIdx+1] - readStart
-			if err := rec.decode(readBuf[recOff:recEnd], recIdx); err != nil {
-				return err
-			}
-			prevRec = recIdx
-		}
-		if err := fn(k, rec.item(localIdx)); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // Close releases the underlying file handle. Safe to call multiple times.
@@ -714,4 +584,68 @@ func (r *Reader) Close() error {
 		r.closeErr = errors.Join(openErr, closeErr)
 	})
 	return r.closeErr
+}
+
+// runEnd returns the last record of the read that starts at record first:
+// adjacent records join it while the pages they touch fit in maxRunBytes.
+func (r *Reader) runEnd(first, lastRecord int) int {
+	last := first
+	for last < lastRecord && pageSpan(r.offsets[first], r.offsets[last+2]) <= maxRunBytes {
+		last++
+	}
+	return last
+}
+
+// pageSpan is the bytes the page cache reads to serve [start, end).
+func pageSpan(start, end int64) int64 {
+	return (end+pageSize-1)&^(pageSize-1) - start&^(pageSize-1)
+}
+
+// readAt reads len(buf) bytes at off. A read spanning more than one I/O hints
+// all of its pieces first, so they are in flight together; without readahead
+// the kernel would fetch them one at a time.
+func readAt(f readAtCloser, buf []byte, off int64) (int, error) {
+	if n := int64(len(buf)); pageSpan(off, off+n) > maxRunBytes {
+		prefetch(f, off, n)
+	}
+	return f.ReadAt(buf, off)
+}
+
+func (r *Reader) readRecords(rec *record, first, last int) ([]byte, error) {
+	start, end := r.offsets[first], r.offsets[last+1]
+	size := int(end - start)
+	if cap(rec.scratch) < size {
+		rec.scratch = make([]byte, size)
+	} else {
+		rec.scratch = rec.scratch[:size]
+	}
+	if _, err := readAt(r.file, rec.scratch, start); err != nil {
+		return nil, fmt.Errorf("packfile: read records [%d, %d]: %w", first, last, err)
+	}
+	return rec.scratch, nil
+}
+
+func (r *Reader) processRun(rec *record, positions []int, run readRun, fn func(int, []byte) error) error {
+	buf, err := r.readRecords(rec, run.firstRecord, run.lastRecord)
+	if err != nil {
+		return err
+	}
+	readStart := r.offsets[run.firstRecord]
+	prevRec := -1
+	for k := run.idxStart; k < run.idxEnd; k++ {
+		recIdx := positions[k] / r.itemsPerRecord
+		localIdx := positions[k] - recIdx*r.itemsPerRecord
+		if recIdx != prevRec {
+			recOff := r.offsets[recIdx] - readStart
+			recEnd := r.offsets[recIdx+1] - readStart
+			if err := rec.decode(buf[recOff:recEnd], recIdx); err != nil {
+				return err
+			}
+			prevRec = recIdx
+		}
+		if err := fn(k, rec.item(localIdx)); err != nil {
+			return err
+		}
+	}
+	return nil
 }

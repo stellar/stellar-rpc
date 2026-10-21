@@ -10,6 +10,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
@@ -20,6 +21,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
 // run is the daemon's startup, in two steps: (1) BACKFILL to the tip, then
@@ -55,7 +57,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// highest ready hot DB before ingestion opens a writer; a read-only open
 	// replays any synced WAL from an ungraceful crash into memtables, so
 	// MaxCommittedSeq is correct.
-	lastCommitted, err := lastCommittedLedger(cat)
+	lastCommitted, err := LastCommittedLedger(cat)
 	if err != nil {
 		return fmt.Errorf("startup derive last-committed: %w", err)
 	}
@@ -82,16 +84,13 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// the live chunk's next un-committed ledger.
 	resumeLedger := lastCommitted + 1
 
-	// Open the resume chunk's hot DB BEFORE serving reads, so a broken hot tier (a
-	// "ready" key whose DB won't open) fails startup instead of serving behind a
-	// crash-looping ingestion loop. run() owns the close only until the loop takes
-	// over: loopOwnsDB flips true at the errgroup launch, after which the loop's
-	// deferred close owns it (and g.Wait joins before run returns, so there is no
-	// window where neither owns it). Restarts re-enter run() from the top, so this
-	// stays the single initial-open site; the loop still reopens at each boundary.
-	hotDB, err := openHotDBForChunk(cat, chunk.IDFromLedger(resumeLedger), logger)
+	// Open the resume chunk's hot DB and the serving registry before serving
+	// reads, so a broken hot tier fails startup. run() closes the DB only until
+	// loopOwnsDB flips at the errgroup launch; the loop's deferred close owns it
+	// from then on.
+	registry, hotDB, err := OpenServing(cat, cfg.Retention, lastCommitted, logger)
 	if err != nil {
-		return fmt.Errorf("startup open resume hot tier for ledger %d: %w", resumeLedger, err)
+		return fmt.Errorf("startup %w", err)
 	}
 	loopOwnsDB := false
 	defer func() {
@@ -99,6 +98,10 @@ func run(ctx context.Context, cfg StartConfig) error {
 			_ = hotDB.Close() // an error before the loop took ownership
 		}
 	}()
+	cfg.Exec.Process.HotHandle = registry.Handle
+	// Runs after g.Wait joins the loops below; Registry.Close owns the
+	// double-close story.
+	defer registry.Close()
 
 	// Seed the hot-chunk gauge after the resume open, which may have created
 	// the live chunk's key. The lifecycle tick keeps it current from here.
@@ -130,31 +133,6 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// run left behind are re-collected by this first run's scans and destroyed
 	// after the usual grace period, staying invisible to routing meanwhile (R1).
 	boundary.Publish()
-
-	// The serving registry: OpenRegistry returns it serving-ready (ready handles
-	// published, the live chunk's handle and latest ledger seeded), so a read view
-	// acquired before the first commit is correct. The ingestion loop advances the
-	// latest ledger and publishes handles from here, the freeze reads through them
-	// (HotHandle), and the lifecycle retires them at discard. Constructed per run —
-	// no query survives a restart; ServeReads below serves this run's reads from it.
-	registry, err := query.OpenRegistry(cat, cfg.Retention, hotDB, lastCommitted)
-	if err != nil {
-		return fmt.Errorf("startup open registry: %w", err)
-	}
-	cfg.Exec.Process.HotHandle = registry.Handle
-	// Runs after g.Wait joins the loops below; Registry.Close owns the
-	// double-close story.
-	defer registry.Close()
-
-	// Stamp both window edges' close times before serving begins, so the first
-	// requests don't pay the point reads (see adapters.SeedCloseTimes). An
-	// unreadable edge fails startup: every response stamps these edges, so a
-	// node that cannot read one would serve errors on every method while
-	// looking alive — crash-only says that surfaces as a visible crash-loop
-	// instead. A transient read blip at boot costs one orchestrator restart.
-	if err := adapters.SeedCloseTimes(registry); err != nil {
-		return fmt.Errorf("startup seed close times: %w", err)
-	}
 
 	// Refill the fee windows from committed history BEFORE the ingestion loop
 	// launches below (#888): the replay covers [start, lastCommitted] and the
@@ -233,6 +211,55 @@ func run(ctx context.Context, cfg StartConfig) error {
 		return cfg.ServeReads(gctx, registry, listener)
 	})
 	return g.Wait()
+}
+
+// OpenServing opens a read registry over catalog's committed state and a hot DB
+// for ledger lastCommitted+1, with close times for both serving-window edges.
+// When that ledger's chunk has no ready hot DB, OpenServing creates it and
+// records it in cat. The caller must close the registry, which also closes the
+// returned DB. On error, it closes any resources it opened.
+func OpenServing(
+	cat *catalog.Catalog, retention geometry.Retention, lastCommitted uint32, logger *supportlog.Entry,
+) (*query.Registry, *hotchunk.DB, error) {
+	hotDB, err := openResumeHotDB(cat, lastCommitted, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	registry, err := query.OpenRegistry(cat, retention, hotDB, lastCommitted)
+	if err != nil {
+		_ = hotDB.Close()
+		return nil, nil, fmt.Errorf("open registry: %w", err)
+	}
+	// An unreadable edge fails startup: every response stamps these edges, so a
+	// node that cannot read one would serve errors on every method while
+	// looking alive — crash-only says that surfaces as a visible crash-loop
+	// instead. A transient read blip at boot costs one orchestrator restart.
+	if err := adapters.SeedCloseTimes(registry); err != nil {
+		registry.Close()
+		return nil, nil, fmt.Errorf("seed close times: %w", err)
+	}
+	return registry, hotDB, nil
+}
+
+// CreateLiveChunk opens, or creates, the hot DB of the chunk that holds ledger
+// lastCommitted+1, as daemon startup does, and closes it.
+func CreateLiveChunk(cat *catalog.Catalog, lastCommitted uint32, logger *supportlog.Entry) error {
+	hotDB, err := openResumeHotDB(cat, lastCommitted, logger)
+	if err != nil {
+		return err
+	}
+	return hotDB.Close()
+}
+
+// openResumeHotDB opens or creates the hot DB of the chunk that holds ledger
+// lastCommitted+1.
+func openResumeHotDB(cat *catalog.Catalog, lastCommitted uint32, logger *supportlog.Entry) (*hotchunk.DB, error) {
+	resume := lastCommitted + 1
+	hotDB, err := openHotDBForChunk(cat, chunk.IDFromLedger(resume), logger)
+	if err != nil {
+		return nil, fmt.Errorf("open resume hot tier for ledger %d: %w", resume, err)
+	}
+	return hotDB, nil
 }
 
 // requirePinnedEarliest returns the pinned earliest_ledger, erroring when the pin

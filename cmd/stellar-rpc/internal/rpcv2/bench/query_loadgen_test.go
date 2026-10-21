@@ -33,6 +33,13 @@ func (c *fakeScenarioClock) now() time.Time {
 	return c.t
 }
 
+// advance moves the time forward by d.
+func (c *fakeScenarioClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
 func (c *fakeScenarioClock) waitUntil(ctx context.Context, t time.Time) error {
 	c.mu.Lock()
 	i := len(c.waits)
@@ -91,7 +98,7 @@ func okRequest(context.Context, *rand.Rand) (requestTiming, error) {
 func TestScenarioPlannedCount(t *testing.T) {
 	const rps = 200.0
 	fake := &countingRequest{}
-	res, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, rps, 100*time.Millisecond, 5, 42, fake.run)
+	res, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, rps, 100*time.Millisecond, 5, 42, fake.run, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 20, res.planned)
@@ -133,7 +140,7 @@ func (d *drawRecorder) run(_ context.Context, rng *rand.Rand) (requestTiming, er
 // different rates, draw distinct values.
 func TestScenarioRNGIndependence(t *testing.T) {
 	first := &drawRecorder{}
-	_, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, 500, 40*time.Millisecond, 0, 7, first.run)
+	_, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, 500, 40*time.Millisecond, 0, 7, first.run, nil)
 	require.NoError(t, err)
 	require.Len(t, first.draws, 20)
 
@@ -144,7 +151,7 @@ func TestScenarioRNGIndependence(t *testing.T) {
 	}
 
 	second := &drawRecorder{}
-	_, err = runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, 250, 80*time.Millisecond, 0, 7, second.run)
+	_, err = runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, 250, 80*time.Millisecond, 0, 7, second.run, nil)
 	require.NoError(t, err)
 	require.Len(t, second.draws, 20)
 	for _, v := range second.draws {
@@ -185,7 +192,7 @@ func TestScenarioDrops(t *testing.T) {
 		}
 	}}
 
-	res, err := runConstantArrivalRate(ctx, clock, 1000, (reached+1)*time.Millisecond, 0, 3, fake.run)
+	res, err := runConstantArrivalRate(ctx, clock, 1000, (reached+1)*time.Millisecond, 0, 3, fake.run, nil)
 	require.ErrorIs(t, err, context.Canceled)
 
 	assert.Equal(t, maxConcurrent, res.measured.started)
@@ -212,7 +219,7 @@ func TestScenarioCountsFailures(t *testing.T) {
 		return timed(func() (int, error) { return 1, nil })
 	}
 
-	res, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, rps, 100*time.Millisecond, 0, 11, req)
+	res, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, rps, 100*time.Millisecond, 0, 11, req, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 20, res.measured.started)
@@ -236,7 +243,7 @@ func TestScenarioRoundsTheInterval(t *testing.T) {
 	assert.Equal(t, 142857143*time.Nanosecond, scenarioInterval(7))
 
 	clock := &fakeScenarioClock{}
-	res, err := runConstantArrivalRate(t.Context(), clock, 7, 300*time.Millisecond, 0, 1, okRequest)
+	res, err := runConstantArrivalRate(t.Context(), clock, 7, 300*time.Millisecond, 0, 1, okRequest, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 2, res.planned)
 	assert.Equal(t, 2*142857143*time.Nanosecond, res.schedule)
@@ -266,7 +273,7 @@ func TestScenarioContextCancel(t *testing.T) {
 			defer cancel()
 			clock := &fakeScenarioClock{onWait: cancelAtWait(cancel, tc.reached)}
 
-			res, err := runConstantArrivalRate(ctx, clock, tc.rps, 10*time.Second, 0, 5, req)
+			res, err := runConstantArrivalRate(ctx, clock, tc.rps, 10*time.Second, 0, 5, req, nil)
 			require.ErrorIs(t, err, context.Canceled)
 			assert.Equal(t, int64(0), running.Load())
 			assert.Len(t, clock.waits, tc.reached+1, "no wait after the cancel")
@@ -290,7 +297,7 @@ func TestScenarioAlreadyCanceled(t *testing.T) {
 		return requestTiming{items: 1}, nil
 	}
 
-	res, err := runConstantArrivalRate(ctx, &fakeScenarioClock{}, 100, time.Second, 5, 1, req)
+	res, err := runConstantArrivalRate(ctx, &fakeScenarioClock{}, 100, time.Second, 5, 1, req, nil)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Zero(t, calls.Load())
 	assert.Zero(t, res.planned)
@@ -314,7 +321,7 @@ func TestScenarioCancelWhileRequestsRun(t *testing.T) {
 		return requestTiming{items: 1}, nil
 	}
 
-	res, err := runConstantArrivalRate(ctx, &fakeScenarioClock{}, 1000, 3*time.Millisecond, 0, 1, req)
+	res, err := runConstantArrivalRate(ctx, &fakeScenarioClock{}, 1000, 3*time.Millisecond, 0, 1, req, nil)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, 3, res.planned)
 	assert.Len(t, res.timings, 3)
@@ -338,7 +345,7 @@ func TestScenarioCancelReachesRequests(t *testing.T) {
 		}
 	}
 
-	res, err := runConstantArrivalRate(ctx, &fakeScenarioClock{}, 1000, 3*time.Millisecond, 0, 1, req)
+	res, err := runConstantArrivalRate(ctx, &fakeScenarioClock{}, 1000, 3*time.Millisecond, 0, 1, req, nil)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, 3, res.measured.started)
 	assert.Equal(t, 3, res.measured.failed)
@@ -362,7 +369,8 @@ func TestScenarioStartsWithoutWaitingForResponses(t *testing.T) {
 		return requestTiming{items: 1}, nil
 	}
 
-	res, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, 1000, iterations*time.Millisecond, 0, 13, req)
+	res, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, 1000, iterations*time.Millisecond, 0, 13,
+		req, nil)
 	require.NoError(t, err)
 	assert.Equal(t, iterations, res.measured.started)
 	assert.Zero(t, res.measured.dropped)
@@ -390,28 +398,28 @@ func TestScenarioChargesLateStart(t *testing.T) {
 // TestScenarioRejectsBadArguments: a bad rate, duration or warmup is an error.
 func TestScenarioRejectsBadArguments(t *testing.T) {
 	clock := &fakeScenarioClock{}
-	_, err := runConstantArrivalRate(t.Context(), clock, 0, time.Second, 0, 1, okRequest)
+	_, err := runConstantArrivalRate(t.Context(), clock, 0, time.Second, 0, 1, okRequest, nil)
 	assert.Error(t, err)
-	_, err = runConstantArrivalRate(t.Context(), clock, 10, 0, 0, 1, okRequest)
+	_, err = runConstantArrivalRate(t.Context(), clock, 10, 0, 0, 1, okRequest, nil)
 	assert.Error(t, err)
 	// At 1e-12 rps the interval does not fit in a Duration.
-	_, err = runConstantArrivalRate(t.Context(), clock, 1e-12, time.Second, 0, 1, okRequest)
+	_, err = runConstantArrivalRate(t.Context(), clock, 1e-12, time.Second, 0, 1, okRequest, nil)
 	assert.ErrorContains(t, err, "too low")
 	// 1e6 rps over a century is more iterations than the scenario cap allows.
-	_, err = runConstantArrivalRate(t.Context(), clock, 1e6, 100*365*24*time.Hour, 0, 1, okRequest)
+	_, err = runConstantArrivalRate(t.Context(), clock, 1e6, 100*365*24*time.Hour, 0, 1, okRequest, nil)
 	assert.ErrorContains(t, err, "more than")
 	// 0.01 rps for a second rounds to no measured iteration at all.
-	_, err = runConstantArrivalRate(t.Context(), clock, 0.01, time.Second, 0, 1, okRequest)
+	_, err = runConstantArrivalRate(t.Context(), clock, 0.01, time.Second, 0, 1, okRequest, nil)
 	assert.ErrorContains(t, err, "no measured iteration")
 	// A warmup at the scenario cap leaves no room for a measured iteration.
-	_, err = runConstantArrivalRate(t.Context(), clock, 10, time.Second, maxIterations, 1, okRequest)
+	_, err = runConstantArrivalRate(t.Context(), clock, 10, time.Second, maxIterations, 1, okRequest, nil)
 	assert.ErrorContains(t, err, "warmup plus")
 	assert.Empty(t, clock.waits, "a rejected scenario never waits")
 }
 
 // TestScenarioNegativeWarmup: a negative warmup counts as zero.
 func TestScenarioNegativeWarmup(t *testing.T) {
-	res, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, 1000, 10*time.Millisecond, -3, 1, okRequest)
+	res, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, 1000, 10*time.Millisecond, -3, 1, okRequest, nil)
 	require.NoError(t, err)
 	assert.Zero(t, res.warmup.started+res.warmup.dropped)
 	assert.Equal(t, 10, res.planned)
@@ -447,7 +455,7 @@ func TestScenarioRejectsOutOfRangeArguments(t *testing.T) {
 		{"schedule length", 0.001, 1000 * time.Second, 10_000_000, "schedule overflows"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, tc.rps, tc.duration, tc.warmup, 1, nil)
+			res, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, tc.rps, tc.duration, tc.warmup, 1, nil, nil)
 			require.ErrorContains(t, err, tc.want)
 			assert.Equal(t, scenarioResult{}, res)
 		})
@@ -466,7 +474,7 @@ func TestScenarioLowRate(t *testing.T) {
 func TestScenarioNanosecondInterval(t *testing.T) {
 	for _, rps := range []float64{math.Nextafter(1e9, 0), 1e9} {
 		t.Run(formatRPS(rps), func(t *testing.T) {
-			res, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, rps, time.Nanosecond, 0, 1, okRequest)
+			res, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{}, rps, time.Nanosecond, 0, 1, okRequest, nil)
 			require.NoError(t, err)
 			assert.Equal(t, 1, res.planned)
 			assert.Equal(t, 1, res.measured.started)
@@ -566,7 +574,7 @@ func TestScenarioCancelDuringWarmup(t *testing.T) {
 	defer cancel()
 	clock := &fakeScenarioClock{t: time.Unix(100, 0), onWait: cancelAtWait(cancel, 3)}
 
-	res, err := runConstantArrivalRate(ctx, clock, 1000, 10*time.Millisecond, 5, 1, okRequest)
+	res, err := runConstantArrivalRate(ctx, clock, 1000, 10*time.Millisecond, 5, 1, okRequest, nil)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, 3, res.warmup.started+res.warmup.dropped)
 	assert.Zero(t, res.planned)
@@ -607,7 +615,7 @@ func TestScenarioAbsoluteDueTimes(t *testing.T) {
 		return requestTiming{items: 1}, nil
 	}
 
-	res, err := runConstantArrivalRate(t.Context(), clock, rps, measured*interval, warmup, 1, req)
+	res, err := runConstantArrivalRate(t.Context(), clock, rps, measured*interval, warmup, 1, req, nil)
 	require.NoError(t, err)
 
 	wantWaits := make([]time.Time, total)
@@ -654,7 +662,7 @@ func TestTimerClock(t *testing.T) {
 	require.ErrorIs(t, timerClock{}.waitUntil(ctx, time.Now().Add(-time.Hour)), context.Canceled)
 
 	start := time.Now()
-	res, err := runConstantArrivalRate(t.Context(), timerClock{}, 1000, 20*time.Millisecond, 0, 1, cpuRequest)
+	res, err := runConstantArrivalRate(t.Context(), timerClock{}, 1000, 20*time.Millisecond, 0, 1, cpuRequest, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 20, res.planned)
 	assert.Equal(t, res.planned, res.measured.started+res.measured.dropped)
@@ -664,4 +672,63 @@ func TestTimerClock(t *testing.T) {
 	for i, timing := range res.timings {
 		assert.GreaterOrEqual(t, timing.latencyFromDue, timing.latency, "request %d", i)
 	}
+}
+
+// timed runs fn and returns its run time as latency.
+func timed(fn func() (int, error)) (requestTiming, error) {
+	start := time.Now()
+	items, err := fn()
+	latency := time.Since(start)
+	if err != nil {
+		return requestTiming{}, err
+	}
+	return requestTiming{latency: latency, items: items}, nil
+}
+
+// onMeasure runs once, before the wait for the first measured iteration; its
+// error ends the scenario before any measured request; a cancel during warmup
+// skips it.
+func TestScenarioOnMeasure(t *testing.T) {
+	const warmup = 3
+	start := time.Unix(100, 0)
+
+	t.Run("runs once before the first measured wait", func(t *testing.T) {
+		clock := &fakeScenarioClock{t: start}
+		var calls int
+		var waitsAtCall []time.Time
+		res, err := runConstantArrivalRate(t.Context(), clock, 1000, 5*time.Millisecond, warmup, 1, okRequest,
+			func() error {
+				calls++
+				clock.mu.Lock()
+				waitsAtCall = slices.Clone(clock.waits)
+				clock.mu.Unlock()
+				return nil
+			})
+		require.NoError(t, err)
+		assert.Equal(t, 1, calls)
+		require.Len(t, waitsAtCall, warmup)
+		assert.Equal(t, start.Add((warmup-1)*time.Millisecond), waitsAtCall[warmup-1])
+		assert.Equal(t, 5, res.measured.started)
+	})
+
+	t.Run("an error ends the scenario", func(t *testing.T) {
+		hookErr := errors.New("hook failed")
+		res, err := runConstantArrivalRate(t.Context(), &fakeScenarioClock{t: start}, 1000, 5*time.Millisecond,
+			warmup, 1, okRequest, func() error { return hookErr })
+		require.ErrorIs(t, err, hookErr)
+		assert.Equal(t, warmup, res.warmup.started)
+		assert.Zero(t, res.planned)
+		assert.Zero(t, res.measured.started)
+	})
+
+	t.Run("a cancel during warmup skips it", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		clock := &fakeScenarioClock{t: start, onWait: cancelAtWait(cancel, 2)}
+		called := false
+		_, err := runConstantArrivalRate(ctx, clock, 1000, 5*time.Millisecond, warmup, 1, okRequest,
+			func() error { called = true; return nil })
+		require.ErrorIs(t, err, context.Canceled)
+		assert.False(t, called)
+	})
 }

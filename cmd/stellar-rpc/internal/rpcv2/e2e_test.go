@@ -538,7 +538,7 @@ func e2eReadCatalog(t *testing.T, dataDir string) (*catalog.Catalog, func()) {
 // Layout path).
 func mustDeriveLastCommitted(t *testing.T, cat *catalog.Catalog) uint32 {
 	t.Helper()
-	lastCommitted, err := lastCommittedLedger(cat)
+	lastCommitted, err := LastCommittedLedger(cat)
 	require.NoError(t, err)
 	return lastCommitted
 }

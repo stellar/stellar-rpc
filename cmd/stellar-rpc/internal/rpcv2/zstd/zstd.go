@@ -14,19 +14,17 @@
 //     ZSTD_compress2 resolve to the unoptimized vendored copy, making RocksDB
 //     5x slower. macOS is immune (Mach-O two-level namespace).
 //
-// This wrapper links system libzstd directly. On macOS it dynamically links
-// via pkg-config (homebrew). No build tags, no vendored code, no interposition
-// risk. Requires libzstd >= 1.5.7 (enforced at runtime via checkVersion()).
+// This wrapper links the libzstd.a that scripts/install-zstd.sh builds; the
+// Makefile and CI put its prefix in CGO_CPPFLAGS and CGO_LDFLAGS. No build tags,
+// no vendored code, no interposition risk. Requires libzstd >= 1.5.7
+// (enforced at runtime via checkVersion()).
 // Compressor is not safe for concurrent use — each goroutine should own
 // its own instance. Decompressor is safe for concurrent use (it pools
 // DCtxs internally) — instantiate once and share.
 package zstd
 
 /*
-#cgo darwin pkg-config: libzstd
-#cgo darwin CFLAGS: -I/opt/homebrew/include -I/usr/local/include
-#cgo darwin LDFLAGS: -L/opt/homebrew/lib -L/usr/local/lib
-#cgo linux LDFLAGS: -lzstd
+#cgo LDFLAGS: -lzstd
 #include <zstd.h>
 */
 import "C"

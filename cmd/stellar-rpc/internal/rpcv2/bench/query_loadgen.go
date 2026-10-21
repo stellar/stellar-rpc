@@ -18,15 +18,35 @@ import (
 type requestTiming struct {
 	// latency is the run time of the request itself.
 	latency time.Duration
+	// handlerLatency is the run time of the method handler inside latency.
+	handlerLatency time.Duration
 	// latencyFromDue spans the iteration's due time to its response.
 	latencyFromDue time.Duration
 	items          int
+	// outcome is the txhash lookup result, the events filter set, or
+	// outcomeNone.
+	outcome lookupOutcome
 }
 
-// queryRequest sends one request and measures its own latency, usually by
-// calling timed. Calls run concurrently, each with its own rng. A request must
-// return soon after ctx is done, because a canceled scenario waits for every
-// running request.
+// lookupOutcome splits a query type's latencies by request kind in the
+// latency.csv outcome column.
+type lookupOutcome uint8
+
+const (
+	outcomeNone lookupOutcome = iota
+	outcomeFound
+	outcomeNotFound
+	outcomeUnfiltered
+	outcomeFrequentContract
+	outcomeFrequentPair
+	outcomeRareContract
+	outcomeNoMatch
+	numOutcomes
+)
+
+// queryRequest sends one request and measures its own latency. Calls run
+// concurrently, each with its own rng. A request must return soon after ctx is
+// done, because a canceled scenario waits for every running request.
 type queryRequest func(ctx context.Context, rng *rand.Rand) (requestTiming, error)
 
 // maxConcurrent caps a scenario's running requests. An iteration reached while
@@ -37,7 +57,7 @@ const maxConcurrent = 512
 const maxRPS = float64(time.Second)
 
 // maxIterations caps a scenario's iterations, warmup included. At the cap one
-// scenario peaks at about 5.6 GB of memory.
+// scenario peaks at about 7.2 GB of memory.
 const maxIterations = 100_000_000
 
 // phaseCounts counts one phase's iterations. Each iteration is started or
@@ -226,13 +246,17 @@ func validateScenario(rps float64, duration time.Duration, warmup int) (time.Dur
 // iterations per second and never waits for a response. The first warmup
 // iterations are not measured; a negative warmup counts as zero.
 //
+// onMeasure, when not nil, runs once before the wait for the first measured
+// iteration. Its error ends the scenario and is returned. A cancel during that
+// wait returns a result with no measured iteration.
+//
 // A failed request is counted and does not end the scenario. A bad argument
 // returns an error and an empty result. A cancel returns the context error and
 // a result that covers the iterations reached; running requests get the cancel
 // through ctx.
 func runConstantArrivalRate(
 	ctx context.Context, clock scenarioClock, rps float64, duration time.Duration, warmup int, seed int64,
-	req queryRequest,
+	req queryRequest, onMeasure func() error,
 ) (scenarioResult, error) {
 	warmup = max(warmup, 0)
 	interval, planned, err := validateScenario(rps, duration, warmup)
@@ -245,6 +269,13 @@ func runConstantArrivalRate(
 	due := func(i int) time.Time { return start.Add(time.Duration(i) * interval) }
 	var cpuAtFirstReach time.Duration
 	for i := range warmup + planned {
+		// onMeasure runs before the wait so its cost is not in the first
+		// measured start delay.
+		if i == warmup && onMeasure != nil {
+			if err = onMeasure(); err != nil {
+				break
+			}
+		}
 		if err = clock.waitUntil(ctx, due(i)); err != nil {
 			break
 		}
@@ -324,15 +355,4 @@ func splitmix64(x uint64) uint64 {
 	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
 	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
 	return x ^ (x >> 31)
-}
-
-// timed runs fn and returns its run time as latency.
-func timed(fn func() (int, error)) (requestTiming, error) {
-	start := time.Now()
-	items, err := fn()
-	latency := time.Since(start)
-	if err != nil {
-		return requestTiming{}, err
-	}
-	return requestTiming{latency: latency, items: items}, nil
 }

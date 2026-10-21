@@ -76,7 +76,7 @@ type Trailer struct {
 	IndexSize         uint32
 	AppDataSize       uint32
 	HasRecordChecksum bool
-	AppDataCRC        uint32 // CRC32C over the app-data section; validated by doOpen
+	AppDataCRC        uint32 // CRC32C over the app-data section; validated by openFile
 	Checksum          uint32 // CRC32C over the leading bytes of the on-disk trailer; validated by unmarshalTrailer
 }
 
