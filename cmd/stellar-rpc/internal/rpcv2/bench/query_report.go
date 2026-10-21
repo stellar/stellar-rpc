@@ -301,37 +301,60 @@ func (q *queryReport) benchText() string {
 	var b strings.Builder
 	b.WriteString("goos: " + runtime.GOOS + "\ngoarch: " + runtime.GOARCH + "\n")
 	for _, sc := range q.scenarios {
-		res := sc.result
-		name := "BenchmarkQuery/tier=" + q.tier + "/type=" + sc.queryType + "/rps=" + formatRPS(sc.targetRPS)
-		dropped := benchMetric{strconv.Itoa(res.measured.dropped), "dropped"}
-		if _, ok := sc.aggregated(metricLatency); !ok {
-			writeBenchLine(&b, name, res.planned, []benchMetric{dropped})
-			continue
-		}
-		writeBenchLine(&b, name, sc.succeeded, append(sc.latencyMetrics(outcomeLabelAll), dropped))
-		var outcomes []latencyRow
-		for _, r := range sc.latency {
-			if r.metric == metricLatency && r.outcome != outcomeLabelAll {
-				outcomes = append(outcomes, r)
-			}
-		}
-		// A single outcome line would repeat the aggregate line.
-		if len(outcomes) < 2 {
-			continue
-		}
-		for _, r := range outcomes {
-			writeBenchLine(&b, name+"/outcome="+r.outcome, r.agg.n, sc.latencyMetrics(r.outcome))
+		for _, line := range sc.benchLines(q.tier) {
+			b.WriteString(line.String())
 		}
 	}
 	return b.String()
 }
 
-func writeBenchLine(b *strings.Builder, name string, n int, metrics []benchMetric) {
-	b.WriteString(name + "\t" + strconv.Itoa(n))
-	for _, m := range metrics {
+// benchLines returns the bench.txt lines of s: its aggregate line, then one
+// line per outcome when two or more outcomes have samples.
+func (s scenarioSummary) benchLines(tier string) []benchLine {
+	name := "BenchmarkQuery/tier=" + tier + "/type=" + s.queryType + "/rps=" + formatRPS(s.targetRPS)
+	dropped := benchMetric{strconv.Itoa(s.result.measured.dropped), "dropped"}
+	all := s.latencyMetrics(outcomeLabelAll)
+	if all == nil {
+		// Every measured request was dropped.
+		return []benchLine{{name, s.result.planned, []benchMetric{dropped}}}
+	}
+	lines := []benchLine{{name, s.succeeded, append(all, dropped)}}
+	outcomes := s.outcomeLatencyRows()
+	// A single outcome line would repeat the aggregate line.
+	if len(outcomes) < 2 {
+		return lines
+	}
+	for _, r := range outcomes {
+		lines = append(lines, benchLine{name + "/outcome=" + r.outcome, r.agg.n, s.latencyMetrics(r.outcome)})
+	}
+	return lines
+}
+
+// outcomeLatencyRows returns the latency row of each outcome that has samples.
+func (s scenarioSummary) outcomeLatencyRows() []latencyRow {
+	var out []latencyRow
+	for _, r := range s.latency {
+		if r.metric == metricLatency && r.outcome != outcomeLabelAll {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// benchLine is one Go benchmark line: a name, an iteration count and metrics.
+type benchLine struct {
+	name    string
+	n       int
+	metrics []benchMetric
+}
+
+func (l benchLine) String() string {
+	var b strings.Builder
+	b.WriteString(l.name + "\t" + strconv.Itoa(l.n))
+	for _, m := range l.metrics {
 		b.WriteString("\t" + m.value + " " + m.unit)
 	}
-	b.WriteString("\n")
+	return b.String() + "\n"
 }
 
 // logSummary logs one line per scenario, and a warning with the first error of
