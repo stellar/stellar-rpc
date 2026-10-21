@@ -106,10 +106,10 @@ type pendingRecord struct {
 }
 
 // processedRecord is sent from a worker to runWriter once a pendingRecord
-// has had its codec applied (or been passed through).
+// has had its codec applied.
 type processedRecord struct {
 	ordinal uint32
-	data    []byte // sealed record bytes (encoded-or-raw payload + forIndex + CRC32C)
+	data    []byte // sealed record bytes (encoded payload + forIndex + CRC32C)
 	err     error
 }
 
