@@ -210,9 +210,13 @@ if [ "$budget_minutes" -gt "$CAPACITY_MINUTES" ]; then
   die "estimated budget ${budget_minutes}m exceeds the ${CAPACITY_MINUTES}m relay-chain ceiling;" "$hint"
 fi
 
-deadline_epoch=$((NOW_EPOCH + budget_minutes * 60))
+# The deadline gives a still-progressing campaign 50% over its estimate, capped
+# at what the relay chain can cover.
+deadline_minutes=$(((budget_minutes * 3 + 1) / 2))
+[ "$deadline_minutes" -le "$CAPACITY_MINUTES" ] || deadline_minutes="$CAPACITY_MINUTES"
+deadline_epoch=$((NOW_EPOCH + deadline_minutes * 60))
 # The box outlives the relay chain so a stuck run still uploads its log.
-self_terminate_minutes=$((budget_minutes + 30))
+self_terminate_minutes=$((deadline_minutes + 30))
 
 query_bool=false
 [ "$QUERY" = yes ] && query_bool=true
@@ -241,6 +245,7 @@ toml_file="$(mktemp "${TMPDIR:-/tmp}/campaign-XXXXXX")"
   echo "toml_b64=$(base64 < "$toml_file" | tr -d '\n')"
   echo "budget_minutes=$budget_minutes"
   echo "deadline_epoch=$deadline_epoch"
+  echo "render_epoch=$NOW_EPOCH"
   echo "instance_type=$instance_type"
   echo "workers=$workers"
   echo "self_terminate_minutes=$self_terminate_minutes"
@@ -255,6 +260,6 @@ toml_file="$(mktemp "${TMPDIR:-/tmp}/campaign-XXXXXX")"
   echo "note: the runner reuses \$BENCH_ROOT/golden/<name>/ whatever set filled it; on a box that ran the other set, rm -rf those dirs first"
   echo "machine $MACHINE = $instance_type, workers $workers, runs $RUNS, hot_num_ledgers $HOT_NUM_LEDGERS"
   echo "paced hot legs ~$((hot_secs / 60))m; ${query_legs} query legs ~$((query_secs / 60))m; budget ${budget_minutes}m of ${CAPACITY_MINUTES}m capacity"
-  echo "deadline $(fmt_epoch "$deadline_epoch"); box self-terminates after ${self_terminate_minutes}m"
+  echo "deadline $(fmt_epoch "$deadline_epoch") (${deadline_minutes}m); box self-terminates after ${self_terminate_minutes}m"
   echo "rendered config: $toml_file"
 } >&2

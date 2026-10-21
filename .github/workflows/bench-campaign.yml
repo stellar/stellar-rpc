@@ -104,6 +104,7 @@ jobs:
       toml_b64: ${{ steps.render.outputs.toml_b64 }}
       budget_minutes: ${{ steps.render.outputs.budget_minutes }}
       deadline_epoch: ${{ steps.render.outputs.deadline_epoch }}
+      render_epoch: ${{ steps.render.outputs.render_epoch }}
       instance_type: ${{ steps.render.outputs.instance_type }}
       workers: ${{ steps.render.outputs.workers }}
       self_terminate_minutes: ${{ steps.render.outputs.self_terminate_minutes }}
@@ -881,6 +882,7 @@ jobs:
           INSTANCE_TYPE: ${{ needs.validate.outputs.instance_type }}
           BUDGET_MINUTES: ${{ needs.validate.outputs.budget_minutes }}
           DEADLINE_EPOCH: ${{ needs.validate.outputs.deadline_epoch }}
+          RENDER_EPOCH: ${{ needs.validate.outputs.render_epoch }}
           BOX_ID: ${{ needs.launch.outputs.instance_id }}
           RUN_ID_TAG: ${{ github.run_id }}
           BENCH_RUN_ID: ${{ steps.runinfo.outputs.bench_run_id }}
@@ -899,18 +901,15 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
-          # Elapsed since the config was rendered: the render script pins
-          # deadline_epoch = render time + budget.
+          # Elapsed since the config was rendered.
           ELAPSED_MINUTES=""
-          if [ -n "$DEADLINE_EPOCH" ] && [ -n "$BUDGET_MINUTES" ]; then
-            case "$DEADLINE_EPOCH$BUDGET_MINUTES" in
-              *[!0-9]*) : ;;
-              *)
-                E=$(( ($(date +%s) - (DEADLINE_EPOCH - BUDGET_MINUTES * 60)) / 60 ))
-                if [ "$E" -ge 0 ]; then ELAPSED_MINUTES=$E; fi
-                ;;
-            esac
-          fi
+          case "$RENDER_EPOCH" in
+            '' | *[!0-9]*) : ;;
+            *)
+              E=$(( ($(date +%s) - RENDER_EPOCH) / 60 ))
+              if [ "$E" -ge 0 ]; then ELAPSED_MINUTES=$E; fi
+              ;;
+          esac
           # The benchmarked commit, for the ref link: the converted run JSON
           # records what the box actually built (campaign boxes leave the
           # result object's targetSha empty).
