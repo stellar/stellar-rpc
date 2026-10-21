@@ -553,14 +553,10 @@ func (w *Writer) buildRecord() ([]byte, []byte) {
 //
 //nolint:funcorder // internal helper chains into recordWorker / writeRecord
 func (w *Writer) flush() error {
+	payload, forIndex := w.buildRecord()
 	if w.workCh == nil {
-		// Pure passthrough: no workers. Write directly.
-		payload, forIndex := w.buildRecord()
 		return w.writeRecord(sealRecord(payload, forIndex, w.recordChecksum))
 	}
-
-	payload, forIndex := w.buildRecord()
-
 	select {
 	case <-w.cancelCh:
 		return w.loadErr()
