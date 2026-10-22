@@ -8,14 +8,14 @@ import (
 // record is the per-call processing workspace pulled from
 // recordWorkspacePool. It carries scratch buffers and the decoded item-size
 // state needed to slice individual items out of one record's bytes. The
-// reader back-pointer gives access to file-level metadata (the index,
+// reader back-pointer gives access to file-level metadata (idx.perRecord,
 // recordChecksum, recordDecoder) without copying those fields per call.
 //
 // A *record holds no resources requiring explicit cleanup; putRecord
 // resets the slices to length zero (preserving capacity for reuse) and
 // returns the workspace to the pool.
 type record struct {
-	reader  *Reader // for idx / recordChecksum / recordDecoder
+	reader  *Reader // for idx.perRecord / recordChecksum / recordDecoder
 	scratch []byte  // raw read buffer: record bytes, or Open's first read
 	// payload is the record's owned output buffer for encoder mode (when
 	// recordDecoder != nil). Its capacity is preserved across pool cycles
@@ -44,11 +44,12 @@ func (r *record) locate(pos int) (int, recordSpan, error) { return r.tab.locate(
 //
 // On disk a multi-item record is [payload][forIndex][4B crc32c] where payload
 // is the (possibly encoded) record bytes and forIndex is [packed][1B W][4B
-// min]. decode strips and verifies the FOR index (if itemsPerRecord > 1), then
-// runs the Reader's RecordDecoder over the payload, or aliases the input
-// verbatim in passthrough mode. itemsPerRecord == 1 records have no forIndex,
-// and no crc32c either unless the file carries a record checksum, so the
-// entire record is the single item's bytes.
+// min]. decode strips and verifies the FOR index (present unless
+// itemsPerRecord is 1, whatever the record's item count), then runs the
+// Reader's RecordDecoder over the payload, or aliases the input verbatim in
+// passthrough mode. itemsPerRecord == 1 records have no forIndex, and no
+// crc32c either unless the file carries a record checksum, so the entire
+// record is the single item's bytes.
 //
 // What that crc32c covers depends on the file: the FOR index alone, or the
 // whole record when the trailer sets flagRecordChecksum.
@@ -69,7 +70,7 @@ func (r *record) decode(data []byte, recordIdx, n int) error {
 		data = verified
 	}
 
-	if itemsPerRecord > 1 {
+	if itemsPerRecord != 1 {
 		// decodeForIndex is defined alongside its inverse encodeForIndex in
 		// writer.go so the on-disk FOR-index wire format lives in one place.
 		sizes, payload, err := decodeForIndex(data, n, r.sizes, recordChecksum)
@@ -120,7 +121,7 @@ func (r *record) decode(data []byte, recordIdx, n int) error {
 	for i, s := range r.sizes {
 		r.offsets[i+1] = r.offsets[i] + int(s)
 	}
-	if itemsPerRecord > 1 && r.offsets[n] != len(r.current) {
+	if itemsPerRecord != 1 && r.offsets[n] != len(r.current) {
 		return fmt.Errorf("%w: item size sum %d != payload len %d",
 			ErrCorrupt, r.offsets[n], len(r.current))
 	}
