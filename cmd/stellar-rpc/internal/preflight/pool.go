@@ -14,7 +14,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 )
 
@@ -47,7 +47,7 @@ type WorkerPool struct {
 }
 
 type WorkerPoolConfig struct {
-	Daemon            interfaces.Daemon
+	Daemon            host.Daemon
 	WorkerCount       uint
 	JobQueueCapacity  uint
 	EnableDebug       bool
@@ -153,7 +153,7 @@ func (m *metricsLedgerEntryGetterWrapper) GetLedgerEntries(ctx context.Context,
 	entries, seq, err := m.LedgerEntryGetter.GetLedgerEntries(ctx, keys)
 	//nolint:gosec // elapsed milliseconds are non-negative and bounded in this metric path
 	atomic.AddUint64(&m.totalDurationMs, uint64(time.Since(startTime).Milliseconds()))
-	atomic.AddUint32(&m.ledgerEntriesFetched, uint32(len(keys)))
+	atomic.AddUint32(&m.ledgerEntriesFetched, uint32(len(keys))) //nolint:gosec // len() is never negative
 	return entries, seq, err
 }
 

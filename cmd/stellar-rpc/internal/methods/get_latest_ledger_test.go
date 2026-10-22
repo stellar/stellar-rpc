@@ -3,7 +3,11 @@ package methods
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"iter"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -13,8 +17,7 @@ import (
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerbucketwindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 const (
@@ -30,57 +33,53 @@ func (ledgerReader *ConstantLedgerReader) GetLatestLedgerSequence(_ context.Cont
 	return expectedLatestLedgerSequence, nil
 }
 
-func (ledgerReader *ConstantLedgerReader) GetLedgerRange(_ context.Context) (ledgerbucketwindow.LedgerRange, error) {
-	return ledgerbucketwindow.LedgerRange{}, nil
+func (ledgerReader *ConstantLedgerReader) GetLedgerRange(_ context.Context) (store.LedgerRange, error) {
+	return store.LedgerRange{}, nil
 }
 
-func (ledgerReader *ConstantLedgerReader) GetLedgerCountInRange(
-	_ context.Context,
-	_, _ uint32,
-) (uint32, uint32, uint32, error) {
-	return 0, 0, 0, nil
-}
-
-func (ledgerReader *ConstantLedgerReader) NewTx(_ context.Context) (db.LedgerReaderTx, error) {
+func (ledgerReader *ConstantLedgerReader) NewTx(_ context.Context) (store.LedgerReaderTx, error) {
 	return nil, errors.New("mock NewTx error")
 }
 
-func (ledgerReader *ConstantLedgerReader) GetLedger(_ context.Context,
-	sequence uint32,
-) (xdr.LedgerCloseMeta, bool, error) {
-	return createLedger(expectedLatestLedgerHashBytes,
-			sequence,
-			expectedLatestLedgerProtocolVersion,
-			expectedLatestLedgerCloseTime),
-		true, nil
+func (ledgerReader *ConstantLedgerReader) ScanLedgers(
+	_ context.Context, start, end uint32,
+) iter.Seq2[store.RawLedger, error] {
+	return store.ScanLedgersFrom(start, end, func(seq uint32) (xdr.LedgerCloseMeta, bool, error) {
+		return createLedger(expectedLatestLedgerHashBytes, seq, expectedLatestLedgerCloseTime), true, nil
+	})
 }
 
-func (ledgerReader *ConstantLedgerReader) GetLedgerRaw(
-	_ context.Context,
-	sequence uint32,
-) (db.RawLedger, bool, error) {
-	lcm := createLedger(expectedLatestLedgerHashBytes,
-		sequence,
-		expectedLatestLedgerProtocolVersion,
-		expectedLatestLedgerCloseTime)
-	var buf bytes.Buffer
-	if _, err := xdr.Marshal(&buf, lcm); err != nil {
-		return nil, false, err
+// memoLedgerReader is ConstantLedgerReader with a movable latest, injectable errors and a raw-read counter.
+type memoLedgerReader struct {
+	ConstantLedgerReader
+
+	latest   uint32
+	rawReads atomic.Int32
+	seqErr   error
+	rawErr   error
+	raw      []byte // when set, served for every sequence instead of a fresh marshal
+}
+
+func (r *memoLedgerReader) GetLatestLedgerSequence(_ context.Context) (uint32, error) {
+	if r.seqErr != nil {
+		return 0, r.seqErr
 	}
-	return buf.Bytes(), true, nil
+	return r.latest, nil
 }
 
-func (ledgerReader *ConstantLedgerReader) StreamAllLedgers(_ context.Context, _ db.StreamLedgerFn) error {
-	return nil
-}
-
-func (ledgerReader *ConstantLedgerReader) StreamLedgerRange(
-	_ context.Context,
-	_ uint32,
-	_ uint32,
-	_ db.StreamLedgerFn,
-) error {
-	return nil
+// ScanLedgers is the handler's raw read (a scan of one through store.WithLedgerRaw).
+func (r *memoLedgerReader) ScanLedgers(ctx context.Context, start, end uint32) iter.Seq2[store.RawLedger, error] {
+	r.rawReads.Add(1)
+	switch {
+	case r.rawErr != nil:
+		return func(yield func(store.RawLedger, error) bool) { yield(store.RawLedger{}, r.rawErr) }
+	case r.raw != nil:
+		return func(yield func(store.RawLedger, error) bool) {
+			yield(store.RawLedger{Sequence: start, Raw: r.raw}, nil)
+		}
+	default:
+		return r.ConstantLedgerReader.ScanLedgers(ctx, start, end)
+	}
 }
 
 func MakeTxSet() xdr.GeneralizedTransactionSet {
@@ -107,13 +106,13 @@ func MakeLedgerHeader(ledgerSequence uint32, protocolVersion uint32, closeTime x
 	return header
 }
 
-func createLedger(hash byte, ledgerSeq uint32, protocolVersion uint32, closeTime xdr.TimePoint) xdr.LedgerCloseMeta {
+func createLedger(hash byte, ledgerSeq uint32, closeTime xdr.TimePoint) xdr.LedgerCloseMeta {
 	return xdr.LedgerCloseMeta{
 		V: 1,
 		V1: &xdr.LedgerCloseMetaV1{
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Hash:   xdr.Hash{hash},
-				Header: MakeLedgerHeader(ledgerSeq, protocolVersion, closeTime),
+				Header: MakeLedgerHeader(ledgerSeq, expectedLatestLedgerProtocolVersion, closeTime),
 			},
 			TxSet:        MakeTxSet(), // minimal empty
 			TxProcessing: nil,
@@ -122,21 +121,33 @@ func createLedger(hash byte, ledgerSeq uint32, protocolVersion uint32, closeTime
 	}
 }
 
+// callGetLatestLedger runs the handler and returns the rendered result bytes.
+func callGetLatestLedger(t *testing.T, h jrpc2.Handler) json.RawMessage {
+	t.Helper()
+	respI, err := h(t.Context(), &jrpc2.Request{})
+	require.NoError(t, err)
+	body, ok := respI.(json.RawMessage)
+	require.True(t, ok, "getLatestLedger must return pre-rendered json.RawMessage, got %T", respI)
+	return body
+}
+
+func decodeLatestLedger(t *testing.T, body json.RawMessage) protocol.GetLatestLedgerResponse {
+	t.Helper()
+	var resp protocol.GetLatestLedgerResponse
+	require.NoError(t, json.Unmarshal(body, &resp))
+	return resp
+}
+
 func TestGetLatestLedger(t *testing.T) {
 	getLatestLedgerHandler := NewGetLatestLedgerHandler(&ConstantLedgerReader{})
-	latestLedgerRespI, err := getLatestLedgerHandler(t.Context(), &jrpc2.Request{})
-	require.NoError(t, err)
-	require.IsType(t, protocol.GetLatestLedgerResponse{}, latestLedgerRespI)
-	latestLedgerResp, ok := latestLedgerRespI.(protocol.GetLatestLedgerResponse)
-	require.True(t, ok)
+	latestLedgerResp := decodeLatestLedger(t, callGetLatestLedger(t, getLatestLedgerHandler))
 
 	expectedLedger := createLedger(expectedLatestLedgerHashBytes,
 		expectedLatestLedgerSequence,
-		expectedLatestLedgerProtocolVersion,
 		expectedLatestLedgerCloseTime)
 
 	var receivedHeader xdr.LedgerHeader
-	err = xdr.SafeUnmarshalBase64(latestLedgerResp.LedgerHeader, &receivedHeader)
+	err := xdr.SafeUnmarshalBase64(latestLedgerResp.LedgerHeader, &receivedHeader)
 	require.NoError(t, err, "error unmarshaling received ledger header: %v", err)
 	var receivedMetadata xdr.LedgerCloseMeta
 	err = xdr.SafeUnmarshalBase64(latestLedgerResp.LedgerMetadata, &receivedMetadata)
@@ -166,9 +177,184 @@ func TestGetLatestLedgerAcceptsEmptyParams(t *testing.T) {
 
 	latestLedgerRespI, err := getLatestLedgerHandler(t.Context(), requests[0].ToRequest())
 	require.NoError(t, err, "getLatestLedger should accept empty params object")
-	require.IsType(t, protocol.GetLatestLedgerResponse{}, latestLedgerRespI)
-
-	latestLedgerResp, ok := latestLedgerRespI.(protocol.GetLatestLedgerResponse)
+	body, ok := latestLedgerRespI.(json.RawMessage)
 	require.True(t, ok)
-	assert.Equal(t, expectedLatestLedgerSequence, latestLedgerResp.Sequence)
+	assert.Equal(t, expectedLatestLedgerSequence, decodeLatestLedger(t, body).Sequence)
+}
+
+// The dispatcher writes the rendered bytes to the wire verbatim, so they must match the struct's marshal.
+func TestGetLatestLedgerRenderMatchesStructMarshal(t *testing.T) {
+	body := callGetLatestLedger(t, NewGetLatestLedgerHandler(&ConstantLedgerReader{}))
+
+	raw, err := createLedger(expectedLatestLedgerHashBytes,
+		expectedLatestLedgerSequence, expectedLatestLedgerCloseTime).MarshalBinary()
+	require.NoError(t, err)
+	expected, err := latestLedgerResponse(xdr.LedgerCloseMetaView(raw), expectedLatestLedgerSequence)
+	require.NoError(t, err)
+	expectedJSON, err := json.Marshal(expected)
+	require.NoError(t, err)
+	assert.Equal(t, expectedJSON, []byte(body)) //nolint:testifylint // byte parity is the point, not JSON equality
+}
+
+func TestGetLatestLedgerServesMemoUntilLedgerAdvances(t *testing.T) {
+	reader := &memoLedgerReader{latest: expectedLatestLedgerSequence}
+	h := NewGetLatestLedgerHandler(reader)
+
+	first := callGetLatestLedger(t, h)
+	second := callGetLatestLedger(t, h)
+	assert.Equal(t, int32(1), reader.rawReads.Load(), "second request must be served from the memo")
+	assert.True(t, bytes.Equal(first, second))
+	assert.Equal(t, expectedLatestLedgerSequence, decodeLatestLedger(t, second).Sequence)
+
+	reader.latest = expectedLatestLedgerSequence + 1
+	third := callGetLatestLedger(t, h)
+	assert.Equal(t, int32(2), reader.rawReads.Load(), "a new latest ledger must re-render")
+	assert.Equal(t, expectedLatestLedgerSequence+1, decodeLatestLedger(t, third).Sequence)
+
+	callGetLatestLedger(t, h)
+	assert.Equal(t, int32(2), reader.rawReads.Load())
+}
+
+// An older read view gets its own ledger but must not replace the memo's newer render.
+func TestGetLatestLedgerOlderViewDoesNotEvictNewerRender(t *testing.T) {
+	reader := &memoLedgerReader{latest: expectedLatestLedgerSequence + 1}
+	h := NewGetLatestLedgerHandler(reader)
+	callGetLatestLedger(t, h)
+	require.Equal(t, int32(1), reader.rawReads.Load())
+
+	reader.latest = expectedLatestLedgerSequence
+	older := callGetLatestLedger(t, h)
+	assert.Equal(t, expectedLatestLedgerSequence, decodeLatestLedger(t, older).Sequence)
+	assert.Equal(t, int32(2), reader.rawReads.Load())
+
+	reader.latest = expectedLatestLedgerSequence + 1
+	newer := callGetLatestLedger(t, h)
+	assert.Equal(t, expectedLatestLedgerSequence+1, decodeLatestLedger(t, newer).Sequence)
+	assert.Equal(t, int32(2), reader.rawReads.Load(), "the newer render must still be memoized")
+}
+
+func TestGetLatestLedgerConcurrentMissRendersOnce(t *testing.T) {
+	reader := &memoLedgerReader{latest: expectedLatestLedgerSequence}
+	h := NewGetLatestLedgerHandler(reader)
+
+	const callers = 32
+	bodies := make([]json.RawMessage, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Go(func() {
+			respI, err := h(t.Context(), &jrpc2.Request{})
+			assert.NoError(t, err)
+			body, ok := respI.(json.RawMessage)
+			assert.True(t, ok)
+			bodies[i] = body
+		})
+	}
+	wg.Wait()
+
+	assert.Equal(t, int32(1), reader.rawReads.Load(), "concurrent misses on one ledger must render it once")
+	for _, body := range bodies[1:] {
+		assert.True(t, bytes.Equal(bodies[0], body))
+	}
+}
+
+func TestGetLatestLedgerErrorsAreNotMemoized(t *testing.T) {
+	reader := &memoLedgerReader{latest: expectedLatestLedgerSequence}
+	h := NewGetLatestLedgerHandler(reader)
+
+	reader.seqErr = errors.New("boom")
+	_, err := h(t.Context(), &jrpc2.Request{})
+	require.ErrorContains(t, err, "could not get latest ledger sequence")
+	reader.seqErr = nil
+
+	reader.rawErr = errors.New("disk")
+	_, err = h(t.Context(), &jrpc2.Request{})
+	require.ErrorContains(t, err, "could not get latest ledger: disk")
+	reader.rawErr = nil
+
+	assert.Equal(t, expectedLatestLedgerSequence, decodeLatestLedger(t, callGetLatestLedger(t, h)).Sequence)
+	assert.Equal(t, int32(2), reader.rawReads.Load())
+}
+
+// paddedLedger builds a ~2.1 MB LCM (pubnet median, 2026-09) out of ManageData-heavy transactions.
+func paddedLedger(tb testing.TB) []byte {
+	tb.Helper()
+	const targetBytes = 2_100_000
+	const opsPerTx = 100
+	ops := make([]xdr.Operation, opsPerTx)
+	for i := range ops {
+		value := xdr.DataValue(bytes.Repeat([]byte{byte(i)}, 64))
+		ops[i] = xdr.Operation{Body: xdr.OperationBody{
+			Type: xdr.OperationTypeManageData,
+			ManageDataOp: &xdr.ManageDataOp{
+				DataName:  xdr.String64("padding-key-with-a-realistic-length"),
+				DataValue: &value,
+			},
+		}}
+	}
+	envelope, err := xdr.NewTransactionEnvelope(xdr.EnvelopeTypeEnvelopeTypeTx, xdr.TransactionV1Envelope{
+		Tx: xdr.Transaction{
+			SourceAccount: xdr.MustMuxedAddress("GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ"),
+			Fee:           100 * opsPerTx,
+			Operations:    ops,
+		},
+	})
+	require.NoError(tb, err)
+	txBytes, err := envelope.MarshalBinary()
+	require.NoError(tb, err)
+
+	txs := make([]xdr.TransactionEnvelope, targetBytes/len(txBytes))
+	for i := range txs {
+		txs[i] = envelope
+	}
+	components := []xdr.TxSetComponent{{
+		Type: xdr.TxSetComponentTypeTxsetCompTxsMaybeDiscountedFee,
+		TxsMaybeDiscountedFee: &xdr.TxSetComponentTxsMaybeDiscountedFee{
+			Txs: txs,
+		},
+	}}
+	lcm := createLedger(expectedLatestLedgerHashBytes, expectedLatestLedgerSequence, expectedLatestLedgerCloseTime)
+	lcm.V1.TxSet = xdr.GeneralizedTransactionSet{
+		V: 1,
+		V1TxSet: &xdr.TransactionSetV1{
+			Phases: []xdr.TransactionPhase{{V: 0, V0Components: &components}},
+		},
+	}
+	raw, err := lcm.MarshalBinary()
+	require.NoError(tb, err)
+	return raw
+}
+
+// BenchmarkGetLatestLedger times one request on a pubnet-sized ledger: "uncached" closes a new ledger
+// per iteration (a memo miss), "cached" is the steady state between ledger closes.
+func BenchmarkGetLatestLedger(b *testing.B) {
+	reader := &memoLedgerReader{latest: expectedLatestLedgerSequence, raw: paddedLedger(b)}
+	h := NewGetLatestLedgerHandler(reader)
+	req := &jrpc2.Request{}
+
+	serve := func(b *testing.B) {
+		b.Helper()
+		respI, err := h(b.Context(), req)
+		if err != nil {
+			b.Fatal(err)
+		}
+		wire, ok := respI.(json.RawMessage)
+		if !ok {
+			b.Fatalf("unexpected result type %T", respI)
+		}
+		b.SetBytes(int64(len(wire)))
+	}
+
+	b.Run("uncached", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			reader.latest++
+			serve(b)
+		}
+	})
+	b.Run("cached", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			serve(b)
+		}
+	})
 }

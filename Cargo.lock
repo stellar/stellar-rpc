@@ -1660,6 +1660,7 @@ dependencies = [
  "ethnum",
  "hex",
  "serde",
+ "serde_json",
  "serde_with",
  "sha2",
  "stellar-strkey 1.0.0",

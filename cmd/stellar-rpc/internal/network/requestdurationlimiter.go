@@ -2,18 +2,13 @@ package network
 
 import (
 	"context"
-	"maps"
 	"math"
-	"net/http"
-	"reflect"
-	"runtime"
+	"sync"
 	"time"
 
 	"github.com/creachadair/jrpc2"
 
 	"github.com/stellar/go-stellar-sdk/support/log"
-
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/util"
 )
 
 const maxDuration = time.Duration(math.MaxInt64)
@@ -37,172 +32,16 @@ type requestDurationLimiter struct {
 	limitCounter     increasingCounter
 }
 
-type httpRequestDurationLimiter struct {
-	httpDownstreamHandler http.Handler
-	requestDurationLimiter
-}
-
-func MakeHTTPRequestDurationLimiter(
-	downstream http.Handler,
-	warningThreshold time.Duration,
-	limitThreshold time.Duration,
-	warningCounter increasingCounter,
-	limitCounter increasingCounter,
-	logger *log.Entry,
-) http.Handler {
-	// make sure the warning threshold is less then the limit threshold; otherwise, just set it to the limit threshold.
-	if warningThreshold > limitThreshold {
-		warningThreshold = limitThreshold
-	}
-	return &httpRequestDurationLimiter{
-		httpDownstreamHandler: downstream,
-		requestDurationLimiter: requestDurationLimiter{
-			warningThreshold: warningThreshold,
-			limitThreshold:   limitThreshold,
-			logger:           logger,
-			warningCounter:   warningCounter,
-			limitCounter:     limitCounter,
-		},
-	}
-}
-
-type bufferedResponseWriter struct {
-	header     http.Header
-	buffer     []byte
-	statusCode int
-}
-
-func makeBufferedResponseWriter(rw http.ResponseWriter) *bufferedResponseWriter {
-	header := rw.Header()
-	bw := &bufferedResponseWriter{
-		header: make(http.Header, 0),
-	}
-	maps.Copy(bw.header, header)
-	return bw
-}
-
-func (w *bufferedResponseWriter) Header() http.Header {
-	return w.header
-}
-
-func (w *bufferedResponseWriter) Write(buf []byte) (int, error) {
-	w.buffer = append(w.buffer, buf...)
-	return len(buf), nil
-}
-
-func (w *bufferedResponseWriter) WriteHeader(statusCode int) {
-	w.statusCode = statusCode
-}
-
-func (w *bufferedResponseWriter) WriteOut(ctx context.Context, rw http.ResponseWriter) {
-	// update the headers map.
-	headers := rw.Header()
-	for k := range headers {
-		delete(headers, k)
-	}
-	maps.Copy(headers, w.header)
-
-	if len(w.buffer) == 0 {
-		if w.statusCode != 0 {
-			rw.WriteHeader(w.statusCode)
-		}
-		return
-	}
-	if w.statusCode != 0 {
-		rw.WriteHeader(w.statusCode)
-	}
-
-	if ctx.Err() == nil {
-		// the following return size/error won't help us much at this point. The request is already finalized.
-		rw.Write(w.buffer) //nolint:errcheck
-	}
-}
-
-// TODO: refactor and simplify this function
-//
-//nolint:gocognit,cyclop
-func (q *httpRequestDurationLimiter) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	if q.limitThreshold == RequestDurationLimiterNoLimit {
-		// if specified max duration, pass-through
-		q.httpDownstreamHandler.ServeHTTP(res, req)
-		return
-	}
-	var warningCh <-chan time.Time
-	if q.warningThreshold != time.Duration(0) && q.warningThreshold < q.limitThreshold {
-		warningCh = time.NewTimer(q.warningThreshold).C
-	}
-	var limitCh <-chan time.Time
-	if q.limitThreshold != time.Duration(0) {
-		limitCh = time.NewTimer(q.limitThreshold).C
-	}
-	requestCompleted := make(chan []string, 1)
-	requestCtx, requestCtxCancel := context.WithTimeout(req.Context(), q.limitThreshold)
-	defer requestCtxCancel()
-	timeLimitedRequest := req.WithContext(requestCtx)
-	responseBuffer := makeBufferedResponseWriter(res)
-	go func() {
-		defer func() {
-			if err := recover(); err != nil {
-				functionName := runtime.FuncForPC(reflect.ValueOf(q.httpDownstreamHandler.ServeHTTP).Pointer()).Name()
-				callStack := util.CallStack(err, functionName, "(*httpRequestDurationLimiter).ServeHTTP.func1()", 8)
-				requestCompleted <- callStack
-			} else {
-				close(requestCompleted)
-			}
-		}()
-		q.httpDownstreamHandler.ServeHTTP(responseBuffer, timeLimitedRequest)
-	}()
-
-	warn := false
-	for {
-		select {
-		case <-warningCh:
-			// warn
-			warn = true
-		case <-limitCh:
-			// limit
-			requestCtxCancel()
-			if q.limitCounter != nil {
-				q.limitCounter.Inc()
-			}
-			if q.logger != nil {
-				q.logger.Infof("Request processing for %s exceed limiting threshold of %v", req.URL.Path, q.limitThreshold)
-			}
-			if req.Context().Err() == nil {
-				res.WriteHeader(http.StatusGatewayTimeout)
-			}
-			return
-		case errStrings := <-requestCompleted:
-			if warn {
-				if q.warningCounter != nil {
-					q.warningCounter.Inc()
-				}
-				if q.logger != nil {
-					q.logger.Infof("Request processing for %s exceed warning threshold of %v", req.URL.Path, q.warningThreshold)
-				}
-			}
-			if len(errStrings) == 0 {
-				responseBuffer.WriteOut(req.Context(), res)
-			} else {
-				res.WriteHeader(http.StatusInternalServerError)
-				for _, errStr := range errStrings {
-					if q.logger != nil {
-						q.logger.Warn(errStr)
-					}
-				}
-			}
-			return
-		}
-	}
-}
-
 type RPCRequestDurationLimiter struct {
-	jrpcDownstreamHandler jrpc2.Handler
 	requestDurationLimiter
+
+	jrpcDownstreamHandler jrpc2.Handler
+	inflight              *sync.WaitGroup // downstream calls, which can outlive Handle past the limit
 }
 
 func MakeJrpcRequestDurationLimiter(
 	downstream jrpc2.Handler,
+	inflight *sync.WaitGroup,
 	warningThreshold time.Duration,
 	limitThreshold time.Duration,
 	warningCounter increasingCounter,
@@ -216,6 +55,7 @@ func MakeJrpcRequestDurationLimiter(
 
 	return &RPCRequestDurationLimiter{
 		jrpcDownstreamHandler: downstream,
+		inflight:              inflight,
 		requestDurationLimiter: requestDurationLimiter{
 			warningThreshold: warningThreshold,
 			limitThreshold:   limitThreshold,
@@ -230,7 +70,7 @@ func MakeJrpcRequestDurationLimiter(
 // TODO: this function is too complicated we should fix this and remove the nolint:gocognit
 //
 //nolint:gocognit,cyclop
-func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Request) (interface{}, error) {
+func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Request) (any, error) {
 	if q.limitThreshold == RequestDurationLimiterNoLimit {
 		// if specified max duration, pass-through
 		return q.jrpcDownstreamHandler(ctx, req)
@@ -244,14 +84,14 @@ func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Reque
 		limitCh = time.NewTimer(q.limitThreshold).C
 	}
 	type requestResultOutput struct {
-		data interface{}
+		data any
 		err  error
 	}
 	requestCompleted := make(chan requestResultOutput, 1)
 	requestCtx, requestCtxCancel := context.WithTimeout(ctx, q.limitThreshold)
 	defer requestCtxCancel()
 
-	go func() {
+	q.inflight.Go(func() {
 		defer func() {
 			if err := recover(); err != nil {
 				q.logger.Errorf("Request for method %s resulted in an error : %v", req.Method(), err)
@@ -261,7 +101,7 @@ func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Reque
 		var res requestResultOutput
 		res.data, res.err = q.jrpcDownstreamHandler(requestCtx, req)
 		requestCompleted <- res
-	}()
+	})
 
 	warn := false
 	for {
@@ -301,6 +141,9 @@ func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Reque
 		}
 	}
 }
+
+// The three errors below are this repo's implementation-defined JSON-RPC
+// codes, kept together so every -3200x code is defined in one place.
 
 var ErrRequestExceededProcessingLimitThreshold = jrpc2.Error{
 	Code:    -32001,

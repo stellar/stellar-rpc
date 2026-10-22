@@ -2,6 +2,11 @@ all: check build test
 
 export RUSTFLAGS=-Dwarnings -Dclippy::all -Dclippy::pedantic
 
+# grocksdb's clean_link tag drops its default -lsnappy -llz4 -lz; our
+# librocksdb uses zstd only. CI sets the same via GOFLAGS in setup-go. The
+# static link line lives in cmd/stellar-rpc/internal/rpcv2/rocksdb/link.go.
+export GOFLAGS := -tags=grocksdb_clean_link
+
 REPOSITORY_COMMIT_HASH := "$(shell git rev-parse HEAD)"
 ifeq (${REPOSITORY_COMMIT_HASH},"")
     $(error failed to retrieve git head commit hash)
@@ -33,12 +38,12 @@ RS_ENV_VERSION_PREV := "$(call RS_ENV_VERSION,soroban-env-host-prev)"
 RS_ENV_VERSION_CURR := "$(call RS_ENV_VERSION,soroban-env-host-curr)"
 
 BUILD_TIMESTAMP ?= $(shell date '+%Y-%m-%dT%H:%M:%S')
-GOLDFLAGS :=	-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.Version=${REPOSITORY_VERSION}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.CommitHash=${REPOSITORY_COMMIT_HASH}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.BuildTimestamp=${BUILD_TIMESTAMP}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.Branch=${REPOSITORY_BRANCH}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionPrev=${RS_ENV_VERSION_PREV}' \
-				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config.RSSorobanEnvVersionCurr=${RS_ENV_VERSION_CURR}'
+GOLDFLAGS :=	-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version.Version=${REPOSITORY_VERSION}' \
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version.CommitHash=${REPOSITORY_COMMIT_HASH}' \
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version.BuildTimestamp=${BUILD_TIMESTAMP}' \
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version.Branch=${REPOSITORY_BRANCH}' \
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version.RSSorobanEnvVersionPrev=${RS_ENV_VERSION_PREV}' \
+				-X 'github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version.RSSorobanEnvVersionCurr=${RS_ENV_VERSION_CURR}'
 
 
 # The following works around incompatibility between the rust and the go linkers -
@@ -57,17 +62,33 @@ endif
 # (libpreflight.a is put at target/release-with-panic-unwind/ when not cross compiling)
 CARGO_BUILD_TARGET ?= $(shell rustc -vV | sed -n 's|host: ||p')
 
+# unchanged name: the Jenkins packager, apt packaging, and Dockerfile.release consume it
 STELLAR_RPC_BINARY := stellar-rpc
+
+# build-stellar-rpc builds every release binary, and rpcv2 is not released yet,
+# so its binary refuses --enable-rpcv2 unless built with RPCV2=true.
+RPCV2 ?= false
+
+# The static zstd and RocksDB archives, in the same prefixes CI installs via
+# .github/actions/setup-go. Prepended so they win over any CGO_* from the
+# shell or the make command line. The include paths go in CGO_CPPFLAGS, not
+# CGO_CFLAGS: setting CGO_CFLAGS replaces Go's default "-O2 -g", and
+# go-sqlite3's bundled SQLite sets no -O of its own.
+ZSTD_HOME ?= $(HOME)/.zstd
+ROCKSDB_HOME ?= $(HOME)/.rocksdb
+override CGO_CPPFLAGS := -I$(ZSTD_HOME)/include -I$(ROCKSDB_HOME)/include $(CGO_CPPFLAGS)
+override CGO_LDFLAGS := -L$(ZSTD_HOME)/lib -L$(ROCKSDB_HOME)/lib $(CGO_LDFLAGS)
+export CGO_CPPFLAGS CGO_LDFLAGS
 
 
 # update the Cargo.lock every time the Cargo.toml changes.
 Cargo.lock: Cargo.toml
 	cargo update --workspace
 
-install: build-libs
-	go install -ldflags="${GOLDFLAGS}" ./...
+install: build-libs build-native-libs
+	go install -ldflags="${GOLDFLAGS}" ./cmd/stellar-rpc
 
-build: build-libs
+build: build-libs build-native-libs
 	go build -ldflags="${GOLDFLAGS}" ./...
 
 build-libs: Cargo.lock
@@ -92,7 +113,7 @@ fmt:
 rust-test:
 	cargo test
 
-go-test: build-libs
+go-test: build-libs build-native-libs
 	go test ./...
 
 test: go-test rust-test
@@ -104,17 +125,33 @@ clean:
 	cargo clean
 	go clean ./...
 
-# the build-stellar-rpc build target is an optimized build target used by
-# https://github.com/stellar/pipelines/blob/master/stellar-rpc/Jenkinsfile-stellar-rpc-package-builder
-# as part of the package building.
-build-stellar-rpc: build-libs
-	go build -ldflags="${GOLDFLAGS}" ${MACOS_MIN_VER} -o ${STELLAR_RPC_BINARY} -trimpath -v ./cmd/stellar-rpc
+$(ZSTD_HOME)/lib/libzstd.a:
+	PREFIX="$(ZSTD_HOME)" ./scripts/install-zstd.sh
+
+$(ROCKSDB_HOME)/lib/librocksdb.a: $(ZSTD_HOME)/lib/libzstd.a
+	PREFIX="$(ROCKSDB_HOME)" ZSTD_HOME="$(ZSTD_HOME)" ./scripts/install-rocksdb.sh
+
+# Builds each archive only when its prefix lacks it, or when libzstd.a is newer
+# than librocksdb.a.
+build-native-libs: $(ZSTD_HOME)/lib/libzstd.a $(ROCKSDB_HOME)/lib/librocksdb.a
+
+# Called by name from the package builder and stellar/quickstart, in images with
+# only build-essential and jq, so it builds the archives and the Rust
+# libraries itself. It ends with the link check and, because -X ignores a
+# variable that does not exist, a check that the binary refuses rpcv2.
+build-stellar-rpc: build-libs build-native-libs
+	go build -ldflags="${GOLDFLAGS} -X 'main.rpcv2=${RPCV2}'" -o ${STELLAR_RPC_BINARY} -trimpath -v ./cmd/stellar-rpc
+	./scripts/check-link.sh ${STELLAR_RPC_BINARY}
+	[ "${RPCV2}" = true ] || ./${STELLAR_RPC_BINARY} --enable-rpcv2 version 2>&1 | grep -q 'not available in this build'
+
+# Override for feature branches, e.g. `make go-check-branch BASE=origin/feature/full-history`.
+BASE ?= origin/main
 
 go-check-branch:
-	golangci-lint run ./... --new-from-rev $$(git rev-parse origin/main)
+	golangci-lint run ./... --new-from-rev $$(git rev-parse $(BASE))
 
 go-check:
 	golangci-lint run ./...
 
 # PHONY lists all the targets that aren't file names, so that make would skip the timestamp based check.
-.PHONY: clean fmt watch test rust-test go-test check rust-check go-check install build build-stellar-rpc build-libs lint lint-changes
+.PHONY: all clean fmt watch bench test rust-test go-test check rust-check go-check go-check-branch install build build-stellar-rpc build-native-libs build-libs

@@ -222,7 +222,7 @@ func TestSimulateTransactionPassesLedgerTimeFromLatestLedgerMetaToPreflight(t *t
 		Once()
 	ledgerReader.
 		On("GetLedger", mock.Anything, uint32(77)).
-		Return(createLedger(expectedLatestLedgerHashBytes, 77, 20, xdr.TimePoint(1_700_000_123)), true, nil).
+		Return(createLedger(expectedLatestLedgerHashBytes, 77, xdr.TimePoint(1_700_000_123)), true, nil).
 		Once()
 
 	txEnvelope := invokeHostFunctionEnvelope(t)
@@ -292,7 +292,7 @@ func TestSimulateTransactionReturnsErrorWhenLatestLedgerMetaFails(t *testing.T) 
 }
 
 // TestSimulateTransactionReturnsErrorWhenLatestLedgerMetaNotFound verifies the !ok
-// path inside getLatestLedgerPreflightInfo: when GetLedger returns (_, false, nil),
+// path inside getLatestLedgerPreflightInfo: when WithLedgerRaw finds no ledger,
 // meaning the ledger meta is absent (e.g. trimmed from the retention window right
 // after GetLatestLedgerSequence returned), the handler must surface a descriptive
 // error and still echo back the latest ledger sequence.
@@ -414,7 +414,7 @@ func TestSimulateTransactionPassesFieldsFromV2LedgerMetaToPreflight(t *testing.T
 }
 
 // TestSimulateTransactionReturnsErrorForUnknownLedgerMetaVersion verifies the
-// default branch inside getLatestLedgerPreflightInfo: a LedgerCloseMeta whose
+// version check inside getLatestLedgerPreflightInfo: a LedgerCloseMeta whose
 // version is neither 1 nor 2 must produce a descriptive error and echo back the
 // latest ledger sequence.
 func TestSimulateTransactionReturnsErrorForUnknownLedgerMetaVersion(t *testing.T) {
@@ -422,8 +422,8 @@ func TestSimulateTransactionReturnsErrorForUnknownLedgerMetaVersion(t *testing.T
 	ledgerReader := &MockLedgerReader{}
 	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{}, xdr.DecodeOptions{})
 
-	// V=99 is deliberately out of range to trigger the default error branch.
-	unknownVersionMeta := xdr.LedgerCloseMeta{V: 99}
+	// V0 is encodable but predates the versions the handler reads, so it fails the version check.
+	unknownVersionMeta := xdr.LedgerCloseMeta{V: 0, V0: &xdr.LedgerCloseMetaV0{}}
 
 	ledgerReader.
 		On("GetLatestLedgerSequence", mock.Anything).
@@ -453,7 +453,7 @@ func TestSimulateTransactionReturnsErrorForUnknownLedgerMetaVersion(t *testing.T
 
 	simResp, ok := resp.(protocol.SimulateTransactionResponse)
 	require.True(t, ok)
-	require.Equal(t, "latest ledger (77) meta has unexpected version (99)", simResp.Error)
+	require.Equal(t, "latest ledger (77) meta has unexpected version (0)", simResp.Error)
 	require.Equal(t, uint32(77), simResp.LatestLedger)
 
 	ledgerReader.AssertExpectations(t)
@@ -488,7 +488,7 @@ func TestSimulateTransactionCloseTimeIsAnchoredToLatestLedgerSequence(t *testing
 	// The handler must load metadata for the exact sequence it selected above.
 	ledgerReader.
 		On("GetLedger", mock.Anything, seqBeforeIngest).
-		Return(createLedger(0, seqBeforeIngest, 20, closeTimeForSeq77), true, nil).
+		Return(createLedger(0, seqBeforeIngest, closeTimeForSeq77), true, nil).
 		Once()
 
 	txEnvelope := invokeHostFunctionEnvelope(t)
@@ -636,6 +636,8 @@ func TestSimulateTransactionThreadsUseUpgradedAuth(t *testing.T) {
 			LedgerHeader: xdr.LedgerHeaderHistoryEntry{
 				Header: xdr.LedgerHeader{LedgerVersion: 23},
 			},
+			// GeneralizedTransactionSet has no zero arm; the ledger must round-trip through bytes.
+			TxSet:                           xdr.GeneralizedTransactionSet{V: 1, V1TxSet: &xdr.TransactionSetV1{}},
 			TotalByteSizeOfLiveSorobanState: 100,
 		},
 	}

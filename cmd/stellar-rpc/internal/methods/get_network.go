@@ -7,17 +7,18 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 // NewGetNetworkHandler returns a json rpc handler to for the getNetwork method
 func NewGetNetworkHandler(
 	networkPassphrase string,
 	friendbotURL string,
-	ledgerReader db.LedgerReader,
+	ledgerReader store.LedgerReader,
 ) jrpc2.Handler {
+	versions := newProtocolVersionCache(ledgerReader)
 	return NewHandler(func(ctx context.Context, _ protocol.GetNetworkRequest) (protocol.GetNetworkResponse, error) {
-		protocolVersion, err := getProtocolVersion(ctx, ledgerReader)
+		protocolVersion, err := versions.get(ctx)
 		if err != nil {
 			return protocol.GetNetworkResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,

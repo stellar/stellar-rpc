@@ -16,11 +16,13 @@ import (
 var testSalt = sha256.Sum256([]byte("a1"))
 
 func getTestContract(name string) []byte {
+	// five levels up from cmd/stellar-rpc/internal/integrationtest/infrastructure = repo root
 	contractFile := path.Join(GetCurrentDirectory(), "../../../../../wasms/test_"+name+".wasm")
 	ret, err := os.ReadFile(contractFile)
 	if err != nil {
 		str := fmt.Sprintf(
-			"unable to read %s.wasm (%v) please run `make build-test-wasms` at the project root directory",
+			"unable to read %s.wasm (%v); the test contracts are checked in under wasms/ at the repo root — "+
+				"if this fails, the checkout is incomplete or the path resolution above is wrong",
 			name,
 			err,
 		)
@@ -110,7 +112,9 @@ func CreateCreateHelloWorldContractOperation(sourceAccount string) *txnbuild.Inv
 	return createCreateContractOperation(sourceAccount, salt, contractHash)
 }
 
-func createCreateContractOperation(sourceAccount string, salt xdr.Uint256, contractHash xdr.Hash) *txnbuild.InvokeHostFunction {
+func createCreateContractOperation(
+	sourceAccount string, salt xdr.Uint256, contractHash xdr.Hash,
+) *txnbuild.InvokeHostFunction {
 	sourceAccountID := xdr.MustAddress(sourceAccount)
 	return &txnbuild.InvokeHostFunction{
 		HostFunction: xdr.HostFunction{
