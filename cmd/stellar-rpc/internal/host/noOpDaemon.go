@@ -57,7 +57,7 @@ func (s noOpCoreClient) SubmitTransaction(context.Context, string) (*proto.TXRes
 }
 
 func (s noOpCoreClient) GetLedgerEntries(context.Context,
-	uint32, ...xdr.LedgerKey,
+	uint32, ...xdr.LedgerKeyView,
 ) (proto.GetLedgerEntryResponse, error) {
 	return proto.GetLedgerEntryResponse{}, nil
 }
