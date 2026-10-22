@@ -80,15 +80,7 @@ func operationCount(envelopeBase64 string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	envelope := xdr.TransactionEnvelopeView(raw)
 	return xdr.Try(func() int {
-		switch envelope.MustType() {
-		case xdr.EnvelopeTypeEnvelopeTypeTxV0:
-			return envelope.MustV0().MustTx().MustOperations().MustCount()
-		case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
-			return envelope.MustFeeBump().MustTx().MustInnerTx().MustV1().MustTx().MustOperations().MustCount()
-		default:
-			return envelope.MustV1().MustTx().MustOperations().MustCount()
-		}
+		return xdr.TransactionEnvelopeView(raw).MustTransaction().MustOperations().MustCount()
 	})
 }
