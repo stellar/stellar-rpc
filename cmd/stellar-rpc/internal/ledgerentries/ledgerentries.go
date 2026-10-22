@@ -61,7 +61,15 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 			return nil, 0, fmt.Errorf("could not get latest ledger: %w", err)
 		}
 	}
-	resp, err := c.coreClient.GetLedgerEntries(ctx, atLedger, keys...)
+	rawKeys := make([]xdr.LedgerKeyView, len(keys))
+	for i, key := range keys {
+		raw, err := key.MarshalBinary()
+		if err != nil {
+			return nil, 0, fmt.Errorf("could not encode ledger key: %w", err)
+		}
+		rawKeys[i] = raw
+	}
+	resp, err := c.coreClient.GetLedgerEntries(ctx, atLedger, rawKeys...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("could not query captive core: %w", err)
 	}

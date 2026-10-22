@@ -17,11 +17,11 @@ import (
 
 //nolint:funlen // one table, one case per translation rule
 func TestV1FiltersTranslation(t *testing.T) {
-	xferVal, xferRaw := symbolScVal(t, "xfer")
-	mintVal, mintRaw := symbolScVal(t, "mint")
-	aliceVal, aliceRaw := symbolScVal(t, "alice")
+	_, xferRaw := symbolScVal(t, "xfer")
+	_, mintRaw := symbolScVal(t, "mint")
+	_, aliceRaw := symbolScVal(t, "alice")
 	star, dstar := "*", "**"
-	seg := func(v xdr.ScVal) protocol.SegmentFilter { return protocol.SegmentFilter{ScVal: &v} }
+	seg := func(raw []byte) protocol.SegmentFilter { return protocol.SegmentFilter{ScVal: raw} }
 	wild := func(w string) protocol.SegmentFilter { return protocol.SegmentFilter{Wildcard: &w} }
 	contractType := protocol.EventTypeSet{protocol.EventTypeContract: nil}
 	bothTypes := protocol.EventTypeSet{
@@ -55,7 +55,7 @@ func TestV1FiltersTranslation(t *testing.T) {
 		},
 		// N segments without a trailing "**" match exactly N topics.
 		"one-segment topic is exact arity one": {
-			in: []protocol.EventFilter{{Topics: []protocol.TopicFilter{{seg(xferVal)}}}},
+			in: []protocol.EventFilter{{Topics: []protocol.TopicFilter{{seg(xferRaw)}}}},
 			want: []event.Filter{{
 				Topics:     [protocol.MaxTopicCount][]byte{xferRaw},
 				TopicCount: event.TopicCountFilter{Count: 1, Exact: true},
@@ -65,7 +65,7 @@ func TestV1FiltersTranslation(t *testing.T) {
 		// arity to at-least-prefix.
 		"trailing double-star is at-least arity": {
 			in: []protocol.EventFilter{{Topics: []protocol.TopicFilter{
-				{seg(xferVal), wild(dstar)},
+				{seg(xferRaw), wild(dstar)},
 			}}},
 			want: []event.Filter{{
 				Topics:     [protocol.MaxTopicCount][]byte{xferRaw},
@@ -79,7 +79,7 @@ func TestV1FiltersTranslation(t *testing.T) {
 		},
 		"star then value pins position one": {
 			in: []protocol.EventFilter{{Topics: []protocol.TopicFilter{
-				{wild(star), seg(aliceVal)},
+				{wild(star), seg(aliceRaw)},
 			}}},
 			want: []event.Filter{{
 				Topics:     [protocol.MaxTopicCount][]byte{nil, aliceRaw},
@@ -99,7 +99,7 @@ func TestV1FiltersTranslation(t *testing.T) {
 				ContractIDs: []string{
 					testContractStrkey(t, 0xAA), testContractStrkey(t, 0xBB),
 				},
-				Topics: []protocol.TopicFilter{{seg(xferVal)}, {seg(mintVal)}},
+				Topics: []protocol.TopicFilter{{seg(xferRaw)}, {seg(mintRaw)}},
 			}},
 			want: []event.Filter{
 				{
@@ -131,7 +131,7 @@ func TestV1FiltersTranslation(t *testing.T) {
 		"separate filters stay separate branches": {
 			in: []protocol.EventFilter{
 				{ContractIDs: []string{testContractStrkey(t, 0xAA)}},
-				{Topics: []protocol.TopicFilter{{seg(mintVal)}}},
+				{Topics: []protocol.TopicFilter{{seg(mintRaw)}}},
 			},
 			want: []event.Filter{
 				{ContractID: testContractRaw(0xAA)},
