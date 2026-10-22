@@ -65,6 +65,10 @@ CARGO_BUILD_TARGET ?= $(shell rustc -vV | sed -n 's|host: ||p')
 # unchanged name: the Jenkins packager, apt packaging, and Dockerfile.release consume it
 STELLAR_RPC_BINARY := stellar-rpc
 
+# build-stellar-rpc builds every release binary, and rpcv2 is not released yet,
+# so its binary refuses --enable-rpcv2 unless built with RPCV2=true.
+RPCV2 ?= false
+
 # The static zstd and RocksDB archives, in the same prefixes CI installs via
 # .github/actions/setup-go. Prepended so they win over any CGO_* from the
 # shell or the make command line. The include paths go in CGO_CPPFLAGS, not
@@ -133,10 +137,12 @@ build-native-libs: $(ZSTD_HOME)/lib/libzstd.a $(ROCKSDB_HOME)/lib/librocksdb.a
 
 # Called by name from the package builder and stellar/quickstart, in images with
 # only build-essential and jq, so it builds the archives and the Rust
-# libraries itself and ends with the link check.
+# libraries itself. It ends with the link check and, because -X ignores a
+# variable that does not exist, a check that the binary refuses rpcv2.
 build-stellar-rpc: build-libs build-native-libs
-	go build -ldflags="${GOLDFLAGS}" -o ${STELLAR_RPC_BINARY} -trimpath -v ./cmd/stellar-rpc
+	go build -ldflags="${GOLDFLAGS} -X 'main.rpcv2=${RPCV2}'" -o ${STELLAR_RPC_BINARY} -trimpath -v ./cmd/stellar-rpc
 	./scripts/check-link.sh ${STELLAR_RPC_BINARY}
+	[ "${RPCV2}" = true ] || ./${STELLAR_RPC_BINARY} --enable-rpcv2 version 2>&1 | grep -q 'not available in this build'
 
 # Override for feature branches, e.g. `make go-check-branch BASE=origin/feature/full-history`.
 BASE ?= origin/main

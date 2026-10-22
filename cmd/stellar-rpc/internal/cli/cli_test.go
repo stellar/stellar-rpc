@@ -68,6 +68,7 @@ func TestSelectModeRejectsNonBooleans(t *testing.T) {
 
 // fakeEntry runs the entry with both daemons replaced by recorders.
 type fakeEntry struct {
+	disableRPCv2   bool
 	stdout, stderr bytes.Buffer
 	v1cfg          *v1config.Config
 	v2path         string
@@ -82,10 +83,11 @@ func (f *fakeEntry) run(args []string, env map[string]string) int {
 		args = []string{}
 	}
 	e := Entry{
-		Args:      args,
-		LookupEnv: envOf(env),
-		Stdout:    &f.stdout,
-		Stderr:    &f.stderr,
+		Args:         args,
+		LookupEnv:    envOf(env),
+		Stdout:       &f.stdout,
+		Stderr:       &f.stderr,
+		DisableRPCv2: f.disableRPCv2,
 		startRPCv1: func(cfg *v1config.Config) error {
 			f.v1cfg = cfg
 			return nil
@@ -307,6 +309,38 @@ func TestVersionNamesTheMode(t *testing.T) {
 	require.Equal(t, 0, f.run([]string{enableFlag, versionUse}, nil), f.stderr.String())
 	assert.Contains(t, f.stdout.String(), "mode: rpcv2")
 	assert.Contains(t, f.stdout.String(), "--enable-rpcv2=false")
+}
+
+func TestDisableRPCv2(t *testing.T) {
+	path := writeFile(t, "v2.toml", "[storage]\ndefault_data_dir = \"/tmp/x\"\n")
+
+	t.Run("refuses rpcv2", func(t *testing.T) {
+		f := &fakeEntry{disableRPCv2: true}
+		require.Equal(t, 1, f.run([]string{enableFlag, configPathFlag, path}, nil))
+		assert.Contains(t, f.stderr.String(), "rpcv2 is not available in this build")
+		assert.Equal(t, 0, f.v2calls)
+	})
+
+	t.Run("runs rpcv1", func(t *testing.T) {
+		f := &fakeEntry{disableRPCv2: true}
+		require.Equal(t, 0, f.run([]string{"--enable-rpcv2=false"}, nil), f.stderr.String())
+		assert.NotNil(t, f.v1cfg)
+	})
+
+	t.Run("help and version do not mention the flag", func(t *testing.T) {
+		for _, args := range [][]string{{"--help"}, {versionUse}} {
+			f := &fakeEntry{disableRPCv2: true}
+			require.Equal(t, 0, f.run(args, nil), f.stderr.String())
+			assert.NotContains(t, f.stdout.String(), enableFlag, args)
+		}
+	})
+
+	t.Run("rpcv2 config file", func(t *testing.T) {
+		f := &fakeEntry{disableRPCv2: true}
+		require.Equal(t, 1, f.run([]string{configPathFlag, path}, nil))
+		assert.Contains(t, f.stderr.String(), "rpcv2 config")
+		assert.NotContains(t, f.stderr.String(), enableFlag)
+	})
 }
 
 func TestGenConfigFilePrintsTheModeDefaults(t *testing.T) {

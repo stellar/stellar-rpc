@@ -46,7 +46,7 @@ func (e *Entry) runRPCv1(cfg *v1config.Config) error {
 	// rpcv1 parses its file non-strictly, so SetValues accepts a rpcv2 file
 	// without an error and leaves every value at its default. Nothing has
 	// been opened yet, so this is the place to refuse it.
-	if err := refuseRPCv2File(cfg.ConfigPath); err != nil {
+	if err := refuseRPCv2File(cfg.ConfigPath, e.switchHint(ModeRPCv1, "; %s")); err != nil {
 		return err
 	}
 	return e.startRPCv1(cfg)

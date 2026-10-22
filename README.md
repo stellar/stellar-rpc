@@ -4,7 +4,7 @@ RPC Server for Stellar.
 
 This repo is home to the Stellar RPC. The RPC provides information that the network currently has in its view. It has the ability to send a transaction to the network, and query the network for the status of previously sent transactions, and is meant to be simple, scalable, and familiar to blockchain developers.
 
-This repo produces one binary, `stellar-rpc`. Build it with `make build-stellar-rpc`. It runs the RPC server (SQLite-backed) by default, and the full-history streaming ingestion daemon (RocksDB-backed) with `--enable-rpcv2`.
+This repo produces one binary, `stellar-rpc`. Build it with `make build-stellar-rpc`. It runs the RPC server (SQLite-backed). The full-history streaming ingestion daemon (RocksDB-backed) is not released yet: build with `make build-stellar-rpc RPCV2=true` and run it with `--enable-rpcv2`.
 
 
 ## RPC Methods

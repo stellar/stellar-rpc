@@ -2,7 +2,8 @@
 
 `bench` measures the ingestion and the read handlers of the rpcv2 daemon. It
 is a subcommand of the `stellar-rpc` binary in rpcv2 mode only. Select the mode
-with `--enable-rpcv2` or `STELLAR_RPC_ENABLE_RPCV2=true`.
+with `--enable-rpcv2` or `STELLAR_RPC_ENABLE_RPCV2=true`. Release builds cannot
+run rpcv2, so build with `RPCV2=true`.
 
 | Command | Does |
 |---|---|
@@ -11,7 +12,7 @@ with `--enable-rpcv2` or `STELLAR_RPC_ENABLE_RPCV2=true`.
 | `bench query` | Calls the daemon read handlers on a dataset at fixed request rates. Measures latency. |
 
 ```
-make build-stellar-rpc
+make build-stellar-rpc RPCV2=true
 ./stellar-rpc --enable-rpcv2 bench ingest cold --pack-dir PACKS \
     --start-chunk 6000 --num-chunks 2 --cold-out-dir /data/cold --out out/ingest
 ./stellar-rpc --enable-rpcv2 bench query --data-dir /data/cold \

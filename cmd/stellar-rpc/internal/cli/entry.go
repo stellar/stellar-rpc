@@ -23,6 +23,9 @@ type Entry struct {
 	Stdout    io.Writer
 	Stderr    io.Writer
 
+	// DisableRPCv2 refuses rpcv2 mode and hides --enable-rpcv2.
+	DisableRPCv2 bool
+
 	// Tests replace the two daemon launches with recorders.
 	startRPCv1 func(cfg *v1config.Config) error
 	startRPCv2 func(configPath string, flags v2config.FlagOverrides) error
@@ -39,6 +42,10 @@ func (e *Entry) Run() int {
 	mode, err := SelectMode(e.Args, e.LookupEnv)
 	if err != nil {
 		fmt.Fprintln(e.Stderr, err)
+		return 1
+	}
+	if mode == ModeRPCv2 && e.DisableRPCv2 {
+		fmt.Fprintln(e.Stderr, "rpcv2 is not available in this build of stellar-rpc")
 		return 1
 	}
 
@@ -97,17 +104,29 @@ func (e *Entry) rootCommand(mode Mode, runErr *error) (*cobra.Command, error) {
 		}
 	}
 	// SelectMode already read this flag from the raw arguments. It is
-	// registered here so cobra accepts it and --help lists it.
-	root.PersistentFlags().Bool(EnableRPCv2Flag, mode == ModeRPCv2,
+	// registered here so cobra accepts it and, unless rpcv2 is disabled,
+	// --help lists it.
+	flags := root.PersistentFlags()
+	flags.Bool(EnableRPCv2Flag, mode == ModeRPCv2,
 		"run the rpcv2 full-history daemon instead of rpcv1 ("+EnableRPCv2Env+")")
-	root.AddCommand(versionCommand(mode))
+	flags.Lookup(EnableRPCv2Flag).Hidden = e.DisableRPCv2
+	root.AddCommand(e.versionCommand(mode))
 	return root, nil
 }
 
-func versionCommand(mode Mode) *cobra.Command {
+func (e *Entry) versionCommand(mode Mode) *cobra.Command {
 	cmd := version.NewCommand()
 	cmd.PostRun = func(cmd *cobra.Command, _ []string) {
-		fmt.Fprintf(cmd.OutOrStdout(), "mode: %s (%s)\n", mode, mode.howToSwitch())
+		fmt.Fprintf(cmd.OutOrStdout(), "mode: %s%s\n", mode, e.switchHint(mode, " (%s)"))
 	}
 	return cmd
+}
+
+// switchHint formats mode.howToSwitch() with format, or returns "" when this
+// build cannot run rpcv2.
+func (e *Entry) switchHint(mode Mode, format string) string {
+	if e.DisableRPCv2 {
+		return ""
+	}
+	return fmt.Sprintf(format, mode.howToSwitch())
 }

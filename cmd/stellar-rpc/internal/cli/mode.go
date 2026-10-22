@@ -30,9 +30,9 @@ func (m Mode) String() string {
 // howToSwitch tells an operator how to select the other mode.
 func (m Mode) howToSwitch() string {
 	if m == ModeRPCv2 {
-		return "pass --enable-rpcv2=false to run rpcv1"
+		return "pass --" + EnableRPCv2Flag + "=false to run rpcv1"
 	}
-	return "pass --enable-rpcv2 to run rpcv2"
+	return "pass --" + EnableRPCv2Flag + " to run rpcv2"
 }
 
 const (
