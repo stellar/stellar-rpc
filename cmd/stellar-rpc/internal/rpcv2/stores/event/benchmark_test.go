@@ -106,7 +106,7 @@ func buildIndex10M(b *testing.B, idx *hotIndex) {
 		keys = append(keys, TopicCountTermKey(numTopics))
 		ledger = append(ledger, keys)
 		if len(ledger) == eventsPerLedger {
-			require.NoError(b, idx.add(eventID+1-eventsPerLedger, ledger))
+			require.NoError(b, idx.add(eventID+1-eventsPerLedger, routedTerms(idx.secret, ledger)))
 			ledger = ledger[:0]
 		}
 	}
