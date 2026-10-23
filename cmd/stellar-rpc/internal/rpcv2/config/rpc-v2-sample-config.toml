@@ -172,8 +172,8 @@ soroban_inclusion_fee_window_ledgers = 50
 # requests are rejected. Both default to the CPU count.
 #worker_count = 8
 #worker_queue_size = 8
-# Detailed diagnostics in preflight errors. The default is true, but they are
-# expensive to produce, so this sample turns them off.
+# Diagnostic events in simulateTransaction responses. The default is true, but
+# they are expensive to produce, so this sample turns them off.
 enable_debug = false
 
 # -----------------------------------------------------------------------------

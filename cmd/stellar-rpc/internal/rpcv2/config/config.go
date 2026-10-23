@@ -89,8 +89,8 @@ type PreflightConfig struct {
 	// WorkerQueueSize is how many preflight requests may wait for a free worker
 	// before the pool starts rejecting them; >= 1. Default NumCPU.
 	WorkerQueueSize *uint `toml:"worker_queue_size"`
-	// EnableDebug adds detailed diagnostics to preflight errors — expensive to
-	// produce, and v1 warns against it in production. Default true.
+	// EnableDebug includes diagnostic events in simulateTransaction responses.
+	// Default true.
 	EnableDebug *bool `toml:"enable_debug"`
 }
 

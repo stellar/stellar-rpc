@@ -85,7 +85,7 @@ Every TOML leaf is also settable from the command line:
 |---|---|---|---|
 | `worker_count` | uint | `NumCPU` | Concurrent preflights; >= 1. |
 | `worker_queue_size` | uint | `NumCPU` | Requests that may wait for a free worker; >= 1. |
-| `enable_debug` | bool | `true` | Detailed diagnostics in preflight errors; not advised in production. |
+| `enable_debug` | bool | `true` | Diagnostic events in simulateTransaction responses. |
 
 **[retention]** — the two inputs to the retention floor; the effective floor is the higher of the two:
 
