@@ -218,7 +218,7 @@ func (b *ColdIndexBuilder) writePack(m *mphf, termsPath string, slabs uint32, pa
 		return err
 	}
 	defer r.f.Close()
-	w := newIndexPackWriter(pw, slabs)
+	w := newIndexPackWriter(pw, slabs, m.idx.MaxBlockKeys())
 	for !r.done {
 		slot, fp, err := m.lookupRouted(r.key)
 		if err != nil {
@@ -379,31 +379,39 @@ type indexEntry struct {
 }
 
 // indexPackWriter writes entries in slot order as they arrive in key order.
-// Terms come in MPHF block order and a block's slots are contiguous, so the
-// entries held back never exceed one block.
+// Keys in order map to MPHF blocks in order and a block's slots are
+// contiguous, so an entry is held for at most one block, in a ring at its
+// slot.
 type indexPackWriter struct {
 	pw      *packfile.Writer
 	layout  indexLayout
-	next    uint32 // the slot to write next
-	pending heapOf[indexEntry]
-	held    []byte // the pending entries' tagged entries
+	next    uint32       // the slot to write next
+	ring    []indexEntry // a held slot s at ring[s % len(ring)]
+	pending int          // how many entries the ring holds
+	held    []byte       // the pending entries' tagged entries
 }
 
-func newIndexPackWriter(pw *packfile.Writer, slabs uint32) *indexPackWriter {
-	return &indexPackWriter{
-		pw:      pw,
-		layout:  indexLayout{slabs: slabs},
-		pending: heapOf[indexEntry]{less: func(a, b indexEntry) bool { return a.slot < b.slot }},
-	}
+// newIndexPackWriter returns a writer whose slots arrive at most hold past
+// the next one to write: streamhash's MaxBlockKeys.
+func newIndexPackWriter(pw *packfile.Writer, slabs, hold uint32) *indexPackWriter {
+	return &indexPackWriter{pw: pw, layout: indexLayout{slabs: slabs}, ring: make([]indexEntry, hold)}
 }
 
 // add writes e with its tagged entries, or holds them until its slot comes.
 func (w *indexPackWriter) add(e indexEntry, entries []byte) error {
+	if e.slot < w.next || e.slot-w.next >= uint32(len(w.ring)) { //nolint:gosec // a ring of at most MaxBlockKeys
+		return fmt.Errorf("events: MPHF slot %d out of reach of slot %d", e.slot, w.next)
+	}
 	if e.slot != w.next {
+		r := &w.ring[int(e.slot)%len(w.ring)]
+		if r.end != 0 {
+			return fmt.Errorf("events: MPHF slot %d repeated", e.slot)
+		}
 		e.start = len(w.held)
 		w.held = append(w.held, entries...)
 		e.end = len(w.held)
-		w.pending.push(e)
+		*r = e
+		w.pending++
 		return nil
 	}
 	for {
@@ -411,13 +419,15 @@ func (w *indexPackWriter) add(e indexEntry, entries []byte) error {
 			return err
 		}
 		w.next++
-		if len(w.pending.items) == 0 || w.pending.items[0].slot != w.next {
+		r := &w.ring[int(w.next)%len(w.ring)]
+		if w.pending == 0 || r.end == 0 {
 			break
 		}
-		e = w.pending.pop()
+		e, *r = *r, indexEntry{}
+		w.pending--
 		entries = w.held[e.start:e.end]
 	}
-	if len(w.pending.items) == 0 {
+	if w.pending == 0 {
 		w.held = w.held[:0]
 	}
 	return nil
@@ -466,8 +476,8 @@ func cutPrefixed(b []byte) ([]byte, []byte, bool) {
 // minimal, so every slot in [0, n) must have been written: a slot never
 // reached leaves entries pending, and a repeated one never drains.
 func (w *indexPackWriter) finish() error {
-	if n := len(w.pending.items); n > 0 {
-		return fmt.Errorf("events: non-dense MPHF slots: %d entries left past slot %d", n, w.next)
+	if w.pending > 0 {
+		return fmt.Errorf("events: non-dense MPHF slots: %d entries left past slot %d", w.pending, w.next)
 	}
 	return w.pw.Finish(encodeIndexAppData(w.layout))
 }
