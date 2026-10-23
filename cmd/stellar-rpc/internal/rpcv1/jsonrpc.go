@@ -112,5 +112,6 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		GlobalQueueLimit:      cfg.RequestBacklogGlobalQueueLimit,
 		GlobalDurationWarning: cfg.RequestExecutionWarningThreshold,
 		GlobalDurationLimit:   cfg.MaxRequestExecutionDuration,
+		MaxRequestBatchSize:   cfg.MaxRequestBatchSize,
 	})
 }

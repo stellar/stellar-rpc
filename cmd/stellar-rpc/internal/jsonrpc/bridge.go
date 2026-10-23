@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net"
 	"net/http"
@@ -38,13 +39,15 @@ var (
 // directly, at most one per CPU. The zero value is not usable; build it with
 // NewBridge.
 type Bridge struct {
-	// Bridge keeps jhttp.Bridge's wire behavior (TestBridge_ParityWithJHTTP)
-	// but encodes each result once. It enforces the duration limit itself, so a
-	// response is never buffered to be swapped for a 504.
-	methods     jrpc2.Assigner
-	sem         *semaphore.Weighted // bounds the handlers running at once, as jrpc2.Server does
-	maxHandlers int
-	limits      durationLimits
+	// Bridge keeps the wire behavior of jhttp.Bridge with parseRequests as its
+	// ParseRequest hook (TestBridge_ParityWithJHTTP), but encodes each result
+	// once. It enforces the duration limit itself, so a response is never
+	// buffered to be swapped for a 504.
+	methods      jrpc2.Assigner
+	sem          *semaphore.Weighted // bounds the handlers running at once, as jrpc2.Server does
+	maxHandlers  int
+	maxBatchSize uint
+	limits       durationLimits
 
 	mu     sync.RWMutex // read-held while a request's handlers run
 	closed bool
@@ -60,22 +63,25 @@ type durationLimits struct {
 	logger             *log.Entry
 }
 
-// NewBridge returns a Bridge over methods with no request duration limit.
-// logger receives panic stacks. The caller must Close it.
+// NewBridge returns a Bridge over methods with no request duration limit and
+// no batch size limit. logger receives panic stacks. The caller must Close it.
 func NewBridge(methods jrpc2.Assigner, logger *log.Entry) *Bridge {
-	return newBridge(methods, durationLimits{limit: network.RequestDurationLimiterNoLimit, logger: logger})
+	return newBridge(methods, math.MaxUint, durationLimits{limit: network.RequestDurationLimiterNoLimit, logger: logger})
 }
 
-func newBridge(methods jrpc2.Assigner, limits durationLimits) *Bridge {
+// newBridge returns a Bridge that answers a batch of more than maxBatchSize
+// calls with a single error.
+func newBridge(methods jrpc2.Assigner, maxBatchSize uint, limits durationLimits) *Bridge {
 	ctx, cancel := context.WithCancel(context.Background())
 	maxHandlers := runtime.NumCPU()
 	return &Bridge{
-		methods:     methods,
-		sem:         semaphore.NewWeighted(int64(maxHandlers)),
-		maxHandlers: maxHandlers,
-		limits:      limits,
-		ctx:         ctx,
-		cancel:      cancel,
+		methods:      methods,
+		sem:          semaphore.NewWeighted(int64(maxHandlers)),
+		maxHandlers:  maxHandlers,
+		maxBatchSize: maxBatchSize,
+		limits:       limits,
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 }
 
@@ -104,7 +110,7 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "content-type must be application/json", http.StatusUnsupportedMediaType)
 		return
 	}
-	if cs, ok := params["charset"]; ok && cs != "utf-8" && cs != "utf8" {
+	if cs, ok := params["charset"]; ok && !strings.EqualFold(cs, "utf-8") && !strings.EqualFold(cs, "utf8") {
 		http.Error(w, "invalid content-type charset", http.StatusUnsupportedMediaType)
 		return
 	}
@@ -137,7 +143,7 @@ func (b *Bridge) serve(ctx context.Context, r *http.Request) (bool, []*response,
 	if err != nil {
 		return false, nil, err
 	}
-	reqs, err := jrpc2.ParseRequests(body)
+	reqs, err := parseRequests(body, b.maxBatchSize)
 	if err != nil {
 		return false, nil, err
 	}

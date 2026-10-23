@@ -1,34 +1,27 @@
-package network
+package jsonrpc
 
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/creachadair/jrpc2/handler"
-	"github.com/creachadair/jrpc2/jhttp"
 	"github.com/stretchr/testify/require"
 )
 
-func TestJSONRPCRequestLimits(t *testing.T) {
+func TestBridge_RequestLimits(t *testing.T) {
 	var calls atomic.Int32
-	bridge := jhttp.NewBridge(handler.Map{
+	b := newBridge(handler.Map{
 		"getHealth": handler.New(func(context.Context) (string, error) {
 			calls.Add(1)
 			return "ok", nil
 		}),
-	}, &jhttp.BridgeOptions{ParseRequest: MakeJSONRPCRequestParser(3)})
-	t.Cleanup(func() { require.NoError(t, bridge.Close()) })
-	server := RequireJSONPost(bridge)
-	serve := func(method, contentType, body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequestWithContext(t.Context(), method, "/", strings.NewReader(body))
-		req.Header.Set("Content-Type", contentType)
-		rec := httptest.NewRecorder()
-		server.ServeHTTP(rec, req)
-		return rec
+	}, 3, unlimited)
+	t.Cleanup(b.Close)
+	serve := func(method, contentType, body string) int {
+		return serveBridge(t, b, bridgeCase{method: method, contentType: contentType, body: body}).Code
 	}
 
 	call := `{"jsonrpc":"2.0","id":1,"method":"getHealth"}`
@@ -54,7 +47,7 @@ func TestJSONRPCRequestLimits(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls.Store(0)
-			rec := serve(http.MethodPost, "application/json", tc.body)
+			rec := postBridge(t, b, tc.body)
 			require.Equal(t, http.StatusOK, rec.Code)
 			for s, n := range tc.want {
 				require.Equal(t, n, strings.Count(rec.Body.String(), s), "%q in %s", s, rec.Body.String())
@@ -63,12 +56,12 @@ func TestJSONRPCRequestLimits(t *testing.T) {
 		})
 	}
 
-	overLimit := serve(http.MethodPost, "application/json", batch(call, call, call, call)).Body.String()
+	overLimit := postBridge(t, b, batch(call, call, call, call)).Body.String()
 	require.True(t, strings.HasPrefix(overLimit, "["), "an oversized batch gets a batch response: %s", overLimit)
 
-	require.Equal(t, http.StatusMethodNotAllowed, serve(http.MethodGet, "application/json", call).Code)
-	require.Equal(t, http.StatusUnsupportedMediaType, serve(http.MethodPost, "text/plain", call).Code)
-	latin1 := "application/json; charset=latin1"
-	require.Equal(t, http.StatusUnsupportedMediaType, serve(http.MethodPost, latin1, call).Code)
-	require.Equal(t, http.StatusOK, serve(http.MethodPost, "application/json; charset=UTF-8", call).Code)
+	require.Equal(t, http.StatusMethodNotAllowed, serve(http.MethodGet, contentTypeJSON, call))
+	require.Equal(t, http.StatusUnsupportedMediaType, serve(http.MethodPost, "text/plain", call))
+	require.Equal(t, http.StatusUnsupportedMediaType, serve(http.MethodPost, contentTypeJSON+"; charset=latin1", call))
+	// Charset names are case-insensitive, though jhttp.Bridge accepted only lowercase.
+	require.Equal(t, http.StatusOK, serve(http.MethodPost, contentTypeJSON+"; charset=UTF-8", call))
 }

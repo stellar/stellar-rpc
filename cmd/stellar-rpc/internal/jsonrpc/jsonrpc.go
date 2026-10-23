@@ -82,6 +82,7 @@ type Params struct {
 	GlobalQueueLimit      uint
 	GlobalDurationWarning time.Duration
 	GlobalDurationLimit   time.Duration
+	MaxRequestBatchSize   uint // the most calls a JSON-RPC batch may hold
 }
 
 // decorateHandlers wraps every method with request logging and the duration
@@ -255,13 +256,14 @@ func NewHandler(params Params) Handler {
 		Name:      "global_request_execution_duration_threshold_limit",
 		Help:      "The metric measures the count of requests that surpassed the limit threshold for execution time",
 	})
-	rpc := newBridge(decorateHandlers(params.Daemon, params.Logger, handlersMap), durationLimits{
-		warning:  params.GlobalDurationWarning,
-		limit:    params.GlobalDurationLimit,
-		warnings: globalQueueRequestExecutionDurationWarningCounter,
-		timeouts: globalQueueRequestExecutionDurationLimitCounter,
-		logger:   params.Logger,
-	})
+	rpc := newBridge(decorateHandlers(params.Daemon, params.Logger, handlersMap), params.MaxRequestBatchSize,
+		durationLimits{
+			warning:  params.GlobalDurationWarning,
+			limit:    params.GlobalDurationLimit,
+			warnings: globalQueueRequestExecutionDurationWarningCounter,
+			timeouts: globalQueueRequestExecutionDurationLimitCounter,
+			logger:   params.Logger,
+		})
 
 	// globalQueueRequestBacklogLimiter is a metric for measuring the total concurrent inflight requests
 	globalQueueRequestBacklogLimiter := prometheus.NewGauge(prometheus.GaugeOpts{
