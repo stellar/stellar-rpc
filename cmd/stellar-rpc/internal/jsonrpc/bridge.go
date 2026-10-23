@@ -125,6 +125,10 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := b.limits.bound(r.Context())
 	defer cancel()
 	batch, rsps, err := b.serve(ctx, r)
+	// The handlers can outlast the server's WriteTimeout, so the response gets
+	// its own write time, which write extends as it goes.
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Now().Add(responseChunkTimeout))
 	if b.limits.timedOut(r, time.Since(start)) {
 		if r.Context().Err() == nil {
 			w.WriteHeader(http.StatusGatewayTimeout)
@@ -136,7 +140,7 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err == nil {
-		err = write(w, batch, rsps)
+		err = write(w, rc, batch, rsps)
 	}
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -309,7 +313,7 @@ type response struct {
 
 // write writes rsps as the body of a 200 response, as an array if batch is
 // set. Results are written without copying.
-func write(w http.ResponseWriter, batch bool, rsps []*response) error {
+func write(w http.ResponseWriter, rc *http.ResponseController, batch bool, rsps []*response) error {
 	parts := make([][]byte, 0, 3*len(rsps)+2)
 	if batch {
 		parts = append(parts, []byte("["))
@@ -341,15 +345,16 @@ func write(w http.ResponseWriter, batch bool, rsps []*response) error {
 	w.Header().Set("Content-Type", contentTypeJSON)
 	w.Header().Set("Content-Length", strconv.Itoa(n))
 	w.WriteHeader(http.StatusOK)
-	writeChunked(w, http.NewResponseController(w), parts)
+	writeChunked(w, rc, parts)
 	return nil
 }
 
-// writeChunked writes parts to w, moving the write deadline on rc before each
-// responseChunkSize bytes. It stops at the first write error, which means the
-// client is gone.
+// writeChunked writes parts to w. The deadline the caller just set on rc covers
+// the first responseChunkSize bytes, and writeChunked moves it before each
+// responseChunkSize bytes after that. It stops at the first write error, which
+// means the client is gone.
 func writeChunked(w io.Writer, rc *http.ResponseController, parts [][]byte) {
-	left := 0 // bytes the current deadline still covers
+	left := responseChunkSize // bytes the current deadline still covers
 	for _, p := range parts {
 		for len(p) > 0 {
 			if left == 0 {

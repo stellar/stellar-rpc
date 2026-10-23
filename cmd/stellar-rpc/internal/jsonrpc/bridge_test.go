@@ -235,6 +235,24 @@ func TestBridge_WriteSetsADeadlinePerChunk(t *testing.T) {
 	require.Equal(t, []int{responseChunkSize, responseChunkSize, rec.Body.Len() - 2*responseChunkSize}, rec.windows)
 }
 
+// A response gets its own write time however long the handlers ran, so a 504
+// sent after the server's write timeout still reaches the client.
+func TestBridge_TimeoutResponseMovesTheWriteDeadline(t *testing.T) {
+	logger, _ := testLogger()
+	limits := durationLimits{limit: time.Second / 20, warnings: &counter{}, timeouts: &counter{}, logger: logger}
+	b := newBridge(handler.Map{"slow": handler.New(func(ctx context.Context) (any, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})}, testMaxBatchSize, limits)
+	t.Cleanup(b.Close)
+	rec := &windowRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+	b.ServeHTTP(rec, newBridgeRequest(t, `{"jsonrpc":"2.0","id":1,"method":"slow"}`))
+
+	require.Equal(t, http.StatusGatewayTimeout, rec.Code)
+	require.Equal(t, []int{0}, rec.windows)
+}
+
 func newBridgeRequest(t *testing.T, body string) *http.Request {
 	t.Helper()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(body))
