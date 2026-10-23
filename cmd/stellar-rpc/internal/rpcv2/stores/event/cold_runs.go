@@ -3,6 +3,7 @@ package event
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,21 +12,21 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-
-	"github.com/RoaringBitmap/roaring/v2"
 )
 
 // coldRuns are a chunk's postings spilled one slab at a time. Run i holds
-// the terms of the i-th spill in key order, each as
+// the terms of one slab in key order, each as
 // key || uvarint(len) || serialized bitmap. Merging the runs yields every
-// term once, in key order, with the union of its bitmaps.
+// term once, in key order, with its bitmap from each run holding it.
 type coldRuns struct {
 	dir   string
 	paths []string
+	slabs []uint32 // each run's slab
 }
 
-// spill writes the slab's terms as the next run.
-func (r *coldRuns) spill(s *hotSlab) (err error) {
+// spill writes slab's terms, in key order with their serialized bitmaps, as
+// the next run.
+func (r *coldRuns) spill(slab uint32, terms iter.Seq2[TermKey, []byte]) error {
 	if len(r.paths) == 0 {
 		if err := os.MkdirAll(r.dir, 0o755); err != nil {
 			return err
@@ -36,66 +37,96 @@ func (r *coldRuns) spill(s *hotSlab) (err error) {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-	}()
-	w := bufio.NewWriterSize(f, 1<<16)
-	var length [binary.MaxVarintLen64]byte
-	for key, bitmap := range s.terms() {
-		// A bufio.Writer keeps the first error and reports it from Flush.
-		_, _ = w.Write(key[:])
-		_, _ = w.Write(length[:binary.PutUvarint(length[:], uint64(len(bitmap)))])
-		_, _ = w.Write(bitmap)
+	err = writeRun(f, terms)
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
-	if err := w.Flush(); err != nil {
+	if err != nil {
 		return err
 	}
 	r.paths = append(r.paths, path)
+	r.slabs = append(r.slabs, slab)
 	return nil
 }
 
-// remove deletes the runs.
+func writeRun(f *os.File, terms iter.Seq2[TermKey, []byte]) error {
+	w := bufio.NewWriterSize(f, 1<<16)
+	for key, bitmap := range terms {
+		writeEntry(w, key, bitmap)
+	}
+	return w.Flush()
+}
+
+// writeEntry writes key || uvarint(len(value)) || value. A bufio.Writer
+// keeps the first error and reports it from Flush.
+func writeEntry(w *bufio.Writer, key TermKey, value []byte) {
+	var length [binary.MaxVarintLen64]byte
+	_, _ = w.Write(key[:])
+	_, _ = w.Write(length[:binary.PutUvarint(length[:], uint64(len(value)))])
+	_, _ = w.Write(value)
+}
+
+// removeRuns deletes the run files and leaves the directory.
+func (r *coldRuns) removeRuns() error {
+	for _, path := range r.paths {
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	}
+	r.paths, r.slabs = nil, nil
+	return nil
+}
+
+// remove deletes the runs and the directory holding them.
 func (r *coldRuns) remove() error {
-	r.paths = nil
+	r.paths, r.slabs = nil, nil
 	return os.RemoveAll(r.dir)
 }
 
 // runTerm is one term of the merged runs.
 type runTerm struct {
-	key    TermKey
-	bitmap *roaring.Bitmap // the term's event ids
+	key   TermKey
+	parts []runPart // in run order, so in slab order
 }
 
-// terms merges the runs: every term once, in key order, with the union of
-// its slabs' bitmaps.
-func (r *coldRuns) terms() iter.Seq2[runTerm, error] { return r.merge(true) }
-
-// keys is terms without the bitmaps.
-func (r *coldRuns) keys() iter.Seq2[TermKey, error] {
-	return func(yield func(TermKey, error) bool) {
-		for term, err := range r.merge(false) {
-			if !yield(term.key, err) {
-				return
-			}
-		}
-	}
+// runPart is a term's bitmap in one run, valid until the merge yields the
+// next term.
+type runPart struct {
+	slab   uint32
+	bitmap []byte
 }
 
-func (r *coldRuns) merge(withBitmaps bool) iter.Seq2[runTerm, error] {
+// merge yields every term of the runs once, in key order.
+func (r *coldRuns) merge() iter.Seq2[runTerm, error] {
 	return func(yield func(runTerm, error) bool) {
-		m, err := r.open(withBitmaps)
+		m, err := r.open()
 		defer m.close()
 		if err != nil {
 			yield(runTerm{}, err)
 			return
 		}
+		var (
+			term runTerm
+			held []byte
+			ends []int
+		)
 		for len(m.items) > 0 {
-			term, err := m.next()
-			if err != nil {
-				yield(runTerm{}, err)
-				return
+			term.key = m.items[0].key
+			term.parts, held, ends = term.parts[:0], held[:0], ends[:0]
+			for len(m.items) > 0 && m.items[0].key == term.key {
+				rr := m.items[0]
+				held = append(held, rr.value...)
+				ends = append(ends, len(held))
+				term.parts = append(term.parts, runPart{slab: rr.slab})
+				if err := m.advance(); err != nil {
+					yield(runTerm{}, err)
+					return
+				}
+			}
+			start := 0
+			for i, end := range ends {
+				term.parts[i].bitmap = held[start:end:end]
+				start = end
 			}
 			if !yield(term, nil) {
 				return
@@ -104,33 +135,22 @@ func (r *coldRuns) merge(withBitmaps bool) iter.Seq2[runTerm, error] {
 	}
 }
 
-// count returns how many distinct terms the runs hold.
-func (r *coldRuns) count() (uint64, error) {
-	var n uint64
-	for _, err := range r.keys() {
-		if err != nil {
-			return 0, err
-		}
-		n++
-	}
-	return n, nil
-}
-
-// runMerge holds the open runs with entries left, the smallest key first.
+// runMerge holds the open runs with entries left, the smallest key first
+// and, among equal keys, the earliest run.
 type runMerge struct {
 	heapOf[*runReader]
-
-	withBitmaps bool
 }
 
-func (r *coldRuns) open(withBitmaps bool) (*runMerge, error) {
-	m := &runMerge{withBitmaps: withBitmaps}
-	m.less = func(a, b *runReader) bool { return bytes.Compare(a.key[:], b.key[:]) < 0 }
+func (r *coldRuns) open() (*runMerge, error) {
+	m := &runMerge{}
+	m.less = func(a, b *runReader) bool {
+		return cmp.Or(bytes.Compare(a.key[:], b.key[:]), cmp.Compare(a.run, b.run)) < 0
+	}
 	// The runs share 16 MiB of read buffers, between 4 KiB and 64 KiB each.
 	bufSize := min(max(16<<20/max(len(r.paths), 1), 4<<10), 64<<10)
-	for _, path := range r.paths {
-		rr, err := openRun(path, withBitmaps, bufSize)
-		if err != nil {
+	for i, path := range r.paths {
+		rr := &runReader{run: i, slab: r.slabs[i]}
+		if err := rr.open(path, bufSize, runValueMax); err != nil {
 			return m, err
 		}
 		if rr.done {
@@ -148,88 +168,78 @@ func (m *runMerge) close() {
 	}
 }
 
-// next takes the smallest key out of every run holding it.
-func (m *runMerge) next() (runTerm, error) {
-	term := runTerm{key: m.items[0].key}
-	if m.withBitmaps {
-		term.bitmap = roaring.New()
-	}
-	for len(m.items) > 0 && m.items[0].key == term.key {
-		rr := m.items[0]
-		if m.withBitmaps {
-			// UnmarshalBinary copies: the reader's buffer is reused.
-			part := roaring.New()
-			if err := part.UnmarshalBinary(rr.value); err != nil {
-				return runTerm{}, fmt.Errorf("events: run %s: decode bitmap: %w", rr.f.Name(), err)
-			}
-			term.bitmap.Or(part)
-		}
-		if err := rr.next(); err != nil {
-			return runTerm{}, err
-		}
-		if rr.done {
-			m.pop()
-			_ = rr.f.Close()
-		} else {
-			m.down()
-		}
-	}
-	return term, nil
-}
-
-// runReader reads one run's entries in order, skipping the bitmaps unless
-// asked for them.
-type runReader struct {
-	f           *os.File
-	br          *bufio.Reader
-	withBitmaps bool
-	key         TermKey
-	value       []byte // the bitmap, valid until the next call to next
-	done        bool
-}
-
-func openRun(path string, withBitmaps bool, bufSize int) (*runReader, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	rr := &runReader{f: f, br: bufio.NewReaderSize(f, bufSize), withBitmaps: withBitmaps}
+// advance moves the smallest run to its next entry.
+func (m *runMerge) advance() error {
+	rr := m.items[0]
 	if err := rr.next(); err != nil {
-		_ = f.Close()
-		return nil, err
+		return err
 	}
-	return rr, nil
+	if rr.done {
+		m.pop()
+		_ = rr.f.Close()
+	} else {
+		m.down()
+	}
+	return nil
+}
+
+// runReader reads one run's entries in order.
+type runReader struct {
+	entryReader
+
+	run  int
+	slab uint32
 }
 
 // runValueMax bounds one entry's bitmap: a slab's ids serialize to a few
 // kilobytes, so anything larger is a corrupt run.
 const runValueMax = 1 << 20
 
-func (rr *runReader) next() error {
-	if _, err := io.ReadFull(rr.br, rr.key[:]); err != nil {
+// entryReader reads key || uvarint(len) || value entries in order.
+type entryReader struct {
+	f     *os.File
+	br    *bufio.Reader
+	max   uint64 // the longest value accepted
+	key   TermKey
+	value []byte // valid until the next call to next
+	done  bool
+}
+
+// open opens path and reads its first entry.
+func (r *entryReader) open(path string, bufSize int, maxValue uint64) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	r.f, r.br, r.max = f, bufio.NewReaderSize(f, bufSize), maxValue
+	if err := r.next(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return nil
+}
+
+func (r *entryReader) next() error {
+	if _, err := io.ReadFull(r.br, r.key[:]); err != nil {
 		if errors.Is(err, io.EOF) {
-			rr.done = true
+			r.done = true
 			return nil
 		}
-		return fmt.Errorf("events: run %s: %w", rr.f.Name(), err)
+		return fmt.Errorf("events: %s: %w", r.f.Name(), err)
 	}
-	n, err := binary.ReadUvarint(rr.br)
+	n, err := binary.ReadUvarint(r.br)
 	if err == nil {
-		if n > runValueMax {
-			return fmt.Errorf("events: run %s: entry of %d bytes", rr.f.Name(), n)
+		if n > r.max {
+			return fmt.Errorf("events: %s: entry of %d bytes", r.f.Name(), n)
 		}
-		if rr.withBitmaps {
-			rr.value = slices.Grow(rr.value[:0], int(n))[:n]
-			_, err = io.ReadFull(rr.br, rr.value)
-		} else {
-			_, err = rr.br.Discard(int(n))
-		}
+		r.value = slices.Grow(r.value[:0], int(n))[:n] //nolint:gosec // n is at most r.max
+		_, err = io.ReadFull(r.br, r.value)
 	}
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			err = io.ErrUnexpectedEOF // a key without its entry
 		}
-		return fmt.Errorf("events: run %s: %w", rr.f.Name(), err)
+		return fmt.Errorf("events: %s: %w", r.f.Name(), err)
 	}
 	return nil
 }
