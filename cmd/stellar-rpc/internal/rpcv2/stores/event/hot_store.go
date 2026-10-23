@@ -111,6 +111,10 @@ type HotStore struct {
 	chunkID    chunk.ID
 	index      *hotIndex
 	offsets    *ConcurrentLedgerOffsets
+	// terms are the last ingested ledger's, routed on another goroutine
+	// while the ledger commits; routed closes when that is done.
+	terms  ledgerTerms
+	routed chan struct{}
 }
 
 // Compile-time guard: *HotStore satisfies Reader.
@@ -423,13 +427,12 @@ func (h *HotStore) IngestLedgerToBatch(
 
 	// Derive term keys per payload up front (a TermsForBytes error rejects the
 	// ledger without any Put) and retain them for the post-commit index update.
-	termKeys := make([][]TermKey, len(payloads))
+	h.awaitRouting()
+	h.terms.reset()
 	for i := range payloads {
-		keys, err := TermsForBytes(payloads[i].ContractEventBytes)
-		if err != nil {
+		if err := h.terms.appendEvent(payloads[i].ContractEventBytes); err != nil {
 			return nil, fmt.Errorf("derive terms for payload %d in ledger %d: %w", i, ledgerSeq, err)
 		}
-		termKeys[i] = keys
 	}
 
 	startID := h.offsets.TotalEvents()
@@ -438,22 +441,45 @@ func (h *HotStore) IngestLedgerToBatch(
 			h.chunkID, ledgerSeq)
 	}
 
+	routed := make(chan struct{})
+	h.routed = routed
+	go func() {
+		defer close(routed)
+		h.terms.route(h.index.secret)
+	}()
+
 	// Marshal + queue each event directly into b. BatchWriter.Put copies
-	// synchronously, so ONE reused scratch buffer serves every event — the caller
-	// opens exactly one batch per ledger, so no row must outlive this call.
-	var scratch []byte
+	// synchronously, so ONE reused scratch buffer and key serve every event —
+	// the caller opens exactly one batch per ledger, so no row must outlive
+	// this call.
+	var (
+		scratch []byte
+		dataKey [dataKeyLen]byte
+	)
 	for i := range payloads {
 		blob, err := payloads[i].MarshalInto(scratch[:0])
 		if err != nil {
 			return nil, fmt.Errorf("marshal payload %d for ledger %d: %w", i, ledgerSeq, err)
 		}
 		scratch = blob
-		b.Put(DataCF, encodeDataKey(startID+uint32(i)), blob)
+		binary.BigEndian.PutUint32(dataKey[:], startID+uint32(i))
+		b.Put(DataCF, dataKey[:], blob)
 	}
 	//nolint:gosec // len bounded by the overflow guard above
 	b.Put(OffsetsCF, encodeOffsetKey(ledgerSeq), encodeLedgerEventCount(uint32(len(payloads))))
 
-	return func() error { return h.applyLedger(startID, termKeys) }, nil
+	return func() error {
+		h.awaitRouting()
+		return h.applyLedger(startID, &h.terms)
+	}, nil
+}
+
+// awaitRouting waits until the last ledger's terms are routed.
+func (h *HotStore) awaitRouting() {
+	if h.routed != nil {
+		<-h.routed
+		h.routed = nil
+	}
 }
 
 // applyLedger updates the index + offsets for a ledger whose rows are durable.
@@ -464,12 +490,12 @@ func (h *HotStore) IngestLedgerToBatch(
 // offsets then reads the index must see either the prior state or a consistent
 // later one. Reversing it would let a reader see an offsets count including IDs
 // the index hasn't published — FetchEvents would then miss them, silently.
-func (h *HotStore) applyLedger(startID uint32, termKeys [][]TermKey) error {
-	if err := h.index.add(startID, termKeys); err != nil {
+func (h *HotStore) applyLedger(startID uint32, terms *ledgerTerms) error {
+	if err := h.index.add(startID, terms); err != nil {
 		return err
 	}
 	//nolint:gosec // len bounded by IngestLedgerToBatch's overflow guard
-	h.offsets.Append(uint32(len(termKeys)))
+	h.offsets.Append(uint32(len(terms.ends)))
 	return nil
 }
 
@@ -519,12 +545,12 @@ func replayUnsealed(chunkStore *rocksdb.Store, index *hotIndex, from, total uint
 	}
 	// The scan holds the store's lifecycle lock, which a seal takes too, so
 	// the events are indexed after the scan.
-	var termKeys [][]TermKey
+	var terms ledgerTerms
 	for entry, err := range chunkStore.IterateRange(DataCF, encodeDataKey(from), encodeDataKey(total-1)) {
 		if err != nil {
 			return fmt.Errorf("events: warmup scan %s: %w", DataCF, err)
 		}
-		id := from + uint32(len(termKeys)) //nolint:gosec // below total
+		id := from + uint32(len(terms.ends)) //nolint:gosec // below total
 		if len(entry.Key) != dataKeyLen || binary.BigEndian.Uint32(entry.Key) != id {
 			return fmt.Errorf("events: corrupt chunk: %s key %x where event %d belongs", DataCF, entry.Key, id)
 		}
@@ -532,16 +558,15 @@ func replayUnsealed(chunkStore *rocksdb.Store, index *hotIndex, from, total uint
 		if err := p.Unmarshal(entry.Value); err != nil {
 			return fmt.Errorf("events: warmup decode event %d: %w", id, err)
 		}
-		keys, err := TermsForBytes(p.ContractEventBytes)
-		if err != nil {
+		if err := terms.appendEvent(p.ContractEventBytes); err != nil {
 			return fmt.Errorf("events: warmup derive terms for event %d: %w", id, err)
 		}
-		termKeys = append(termKeys, keys)
 	}
-	if found := len(termKeys); found != int(total-from) {
+	if found := len(terms.ends); found != int(total-from) {
 		return fmt.Errorf("events: corrupt chunk: %s holds %d of the %d committed events", DataCF, int(from)+found, total)
 	}
-	if err := index.add(from, termKeys); err != nil {
+	terms.route(index.secret)
+	if err := index.add(from, &terms); err != nil {
 		return err
 	}
 	return index.settle()

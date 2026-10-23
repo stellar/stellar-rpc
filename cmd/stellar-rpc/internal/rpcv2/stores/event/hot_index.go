@@ -222,10 +222,38 @@ func (x *hotIndex) sealedBitmap(slab uint32, k TermKey) (*roaring.Bitmap, error)
 	return bm, nil
 }
 
-// add indexes committed events, the first of which has id startID. Only the
-// ingest goroutine calls it. It fails once a seal has failed; the unsealed
-// slabs stay readable from memory, and the next open indexes them again.
-func (x *hotIndex) add(startID uint32, termKeys [][]TermKey) error {
+// ledgerTerms are consecutive events' term keys, event i's at
+// keys[ends[i-1]:ends[i]].
+type ledgerTerms struct {
+	keys []TermKey
+	ends []uint32
+}
+
+func (t *ledgerTerms) reset() { t.keys, t.ends = t.keys[:0], t.ends[:0] }
+
+// appendEvent appends the next event's terms.
+func (t *ledgerTerms) appendEvent(eventBytes []byte) error {
+	keys, err := AppendTermsForBytes(t.keys, eventBytes)
+	if err != nil {
+		return err
+	}
+	t.keys = keys
+	t.ends = append(t.ends, uint32(len(keys))) //nolint:gosec // a ledger's postings fit in uint32
+	return nil
+}
+
+// route replaces every key with the key the index files it under.
+func (t *ledgerTerms) route(secret [stores.SecretLen]byte) {
+	for i := range t.keys {
+		t.keys[i] = routedKey(secret, t.keys[i])
+	}
+}
+
+// add indexes committed events, the first of which has id startID, from
+// their routed terms. Only the ingest goroutine calls it. It fails once a
+// seal has failed; the unsealed slabs stay readable from memory, and the
+// next open indexes them again.
+func (x *hotIndex) add(startID uint32, t *ledgerTerms) error {
 	select {
 	case err := <-x.sealed: // the last seal is over
 		x.sealed <- err
@@ -235,7 +263,8 @@ func (x *hotIndex) add(startID uint32, termKeys [][]TermKey) error {
 	default:
 	}
 	live := x.view.Load().live
-	for i, keys := range termKeys {
+	var start uint32
+	for i, end := range t.ends {
 		id := startID + uint32(i) // bounded by IngestLedgerToBatch's overflow guard
 		if id>>indexSlabShift != live.slab {
 			var err error
@@ -243,9 +272,10 @@ func (x *hotIndex) add(startID uint32, termKeys [][]TermKey) error {
 				return err
 			}
 		}
-		for _, k := range keys {
-			live.add(routedKey(x.secret, k), id)
+		for _, k := range t.keys[start:end] {
+			live.add(k, id)
 		}
+		start = end
 	}
 	return nil
 }

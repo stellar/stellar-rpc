@@ -17,6 +17,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 func randomTermKey(rng *rand.Rand) TermKey {
@@ -118,8 +119,19 @@ func (f *indexFeed) add(t *testing.T, x *hotIndex, events int) {
 			f.want.AddTo(k, f.committed+uint32(i))
 		}
 	}
-	require.NoError(t, x.add(f.committed, termKeys))
+	require.NoError(t, x.add(f.committed, routedTerms(x.secret, termKeys)))
 	f.committed += uint32(events)
+}
+
+// routedTerms is termKeys as consecutive events' routed terms.
+func routedTerms(secret [stores.SecretLen]byte, termKeys [][]TermKey) *ledgerTerms {
+	var t ledgerTerms
+	for _, keys := range termKeys {
+		t.keys = append(t.keys, keys...)
+		t.ends = append(t.ends, uint32(len(t.keys)))
+	}
+	t.route(secret)
+	return &t
 }
 
 func openIndexForTest(t *testing.T) (*hotIndex, *rocksdb.Store) {
