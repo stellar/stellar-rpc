@@ -62,6 +62,7 @@ Every TOML leaf is also settable from the command line:
 | `max_concurrent_requests` | uint | `5000` | HTTP-layer gate: bounds total in-flight requests across ALL methods, in addition to per-method limits. |
 | `max_request_execution_duration` | duration | `"25s"` | HTTP-layer global timeout. |
 | `request_execution_warning_threshold` | duration | `"5s"` | Slower requests log a warning. |
+| `max_request_batch_size` | uint | `10` | Most calls in one JSON-RPC batch; a larger batch gets one error and none of its calls run. |
 
 **[service.fee_stats]** — sizes (in ledgers, 1..1000) of the in-memory fee windows behind getFeeStats; they are fed by live ingestion (#881), and size ingestion-time memory rather than request handling, hence not method config:
 

@@ -236,6 +236,9 @@ func validateService(svc config.ServiceConfig) error {
 	if *svc.MaxConcurrentRequests < 1 {
 		return errors.New("[service].max_concurrent_requests must be >= 1")
 	}
+	if *svc.MaxRequestBatchSize < 1 {
+		return errors.New("[service].max_request_batch_size must be >= 1")
+	}
 	durations := []struct {
 		name string
 		d    time.Duration

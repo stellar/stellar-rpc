@@ -74,6 +74,7 @@ admin_endpoint = ""
 max_concurrent_requests = 5000              # in-flight requests, all methods
 max_request_execution_duration = "25s"      # longer requests fail with HTTP 504
 request_execution_warning_threshold = "5s"  # longer requests log a warning
+max_request_batch_size = 10                 # calls in one JSON-RPC batch
 
 # Sizes, in ledgers, of the two getFeeStats windows. Each must be 1 to 1000.
 [service.fee_stats]

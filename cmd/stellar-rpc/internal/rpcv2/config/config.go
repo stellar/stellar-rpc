@@ -62,13 +62,16 @@ type ServiceConfig struct {
 	// disables the admin server; it should never be reachable from the internet.
 	AdminEndpoint string `toml:"admin_endpoint"`
 
-	// The three keys below are the HTTP-layer gate wrapped around the WHOLE mux,
+	// The four keys below are the HTTP-layer gate wrapped around the WHOLE mux,
 	// exactly as in v1 (internal/jsonrpc): they always act, on every request, in
 	// ADDITION to the per-method limits — max_concurrent_requests bounds the SUM
 	// of in-flight requests across all methods, which no per-method limit can.
 	MaxConcurrentRequests            *uint          `toml:"max_concurrent_requests"`
 	MaxRequestExecutionDuration      *time.Duration `toml:"max_request_execution_duration"`
 	RequestExecutionWarningThreshold *time.Duration `toml:"request_execution_warning_threshold"`
+	// MaxRequestBatchSize is the most calls a JSON-RPC batch may hold. A larger
+	// batch is answered with one error, and none of its calls run.
+	MaxRequestBatchSize *uint `toml:"max_request_batch_size"`
 
 	FeeStats  FeeStatsConfig  `toml:"fee_stats"`
 	Preflight PreflightConfig `toml:"preflight"`
@@ -427,6 +430,7 @@ const (
 	DefaultMaxConcurrentRequests            uint          = 5000
 	DefaultMaxRequestExecutionDuration      time.Duration = 25 * time.Second
 	DefaultRequestExecutionWarningThreshold time.Duration = 5 * time.Second
+	DefaultMaxRequestBatchSize              uint          = 10
 
 	// DefaultMethodQueueLimit and the three below it are the compiled
 	// per-method defaults — the last tier of the methods cascade.
@@ -599,6 +603,7 @@ func (cfg Config) WithDefaults() Config {
 	fillUint(&svc.MaxConcurrentRequests, DefaultMaxConcurrentRequests)
 	fillDuration(&svc.MaxRequestExecutionDuration, DefaultMaxRequestExecutionDuration)
 	fillDuration(&svc.RequestExecutionWarningThreshold, DefaultRequestExecutionWarningThreshold)
+	fillUint(&svc.MaxRequestBatchSize, DefaultMaxRequestBatchSize)
 	fillUint32(&svc.FeeStats.ClassicFeeWindowLedgers, DefaultClassicFeeWindowLedgers)
 	fillUint32(&svc.FeeStats.SorobanInclusionFeeWindowLedgers, DefaultSorobanInclusionFeeWindowLedgers)
 	fillUint(&svc.Preflight.WorkerCount, NumCPU())

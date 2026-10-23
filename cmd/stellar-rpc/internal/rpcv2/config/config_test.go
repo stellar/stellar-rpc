@@ -23,6 +23,7 @@ admin_endpoint = "localhost:9001"
 max_concurrent_requests = 7000
 max_request_execution_duration = "30s"
 request_execution_warning_threshold = "3s"
+max_request_batch_size = 4
 
 [service.fee_stats]
 classic_fee_window_ledgers = 20
@@ -99,6 +100,7 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	assert.Equal(t, uint(7000), *cfg.Service.MaxConcurrentRequests)
 	assert.Equal(t, 30*time.Second, *cfg.Service.MaxRequestExecutionDuration)
 	assert.Equal(t, 3*time.Second, *cfg.Service.RequestExecutionWarningThreshold)
+	assert.Equal(t, uint(4), *cfg.Service.MaxRequestBatchSize)
 	assert.Equal(t, uint32(20), *cfg.Service.FeeStats.ClassicFeeWindowLedgers)
 	assert.Equal(t, uint32(60), *cfg.Service.FeeStats.SorobanInclusionFeeWindowLedgers)
 
@@ -208,6 +210,7 @@ func TestParseConfig_ServiceDefaults(t *testing.T) {
 	assert.Equal(t, DefaultMaxConcurrentRequests, *cfg.Service.MaxConcurrentRequests)
 	assert.Equal(t, DefaultMaxRequestExecutionDuration, *cfg.Service.MaxRequestExecutionDuration)
 	assert.Equal(t, DefaultRequestExecutionWarningThreshold, *cfg.Service.RequestExecutionWarningThreshold)
+	assert.Equal(t, DefaultMaxRequestBatchSize, *cfg.Service.MaxRequestBatchSize)
 	assert.Equal(t, DefaultClassicFeeWindowLedgers, *cfg.Service.FeeStats.ClassicFeeWindowLedgers)
 	assert.Equal(t, DefaultSorobanInclusionFeeWindowLedgers, *cfg.Service.FeeStats.SorobanInclusionFeeWindowLedgers)
 

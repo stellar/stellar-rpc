@@ -153,6 +153,11 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"max_concurrent_requests",
 		},
 		{
+			"zero max_request_batch_size",
+			func(c *config.Config) { c.Service.MaxRequestBatchSize = uintPtr(0) },
+			"max_request_batch_size",
+		},
+		{
 			"zero per-method queue_limit",
 			func(c *config.Config) { c.Service.Methods.GetLedgers.QueueLimit = uintPtr(0) },
 			"[service.methods.getLedgers].queue_limit",

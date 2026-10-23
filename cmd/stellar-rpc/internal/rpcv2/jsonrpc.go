@@ -72,6 +72,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		GlobalQueueLimit:      deref(cfg.Service.MaxConcurrentRequests),
 		GlobalDurationWarning: deref(cfg.Service.RequestExecutionWarningThreshold),
 		GlobalDurationLimit:   deref(cfg.Service.MaxRequestExecutionDuration),
+		MaxRequestBatchSize:   deref(cfg.Service.MaxRequestBatchSize),
 	})
 }
 
