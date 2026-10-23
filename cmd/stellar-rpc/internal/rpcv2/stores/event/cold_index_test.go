@@ -561,6 +561,57 @@ func TestColdIndexBuilder_RemovesRuns(t *testing.T) {
 	})
 }
 
+// A term's run bitmaps become its index.pack entries: a term in several
+// slabs is united, and a split term keeps each slab's bitmap, uniting a slab
+// spilled in several runs.
+func TestTermEncoder_WholeAndSplitTerms(t *testing.T) {
+	serialize := func(ids []uint32) []byte {
+		bm := roaring.BitmapOf(ids...)
+		bm.RunOptimize()
+		raw, err := bm.ToBytes()
+		require.NoError(t, err)
+		return raw
+	}
+	var enc termEncoder
+
+	got, err := enc.encode([]runPart{
+		{slab: 0, bitmap: serialize([]uint32{1, 5})},
+		{slab: 3, bitmap: serialize([]uint32{3<<16 + 7})},
+	}, 10)
+	require.NoError(t, err)
+	require.Equal(t, append([]byte{termWhole}, serialize([]uint32{1, 5, 3<<16 + 7})...), got)
+
+	// Every other id of nine of ten slabs is past indexSplitBytes. Slab 0
+	// spilled in two runs, and slab 2 holds none of the term.
+	slab0 := everyOther(0, 1)
+	parts := []runPart{
+		{slab: 0, bitmap: serialize(slab0[:len(slab0)/2])},
+		{slab: 0, bitmap: serialize(slab0[len(slab0)/2:])},
+	}
+	want := [][]byte{serialize(slab0)}
+	for x := range uint32(10) {
+		switch x {
+		case 0:
+		case 2:
+			want = append(want, nil)
+		default:
+			parts = append(parts, runPart{slab: x, bitmap: serialize(everyOther(x, x+1))})
+			want = append(want, parts[len(parts)-1].bitmap)
+		}
+	}
+	got, err = enc.encode(parts, 10)
+	require.NoError(t, err)
+	require.Equal(t, termSplit, got[0])
+	body := got[1:]
+	for x, w := range want {
+		entry, rest, ok := cutPrefixed(body)
+		require.True(t, ok, "slab %d", x)
+		require.True(t, bytes.Equal(w, entry), "slab %d", x)
+		body = rest
+	}
+	require.Empty(t, body)
+}
+
 // Slots must be dense: an entry past a gap, or one repeating a written
 // slot, is still pending when the pack is finished.
 func TestIndexPackWriter_RejectsSlotGapsAndRepeats(t *testing.T) {
@@ -568,8 +619,10 @@ func TestIndexPackWriter_RejectsSlotGapsAndRepeats(t *testing.T) {
 		pw, err := packfile.Create(filepath.Join(t.TempDir(), "index.pack"), indexPackWriterOptions())
 		require.NoError(t, err)
 		w := newIndexPackWriter(pw, 0)
+		bitmap, err := roaring.BitmapOf(1).ToBytes()
+		require.NoError(t, err)
 		for _, slot := range slots {
-			require.NoError(t, w.add(indexEntry{slot: slot, bitmap: roaring.BitmapOf(1)}))
+			require.NoError(t, w.add(indexEntry{slot: slot}, append([]byte{termWhole}, bitmap...)))
 		}
 		require.ErrorContains(t, w.finish(), "non-dense MPHF slots")
 		require.NoError(t, pw.Close())

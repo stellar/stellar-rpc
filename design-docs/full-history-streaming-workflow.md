@@ -186,7 +186,7 @@ Chunk-level files group into buckets of 1,000 chunks (`bucket_id = chunk_id / 10
 ├── events/
 │   ├── data/{bucket:05d}/{chunk:08d}-events.pack
 │   └── index/{bucket:05d}/{chunk:08d}-index.pack   (+ -index.hash)
-│       (+ {chunk:08d}-index.runs/ while the events key is "freezing": the index build's spilled slabs, removed before the key flips)
+│       (+ {chunk:08d}-index.runs/ while the events key is "freezing": the index build's spilled slabs and their merge, removed before the key flips)
 └── txhash/
     ├── raw/{bucket:05d}/{chunk:08d}.bin           ← transient until window finalization (or retention pruning)
     └── index/{window:08d}/{lo:08d}-{hi:08d}.idx   ← one frozen file per window, coverage-named
@@ -510,7 +510,7 @@ Startup runs in two steps, both in `startStreaming` below:
 1. **Backfill** brings on-disk coverage in line with the retention window, up through the last *complete* chunk at the tip. The partial chunk still forming at the tip is left to hot-DB ingestion: on a restart its ledgers so far are already in the live hot DB, on a first start ingestion fetches them from the resume ledger forward, and either way ingestion completes the chunk as new ledgers arrive. Backfill re-runs if the tip advances mid-pass, and when it returns, the whole in-retention history up to that point is on disk as frozen files — ready to serve.
 2. **Serve + ingest** opens the resume chunk's hot DB, starts captive core, serving, the lifecycle goroutine, and the hot-DB ingestion loop. The lifecycle is seeded with the last complete chunk — when one exists; a young network's first run waits for the first boundary — so its first run fires at once and finishes any crash/downtime leftovers concurrently with serving. Reads never wait for it, because a reader only ever resolves a `"ready"` hot DB or a `"frozen"` cold file — never a transient key.
 
-Operational note — **peak disk after long downtime**: pruning runs only in the first run's prune stage, *after* backfill has materialized every newly-in-retention chunk, so a downtime approaching or exceeding the retention window transiently holds up to ~2× the retention footprint (the stale window plus its replacement). A deep backfill also holds the transient `.bin` inputs for every window it is building at once, not just one (the transactions design, §7.4), and, on the events index root, the spilled index runs of every events build in flight (about one index.pack's worth per chunk, `workers` chunks at once). Size volumes accordingly; a disk-full during backfill fails the run before the relieving prune can fire, on every pass.
+Operational note — **peak disk after long downtime**: pruning runs only in the first run's prune stage, *after* backfill has materialized every newly-in-retention chunk, so a downtime approaching or exceeding the retention window transiently holds up to ~2× the retention footprint (the stale window plus its replacement). A deep backfill also holds the transient `.bin` inputs for every window it is building at once, not just one (the transactions design, §7.4), and, on the events index root, the spilled index runs of every events build in flight (about two index.packs' worth per chunk, the runs and their merge, `workers` chunks at once). Size volumes accordingly; a disk-full during backfill fails the run before the relieving prune can fire, on every pass.
 
 The retention floor and resume point are computed by:
 

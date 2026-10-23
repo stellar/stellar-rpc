@@ -193,8 +193,8 @@ almost all of the bytes, while `index.pack` is probed at random — so a
 deployment can put the index on storage with the IOPS to serve those
 probes without moving the pack's terabytes with it. The index root also
 takes the build's scratch: the runs an index build spills
-(`{chunk}-index.runs/`) are written there and read back three times at
-finalize. The two roots default to siblings:
+(`{chunk}-index.runs/`) are written there and merged once at finalize.
+The two roots default to siblings:
 
 ```
 events/
@@ -400,7 +400,7 @@ For each segment (10,000 ledgers):
 
 2. At segment completion (10,000 ledgers):
    a. Finalize events.pack (flush remaining data, embed offset index and ledger offset array).
-   b. Merge the runs three times: count the distinct terms, build the MPHF over the terms in key order (index.hash), then write each term's bitmap at its slot into index.pack, a term over 64 KiB as one entry per slab; then remove the runs directory.
+   b. Merge the runs once, into a terms file beside them holding each term's index.pack entries; the merge counts the distinct terms. Build the MPHF over the file's terms in key order (index.hash), then write each term's entries at its slot into index.pack, a term over 64 KiB as one entry per slab; then remove the runs directory.
    c. Mark segment as available in DB.
 ```
 
