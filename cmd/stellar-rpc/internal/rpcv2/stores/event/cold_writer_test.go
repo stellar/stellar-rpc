@@ -100,7 +100,7 @@ func TestWriter_AppendThenFinishProducesReadablePackfile(t *testing.T) {
 	// AppData round-trips the LedgerOffsets.
 	appData, err := reader.AppData()
 	require.NoError(t, err)
-	decoded, err := DecodeLedgerOffsets(appData)
+	decoded, err := decodeLedgerOffsets(appData)
 	require.NoError(t, err)
 	assert.Equal(t, offsets.TotalEvents(), decoded.TotalEvents())
 	assert.Equal(t, offsets.LedgerCount(), decoded.LedgerCount())
@@ -136,7 +136,7 @@ func TestWriter_EmptyChunkStillFinalizes(t *testing.T) {
 
 	appData, err := reader.AppData()
 	require.NoError(t, err)
-	decoded, err := DecodeLedgerOffsets(appData)
+	decoded, err := decodeLedgerOffsets(appData)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(0), decoded.TotalEvents())
 }
