@@ -11,9 +11,9 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
@@ -25,8 +25,8 @@ const getLedgerEntriesMaxKeys = 200
 // NewGetLedgerEntriesHandler returns a JSON RPC handler which retrieves ledger entries from Stellar Core.
 func NewGetLedgerEntriesHandler(
 	logger *log.Entry,
-	coreClient interfaces.FastCoreClient,
-	latestLedgerReader db.LedgerReader,
+	coreClient host.FastCoreClient,
+	latestLedgerReader store.LedgerReader,
 	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {
 	getter := ledgerentries.NewLedgerEntryGetter(coreClient, latestLedgerReader)

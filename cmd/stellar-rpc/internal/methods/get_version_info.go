@@ -2,36 +2,39 @@ package methods
 
 import (
 	"context"
+	"errors"
 
 	"github.com/creachadair/jrpc2"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/config"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/version"
 )
 
 func NewGetVersionInfoHandler(
 	logger *log.Entry,
-	ledgerReader db.LedgerReader,
-	daemon interfaces.Daemon,
+	ledgerReader store.LedgerReader,
+	daemon host.Daemon,
 ) jrpc2.Handler {
-	core := daemon.GetCore()
-
+	versions := newProtocolVersionCache(ledgerReader)
 	coreHandler := func(ctx context.Context, _ protocol.GetVersionInfoRequest,
 	) (protocol.GetVersionInfoResponse, error) {
-		captiveCoreVersion := core.GetCoreVersion()
-		protocolVersion, err := getProtocolVersion(ctx, ledgerReader)
-		if err != nil {
+		// Per request, not captured at construction: the daemon only learns the
+		// version once it starts core, which is after handlers are built.
+		captiveCoreVersion := daemon.CoreVersion()
+		protocolVersion, err := versions.get(ctx)
+		// a canceled request is not a fault
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			logger.WithError(err).Error("failed to fetch protocol version")
 		}
 
 		return protocol.GetVersionInfoResponse{
-			Version:            config.Version,
-			CommitHash:         config.CommitHash,
-			BuildTimestamp:     config.BuildTimestamp,
+			Version:            version.Version,
+			CommitHash:         version.CommitHash,
+			BuildTimestamp:     version.BuildTimestamp,
 			CaptiveCoreVersion: captiveCoreVersion,
 			ProtocolVersion:    protocolVersion,
 		}, nil

@@ -1,0 +1,651 @@
+package packfile
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"iter"
+	"os"
+	"sync"
+	"sync/atomic"
+
+	"golang.org/x/sync/errgroup"
+)
+
+const (
+	maxRunBytes      = 256 << 10 // largest merged read: one EBS I/O
+	defaultFirstRead = 256 << 10
+	pageSize         = 4 << 10 // the page cache reads files in whole pages
+)
+
+// Reader-side errors that come from trailer parsing on Open. All three
+// wrap ErrCorrupt, so callers can match them generically with
+// errors.Is(err, ErrCorrupt) — or specifically with errors.Is(err, ErrMagic)
+// etc.
+var (
+	ErrMagic   = fmt.Errorf("%w: invalid magic number", ErrCorrupt)
+	ErrVersion = fmt.Errorf("%w: unsupported version", ErrCorrupt)
+	ErrSize    = fmt.Errorf("%w: file size inconsistent with trailer", ErrCorrupt)
+
+	// ErrPositionOutOfRange is returned by ReadItem, ReadRange (yielded
+	// once via the iterator), and ReadItems when a requested position is
+	// outside [0, TotalItems).
+	ErrPositionOutOfRange = errors.New("packfile: position out of range")
+
+	// ErrPositionsUnsorted is returned by ReadItems when positions are not
+	// strictly ascending (duplicates or out-of-order entries).
+	ErrPositionsUnsorted = errors.New("packfile: positions not strictly sorted")
+)
+
+// knownFlags is the bitmask of trailer flags this version of the reader
+// understands. Files with unknown bits set are rejected as corrupt.
+const knownFlags = flagRecordChecksum
+
+// readAtCloser is the minimal interface needed by Reader to access packfile
+// data. *os.File satisfies it.
+type readAtCloser interface {
+	io.ReaderAt
+	io.Closer
+}
+
+// ReaderOptions configures Reader behavior.
+type ReaderOptions struct {
+	// RecordDecoder, if non-nil, decodes record payloads. The library calls
+	// Decode on it; it must be safe for concurrent use because workers in
+	// ReadItems and across multiple Read* calls share this single instance.
+	// A nil value means passthrough — records are read verbatim, symmetric
+	// to the writer's nil NewRecordEncoder.
+	//
+	// Typical usage: instantiate once at app startup (e.g.
+	// zstd.NewDecompressor) and share across all Readers. The caller owns
+	// the decoder's lifecycle; the library never calls anything beyond
+	// Decode on it.
+	RecordDecoder RecordDecoder
+
+	// Concurrency is the most reads ReadItems keeps in flight; it does not
+	// change which reads it makes. Zero means 1, on the calling goroutine. A
+	// negative value is an error, returned by the first read call.
+	Concurrency int
+
+	// FirstRead sizes Open's first read from the end of the file, given the
+	// file size; nil means 256 KiB. Results are clamped to [trailer size,
+	// file size] and shortened to start on a page boundary; a tail that does
+	// not fit takes one more read for the rest.
+	FirstRead func(fileSize int64) int
+}
+
+// openResult is the transient result produced by doOpen and consumed once
+// in waitOpen — Reader unpacks the fields it needs and discards the rest.
+type openResult struct {
+	file    readAtCloser
+	trailer Trailer
+	offsets []int64
+	appData []byte
+
+	// Decoded from trailer for internal use (int casts of uint32 trailer fields).
+	totalItems     int
+	itemsPerRecord int
+
+	err error
+}
+
+// readRun is one ReadAt in ReadItems and the positions it serves.
+type readRun struct {
+	idxStart    int // index range in the caller's positions slice
+	idxEnd      int
+	firstRecord int // inclusive record range
+	lastRecord  int
+}
+
+// recordWorkspacePool holds *record workspaces (slice headers, no decoder,
+// no external resources). Items are stateless data — GC reclaims them
+// naturally when sync.Pool drains. Process-wide so workspace allocation
+// amortizes across every Reader in the process.
+//
+//nolint:gochecknoglobals // process-wide pool for record workspaces
+var recordWorkspacePool = sync.Pool{
+	New: func() any { return &record{} },
+}
+
+// Reader provides random access to items in a packfile.
+//
+// Read methods (ReadItem, ReadRange, ReadItems, the metadata
+// accessors) are safe for concurrent use by multiple goroutines. Close is
+// NOT safe to call concurrently with any in-flight read: callers must
+// ensure every read has returned before invoking Close, otherwise an
+// in-flight ReadAt will see "file already closed" wrapped as a read error.
+//
+// Open returns immediately; all file I/O runs in a background goroutine.
+// Public methods block (via waitOpen) until the goroutine completes.
+// Close must always be called to release the underlying file handle.
+// The RecordDecoder is caller-owned and outlives the Reader; Close does
+// not touch it.
+type Reader struct {
+	// Hot fields (touched by every read call) first so they share a cache line.
+	file           readAtCloser
+	offsets        []int64
+	totalItems     int
+	itemsPerRecord int
+	concurrency    int
+	recordDecoder  RecordDecoder
+	// recordChecksum mirrors trailer.HasRecordChecksum, hoisted out of the
+	// cold trailer struct because record.decode reads it per record.
+	recordChecksum bool
+
+	// Cold-ish state: populated by waitOpen, read on metadata accessors
+	// but not the per-record hot path.
+	trailer Trailer
+	appData []byte
+
+	waitOpen func() error // blocks until background open completes
+
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// Open returns a Reader immediately. File I/O runs in a background goroutine;
+// the first read call blocks until the file is ready. Open itself does not
+// return an error — option-validation and I/O failures are deferred to the
+// first method call that needs the result.
+// Close must always be called.
+func Open(path string, opts ReaderOptions) *Reader {
+	r := &Reader{
+		recordDecoder: opts.RecordDecoder,
+	}
+
+	// Reject invalid options synchronously and stash the error so every
+	// subsequent read returns it. Done before kicking off the background
+	// open so we don't burn an open file descriptor on a doomed Reader.
+	if opts.Concurrency < 0 {
+		err := fmt.Errorf("packfile: Concurrency must be non-negative, got %d", opts.Concurrency)
+		r.waitOpen = sync.OnceValue(func() error { return err })
+		return r
+	}
+	r.concurrency = max(opts.Concurrency, 1)
+
+	r.waitOpen = sync.OnceValue(func() error {
+		res := doOpen(path, opts.FirstRead)
+		if res.err != nil {
+			return res.err
+		}
+		r.file = res.file
+		r.trailer = res.trailer
+		r.offsets = res.offsets
+		r.appData = res.appData
+		r.totalItems = res.totalItems
+		r.itemsPerRecord = res.itemsPerRecord
+		r.recordChecksum = res.trailer.HasRecordChecksum
+		return nil
+	})
+	// Drive the open from a background goroutine; later waitOpen() calls
+	// (one at the head of each public method) get the cached result.
+	go func() { _ = r.waitOpen() }()
+	return r
+}
+
+// doOpen performs all synchronous I/O for opening a packfile.
+// On error it closes the file and returns openResult{err: ...}.
+func doOpen(path string, firstRead func(int64) int) openResult {
+	f, err := os.Open(path)
+	if err != nil {
+		return openResult{err: fmt.Errorf("packfile: open %q: %w", path, err)}
+	}
+	adviseRandom(f)
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return openResult{err: fmt.Errorf("packfile: stat: %w", err)}
+	}
+	res := openFile(f, fi.Size(), firstRead)
+	if res.err != nil {
+		_ = f.Close()
+	}
+	return res
+}
+
+//nolint:cyclop // step-by-step open flow; splitting hurts readability
+func openFile(f readAtCloser, fileSize int64, firstRead func(int64) int) openResult {
+	if fileSize < trailerSize {
+		return openResult{err: ErrSize}
+	}
+
+	first := int64(defaultFirstRead)
+	if firstRead != nil {
+		first = int64(firstRead(fileSize))
+	}
+	first = min(max(first, trailerSize), fileSize)
+	// Start on a page boundary: a read ending mid-page that also starts mid-page
+	// touches one more page, which at 256 KiB is a second I/O.
+	if start := (fileSize - first + pageSize - 1) &^ (pageSize - 1); fileSize-start >= trailerSize {
+		first = fileSize - start
+	}
+	tail := make([]byte, first)
+	if _, err := readAt(f, tail, fileSize-first); err != nil {
+		return openResult{err: fmt.Errorf("packfile: read trailer region: %w", err)}
+	}
+
+	trailer, err := unmarshalTrailer(tail)
+	if err != nil {
+		return openResult{err: err}
+	}
+	recordCount := int(trailer.RecordCount)
+	totalItems := int(trailer.TotalItems)
+	itemsPerRecord := int(trailer.ItemsPerRecord)
+	indexSize := int(trailer.IndexSize)
+	appDataSize := int(trailer.AppDataSize)
+
+	tailSize := int64(indexSize) + int64(appDataSize) + int64(trailerSize)
+	indexBase := fileSize - tailSize
+	if indexBase < 0 {
+		return openResult{err: ErrSize}
+	}
+	if tailSize <= first {
+		tail = tail[first-tailSize:]
+	} else {
+		full := make([]byte, tailSize)
+		copy(full[tailSize-first:], tail)
+		if _, err := readAt(f, full[:tailSize-first], indexBase); err != nil {
+			return openResult{err: fmt.Errorf("packfile: read index region: %w", err)}
+		}
+		tail = full
+	}
+	indexBuf := tail[:indexSize]
+	var appData []byte
+	if appDataSize > 0 {
+		appData = bytes.Clone(tail[indexSize : indexSize+appDataSize])
+	}
+
+	// App data is CRC-covered like the index and the trailer. It has to be:
+	// the section is opaque to this library, so nothing here can check it
+	// structurally, and a consumer's own decoder cannot tell plausible
+	// corruption from real data.
+	if computed := crc32c(appData); computed != trailer.AppDataCRC {
+		return openResult{err: fmt.Errorf("%w: app data CRC32C (stored %08x, computed %08x)",
+			ErrChecksum, trailer.AppDataCRC, computed)}
+	}
+
+	offsets, err := decodeIndex(indexBuf, recordCount, indexSize, indexBase)
+	if err != nil {
+		return openResult{err: err}
+	}
+
+	// Not gated on recordCount: a trailer claiming items but no itemsPerRecord
+	// would otherwise pass Open and index past the offsets slice on first read.
+	if itemsPerRecord <= 0 && (recordCount > 0 || totalItems > 0) {
+		return openResult{err: fmt.Errorf("%w: invalid itemsPerRecord %d in trailer",
+			ErrCorrupt, itemsPerRecord)}
+	}
+
+	// Cross-validate: number of records implied by totalItems must match recordCount.
+	if itemsPerRecord > 0 {
+		expectedRecords := (totalItems + itemsPerRecord - 1) / itemsPerRecord
+		if totalItems == 0 {
+			expectedRecords = 0
+		}
+		if expectedRecords != recordCount {
+			return openResult{err: fmt.Errorf(
+				"%w: trailer says %d items / %d itemsPerRecord = %d records, but packfile has %d records",
+				ErrCorrupt, totalItems, itemsPerRecord, expectedRecords, recordCount)}
+		}
+	}
+
+	// Empty packfiles may legitimately have itemsPerRecord==0 on disk;
+	// default the *internal* int to 1 so modulo math is well-defined. The
+	// Trailer view keeps the on-disk value verbatim.
+	internalItemsPerRecord := itemsPerRecord
+	if internalItemsPerRecord == 0 {
+		internalItemsPerRecord = 1
+	}
+
+	return openResult{
+		file:           f,
+		trailer:        trailer,
+		offsets:        offsets,
+		appData:        appData,
+		totalItems:     totalItems,
+		itemsPerRecord: internalItemsPerRecord,
+	}
+}
+
+// getRecord borrows a workspace from the process-wide pool and binds this
+// Reader to it. Callers MUST `defer r.putRecord(rec)` — a missed Put
+// pins the Reader via rec.reader until the workspace is GC'd.
+//
+//nolint:funcorder // pool plumbing kept near callers; matches writer.go style
+func (r *Reader) getRecord() *record {
+	rec, _ := recordWorkspacePool.Get().(*record)
+	rec.reader = r
+	return rec
+}
+
+// putRecord returns a workspace to the pool. Owned slices (scratch,
+// payload, sizes, offsets) reset to length zero with their capacities
+// preserved for steady-state zero-alloc reuse.
+//
+//nolint:funcorder // paired with getRecord
+func (r *Reader) putRecord(rec *record) {
+	rec.reader = nil
+	rec.scratch = rec.scratch[:0]
+	rec.payload = rec.payload[:0]
+	rec.current = nil
+	rec.sizes = rec.sizes[:0]
+	rec.offsets = rec.offsets[:0]
+	recordWorkspacePool.Put(rec)
+}
+
+// TotalItems returns the total number of logical items in the packfile.
+func (r *Reader) TotalItems() (int, error) {
+	if err := r.waitOpen(); err != nil {
+		return 0, err
+	}
+	return r.totalItems, nil
+}
+
+// Trailer returns the parsed trailer.
+func (r *Reader) Trailer() (Trailer, error) {
+	if err := r.waitOpen(); err != nil {
+		return Trailer{}, err
+	}
+	return r.trailer, nil
+}
+
+// AppData returns the app data section, or nil if appDataSize == 0.
+func (r *Reader) AppData() ([]byte, error) {
+	if err := r.waitOpen(); err != nil {
+		return nil, err
+	}
+	return r.appData, nil
+}
+
+// ReadItem reads a single item by position and passes it to fn.
+// The []byte passed to fn is borrowed and must not be retained after fn
+// returns — copy if needed. Returns ErrPositionOutOfRange if position is
+// out of [0, TotalItems).
+//
+// Loans are capacity-clipped, so a borrower may read and append freely; it may
+// not retain. Lifetimes differ: ReadItem's until fn returns, ReadItems' until
+// that item's callback returns (records are reused between callbacks), and
+// ReadRange's until the loop body ends, break included.
+func (r *Reader) ReadItem(position int, fn func([]byte) error) error {
+	if err := r.waitOpen(); err != nil {
+		return err
+	}
+	if position < 0 || position >= r.totalItems {
+		return ErrPositionOutOfRange
+	}
+
+	// One IDIV instead of div+mod separately.
+	recordIdx := position / r.itemsPerRecord
+	localIdx := position - recordIdx*r.itemsPerRecord
+
+	rec := r.getRecord()
+	defer r.putRecord(rec)
+
+	buf, err := r.readRecords(rec, recordIdx, recordIdx)
+	if err != nil {
+		return err
+	}
+	if err := rec.decode(buf, recordIdx); err != nil {
+		return err
+	}
+	return fn(rec.item(localIdx))
+}
+
+// ReadRange returns an iterator over count contiguous items starting at start.
+// Adjacent records merge into reads that touch at most 256 KiB of pages,
+// made one at a time, and nothing past the range is fetched.
+// Each yielded []byte is valid only until the loop body ends, break included — copy if you
+// need to retain it. Safe to break early.
+//
+// Concurrent ReadRange calls on the same Reader are safe; the returned
+// iterator itself is NOT safe for concurrent iteration (it closure-captures
+// a pooled record). Iterate from one goroutine.
+//
+// Use ReadRange for in-order streaming reads (iter.Seq2 with break-early
+// semantics, no concurrency overhead). Use ReadItems for sorted-or-scattered
+// positions with optional worker fan-out; ReadItems may yield out of order
+// under concurrency, while ReadRange always yields strictly in order.
+//
+// Yields ErrPositionOutOfRange (one-shot) if start or count is negative or
+// the range falls outside [0, TotalItems).
+//
+//nolint:gocognit // single merged-read loop; splitting hurts readability
+func (r *Reader) ReadRange(start, count int) iter.Seq2[[]byte, error] {
+	return func(yield func([]byte, error) bool) {
+		if err := r.waitOpen(); err != nil {
+			yield(nil, err)
+			return
+		}
+		if start < 0 || count < 0 || start > r.totalItems || count > r.totalItems-start {
+			yield(nil, fmt.Errorf("%w: ReadRange(%d, %d) out of [0, %d)",
+				ErrPositionOutOfRange, start, count, r.totalItems))
+			return
+		}
+		if count == 0 {
+			return
+		}
+
+		firstRecord := start / r.itemsPerRecord
+		lastRecord := (start + count - 1) / r.itemsPerRecord
+		end := start + count // one past last item
+
+		rec := r.getRecord()
+		defer r.putRecord(rec)
+
+		for first := firstRecord; first <= lastRecord; {
+			last := r.runEnd(first, lastRecord)
+			buf, err := r.readRecords(rec, first, last)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			// From the second read on, so a consumer that stops in its first read pays no extra I/O.
+			if first > firstRecord && last < lastRecord {
+				next := r.runEnd(last+1, lastRecord)
+				prefetch(r.file, r.offsets[last+1], r.offsets[next+1]-r.offsets[last+1])
+			}
+			for j := first; j <= last; j++ {
+				lo := r.offsets[j] - r.offsets[first]
+				hi := r.offsets[j+1] - r.offsets[first]
+				if err := rec.decode(buf[lo:hi], j); err != nil {
+					yield(nil, err)
+					return
+				}
+				recStart := j * r.itemsPerRecord
+				for i := max(start-recStart, 0); i < min(len(rec.sizes), end-recStart); i++ {
+					if !yield(rec.item(i), nil) {
+						return
+					}
+				}
+			}
+			first = last + 1
+		}
+	}
+}
+
+// ReadItems reads items at scattered positions and calls fn for each item.
+// fn receives the index in the original positions slice and a borrowed data
+// slice valid only for the duration of the call — copy if needed.
+//
+// fn runs on up to min(ReaderOptions.Concurrency, number of reads)
+// goroutines, concurrently and in arbitrary order; with Concurrency 1 or a
+// single read, it runs on the calling goroutine. Positions in one record
+// share one read and decode, and adjacent records merge into reads that touch
+// at most 256 KiB of pages.
+//
+// positions must be sorted ascending with no duplicates. Returns
+// ErrPositionOutOfRange if any position is outside [0, TotalItems) or
+// ErrPositionsUnsorted if positions are not strictly sorted.
+//
+//nolint:gocognit,cyclop // run formation + worker fan-out; splitting hurts readability
+func (r *Reader) ReadItems(ctx context.Context, positions []int, fn func(idx int, data []byte) error) error {
+	if err := r.waitOpen(); err != nil {
+		return err
+	}
+
+	for i, pos := range positions {
+		if pos < 0 || pos >= r.totalItems {
+			return fmt.Errorf("%w: ReadItems position %d out of [0, %d)",
+				ErrPositionOutOfRange, pos, r.totalItems)
+		}
+		if i > 0 && positions[i] <= positions[i-1] {
+			return fmt.Errorf("%w: ReadItems positions at %d: %d <= %d",
+				ErrPositionsUnsorted, i, positions[i], positions[i-1])
+		}
+	}
+
+	if len(positions) == 0 {
+		return nil
+	}
+
+	var runs []readRun
+	for i := 0; i < len(positions); {
+		first := positions[i] / r.itemsPerRecord
+		last := first
+		j := i + 1
+		for ; j < len(positions); j++ {
+			rec := positions[j] / r.itemsPerRecord
+			if rec == last {
+				continue
+			}
+			if rec != last+1 || pageSpan(r.offsets[first], r.offsets[rec+1]) > maxRunBytes {
+				break
+			}
+			last = rec
+		}
+		runs = append(runs, readRun{i, j, first, last})
+		i = j
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	numWorkers := min(len(runs), r.concurrency)
+
+	// Serial fast path: no goroutine spawn, no atomic dispatch, no errgroup.
+	if numWorkers == 1 {
+		rec := r.getRecord()
+		defer r.putRecord(rec)
+		for i := range runs {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := r.processRun(rec, positions, runs[i], fn); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Concurrent fan-out: workers take runs from an atomic counter.
+	var nextRun atomic.Int64
+	g, gctx := errgroup.WithContext(ctx)
+	for range numWorkers {
+		g.Go(func() error {
+			rec := r.getRecord()
+			defer r.putRecord(rec)
+			for {
+				i := int(nextRun.Add(1)) - 1
+				if i >= len(runs) {
+					return nil
+				}
+				if err := gctx.Err(); err != nil {
+					return err
+				}
+				if err := r.processRun(rec, positions, runs[i], fn); err != nil {
+					return err
+				}
+			}
+		})
+	}
+	return g.Wait()
+}
+
+// Close releases the underlying file handle. Safe to call multiple times.
+// Must always be called, even if no query methods were called.
+//
+// Close blocks until the background open finishes (so it can collect the
+// open error to return alongside the file-close error via errors.Join).
+// If the open is in flight when Close is invoked, expect a small delay.
+//
+// The caller-supplied RecordDecoder is not closed by Reader.Close — the
+// decoder is caller-owned (typically a single shared instance across many
+// Readers); its lifecycle is the caller's responsibility.
+func (r *Reader) Close() error {
+	r.closeOnce.Do(func() {
+		openErr := r.waitOpen()
+		var closeErr error
+		if r.file != nil {
+			closeErr = r.file.Close()
+		}
+		r.closeErr = errors.Join(openErr, closeErr)
+	})
+	return r.closeErr
+}
+
+// runEnd returns the last record of the read that starts at record first:
+// adjacent records join it while the pages they touch fit in maxRunBytes.
+func (r *Reader) runEnd(first, lastRecord int) int {
+	last := first
+	for last < lastRecord && pageSpan(r.offsets[first], r.offsets[last+2]) <= maxRunBytes {
+		last++
+	}
+	return last
+}
+
+// pageSpan is the bytes the page cache reads to serve [start, end).
+func pageSpan(start, end int64) int64 {
+	return (end+pageSize-1)&^(pageSize-1) - start&^(pageSize-1)
+}
+
+// readAt reads len(buf) bytes at off. A read spanning more than one I/O hints
+// all of its pieces first, so they are in flight together; without readahead
+// the kernel would fetch them one at a time.
+func readAt(f readAtCloser, buf []byte, off int64) (int, error) {
+	if n := int64(len(buf)); pageSpan(off, off+n) > maxRunBytes {
+		prefetch(f, off, n)
+	}
+	return f.ReadAt(buf, off)
+}
+
+func (r *Reader) readRecords(rec *record, first, last int) ([]byte, error) {
+	start, end := r.offsets[first], r.offsets[last+1]
+	size := int(end - start)
+	if cap(rec.scratch) < size {
+		rec.scratch = make([]byte, size)
+	} else {
+		rec.scratch = rec.scratch[:size]
+	}
+	if _, err := readAt(r.file, rec.scratch, start); err != nil {
+		return nil, fmt.Errorf("packfile: read records [%d, %d]: %w", first, last, err)
+	}
+	return rec.scratch, nil
+}
+
+func (r *Reader) processRun(rec *record, positions []int, run readRun, fn func(int, []byte) error) error {
+	buf, err := r.readRecords(rec, run.firstRecord, run.lastRecord)
+	if err != nil {
+		return err
+	}
+	readStart := r.offsets[run.firstRecord]
+	prevRec := -1
+	for k := run.idxStart; k < run.idxEnd; k++ {
+		recIdx := positions[k] / r.itemsPerRecord
+		localIdx := positions[k] - recIdx*r.itemsPerRecord
+		if recIdx != prevRec {
+			recOff := r.offsets[recIdx] - readStart
+			recEnd := r.offsets[recIdx+1] - readStart
+			if err := rec.decode(buf[recOff:recEnd], recIdx); err != nil {
+				return err
+			}
+			prevRec = recIdx
+		}
+		if err := fn(k, rec.item(localIdx)); err != nil {
+			return err
+		}
+	}
+	return nil
+}

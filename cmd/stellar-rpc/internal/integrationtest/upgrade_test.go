@@ -8,7 +8,6 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/integrationtest/infrastructure"
 )
 
@@ -27,14 +26,13 @@ func TestUpgradeFrom20To21(t *testing.T) {
 	test.UpgradeProtocol(21)
 	// Wait for the ledger to advance, so that the simulation library passes the
 	// right protocol number
-	rpcDB := test.GetDaemon().GetDB()
-	initialLedgerSequence, err := db.NewLedgerReader(rpcDB).GetLatestLedgerSequence(t.Context())
+	initial, err := test.GetRPCLient().GetLatestLedger(t.Context())
 	require.NoError(t, err)
 	require.Eventually(t,
 		func() bool {
-			newLedgerSequence, err := db.NewLedgerReader(rpcDB).GetLatestLedgerSequence(t.Context())
+			latest, err := test.GetRPCLient().GetLatestLedger(t.Context())
 			require.NoError(t, err)
-			return newLedgerSequence > initialLedgerSequence
+			return latest.Sequence > initial.Sequence
 		},
 		time.Minute,
 		time.Second,

@@ -1,12 +1,11 @@
 package network
 
 import (
-	"bytes"
 	"context"
-	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,8 +13,6 @@ import (
 	"github.com/creachadair/jrpc2/handler"
 	"github.com/creachadair/jrpc2/jhttp"
 	"github.com/stretchr/testify/require"
-
-	"github.com/stellar/go-stellar-sdk/support/http/mutil"
 )
 
 type TestServerHandlerWrapper struct {
@@ -46,132 +43,6 @@ func createTestServer(ctx context.Context) (string, *TestServerHandlerWrapper, c
 	}
 }
 
-func TestHTTPRequestDurationLimiter_Limiting(t *testing.T) {
-	ctx := t.Context()
-	addr, redirector, shutdown := createTestServer(ctx)
-	longExecutingHandler := &TestServerHandlerWrapper{
-		f: func(res http.ResponseWriter, req *http.Request) {
-			select {
-			case <-req.Context().Done():
-				return
-			case <-time.After(time.Second * 10):
-			}
-			n, err := res.Write([]byte{1, 2, 3})
-			require.Equal(t, 3, n)
-			require.NoError(t, err)
-		},
-	}
-	warningCounter := TestingCounter{}
-	limitCounter := TestingCounter{}
-	logCounter := makeTestLogCounter()
-	redirector.f = MakeHTTPRequestDurationLimiter(
-		longExecutingHandler,
-		time.Second/20,
-		time.Second/10,
-		&warningCounter,
-		&limitCounter,
-		logCounter.Entry()).ServeHTTP
-
-	client := http.Client{}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/", nil)
-	require.NoError(t, err)
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	bytes, err := io.ReadAll(resp.Body)
-	require.NoError(t, resp.Body.Close())
-	require.NoError(t, err)
-	require.Equal(t, []byte{}, bytes)
-	require.Equal(t, http.StatusGatewayTimeout, resp.StatusCode)
-	require.Zero(t, warningCounter.count)
-	require.Equal(t, int64(1), limitCounter.count)
-	require.Equal(t, [7]int{0, 0, 0, 0, 1, 0, 0}, logCounter.writtenLogEntries)
-	shutdown()
-}
-
-func TestHTTPRequestDurationLimiter_NoLimiting(t *testing.T) {
-	ctx := t.Context()
-	addr, redirector, shutdown := createTestServer(ctx)
-	longExecutingHandler := &TestServerHandlerWrapper{
-		f: func(res http.ResponseWriter, req *http.Request) {
-			select {
-			case <-req.Context().Done():
-				return
-			case <-time.After(time.Second / 10):
-			}
-			n, err := res.Write([]byte{1, 2, 3})
-			require.Equal(t, 3, n)
-			require.NoError(t, err)
-		},
-	}
-	warningCounter := TestingCounter{}
-	limitCounter := TestingCounter{}
-	logCounter := makeTestLogCounter()
-	redirector.f = MakeHTTPRequestDurationLimiter(
-		longExecutingHandler,
-		time.Second*5,
-		time.Second*10,
-		&warningCounter,
-		&limitCounter,
-		logCounter.Entry()).ServeHTTP
-
-	client := http.Client{}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/", nil)
-	require.NoError(t, err)
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	bytes, err := io.ReadAll(resp.Body)
-	require.NoError(t, resp.Body.Close())
-	require.NoError(t, err)
-	require.Equal(t, []byte{1, 2, 3}, bytes)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Zero(t, warningCounter.count)
-	require.Zero(t, limitCounter.count)
-	require.Equal(t, [7]int{0, 0, 0, 0, 0, 0, 0}, logCounter.writtenLogEntries)
-	shutdown()
-}
-
-func TestHTTPRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
-	ctx := t.Context()
-	addr, redirector, shutdown := createTestServer(ctx)
-	longExecutingHandler := &TestServerHandlerWrapper{
-		f: func(res http.ResponseWriter, req *http.Request) {
-			select {
-			case <-req.Context().Done():
-				return
-			case <-time.After(time.Second / 5):
-			}
-			n, err := res.Write([]byte{1, 2, 3})
-			require.Equal(t, 3, n)
-			require.NoError(t, err)
-		},
-	}
-	warningCounter := TestingCounter{}
-	limitCounter := TestingCounter{}
-	logCounter := makeTestLogCounter()
-	redirector.f = MakeHTTPRequestDurationLimiter(
-		longExecutingHandler,
-		time.Second/10,
-		time.Second*10,
-		&warningCounter,
-		&limitCounter,
-		logCounter.Entry()).ServeHTTP
-
-	client := http.Client{}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/", nil)
-	require.NoError(t, err)
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	bytes, err := io.ReadAll(resp.Body)
-	require.NoError(t, resp.Body.Close())
-	require.NoError(t, err)
-	require.Equal(t, []byte{1, 2, 3}, bytes)
-	require.Equal(t, resp.StatusCode, http.StatusOK)
-	require.Equal(t, int64(1), warningCounter.count)
-	require.Zero(t, limitCounter.count)
-	require.Equal(t, [7]int{0, 0, 0, 0, 1, 0, 0}, logCounter.writtenLogEntries)
-	shutdown()
-}
-
 type JRPCHandlerFunc func(ctx context.Context, r *jrpc2.Request) (any, error)
 
 func bindRPCHoist(redirector *TestServerHandlerWrapper) *JRPCHandlerFunc {
@@ -192,9 +63,12 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 	addr, redirector, shutdown := createTestServer(ctx)
 	hoistFunction := bindRPCHoist(redirector)
 
+	var returned atomic.Bool
 	longExecutingHandler := handler.New(func(ctx context.Context, _ *jrpc2.Request) (any, error) {
 		select {
 		case <-ctx.Done():
+			time.Sleep(time.Second / 20) // still unwinding after the limiter has answered
+			returned.Store(true)
 			return nil, ctx.Err()
 		case <-time.After(time.Second * 10):
 		}
@@ -204,8 +78,10 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 	warningCounter := TestingCounter{}
 	limitCounter := TestingCounter{}
 	logCounter := makeTestLogCounter()
+	inflight := new(sync.WaitGroup)
 	*hoistFunction = MakeJrpcRequestDurationLimiter(
 		longExecutingHandler,
+		inflight,
 		time.Second/20,
 		time.Second/10,
 		&warningCounter,
@@ -229,6 +105,8 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 	require.Zero(t, warningCounter.count)
 	require.Equal(t, int64(1), limitCounter.count)
 	require.Equal(t, [7]int{0, 0, 0, 0, 1, 0, 0}, logCounter.writtenLogEntries)
+	inflight.Wait()
+	require.True(t, returned.Load(), "inflight did not wait for the handler")
 	shutdown()
 }
 
@@ -252,6 +130,7 @@ func TestJRPCRequestDurationLimiter_NoLimiting(t *testing.T) {
 	logCounter := makeTestLogCounter()
 	*hoistFunction = MakeJrpcRequestDurationLimiter(
 		longExecutingHandler,
+		new(sync.WaitGroup),
 		time.Second*5,
 		time.Second*10,
 		&warningCounter,
@@ -295,6 +174,7 @@ func TestJRPCRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 	logCounter := makeTestLogCounter()
 	*hoistFunction = MakeJrpcRequestDurationLimiter(
 		longExecutingHandler,
+		new(sync.WaitGroup),
 		time.Second/10,
 		time.Second*10,
 		&warningCounter,
@@ -316,68 +196,4 @@ func TestJRPCRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 	require.Zero(t, limitCounter.count)
 	require.Equal(t, [7]int{0, 0, 0, 0, 1, 0, 0}, logCounter.writtenLogEntries)
 	shutdown()
-}
-
-func TestHTTPRequestDurationLimiter_Panicing(t *testing.T) {
-	ctx := t.Context()
-	addr, redirector, shutdown := createTestServer(ctx)
-	longExecutingHandler := &TestServerHandlerWrapper{
-		f: func(res http.ResponseWriter, req *http.Request) {
-			panic("test panic")
-		},
-	}
-
-	logCounter := makeTestLogCounter()
-	redirector.f = MakeHTTPRequestDurationLimiter(
-		longExecutingHandler,
-		time.Second*10,
-		time.Second*10,
-		nil,
-		nil,
-		logCounter.Entry()).ServeHTTP
-
-	client := http.Client{}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/", nil)
-	require.NoError(t, err)
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	bytes, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
-	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
-	require.Equal(t, []byte{}, bytes)
-	require.Equal(t, [7]int{0, 0, 0, 7, 0, 0, 0}, logCounter.writtenLogEntries)
-	shutdown()
-}
-
-type chunkRecorder struct {
-	*httptest.ResponseRecorder
-
-	deadlines int
-	writes    []int
-}
-
-func (r *chunkRecorder) SetWriteDeadline(time.Time) error {
-	r.deadlines++
-	return nil
-}
-
-func (r *chunkRecorder) Write(b []byte) (int, error) {
-	r.writes = append(r.writes, len(b))
-	return r.ResponseRecorder.Write(b)
-}
-
-func TestWriteOutSetsADeadlinePerChunk(t *testing.T) {
-	body := bytes.Repeat([]byte("x"), 2*responseChunkSize+1)
-	rec := &chunkRecorder{ResponseRecorder: httptest.NewRecorder()}
-	bw := makeBufferedResponseWriter(rec)
-	_, err := bw.Write(body)
-	require.NoError(t, err)
-
-	// The logging middleware wraps the writer, so the deadline has to reach through it.
-	bw.WriteOut(t.Context(), mutil.WrapWriter(rec))
-
-	require.Equal(t, body, rec.Body.Bytes())
-	require.Equal(t, []int{responseChunkSize, responseChunkSize, 1}, rec.writes)
-	require.Equal(t, len(rec.writes), rec.deadlines)
 }

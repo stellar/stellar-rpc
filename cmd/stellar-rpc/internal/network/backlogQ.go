@@ -31,8 +31,9 @@ type backlogQLimiter struct {
 }
 
 type BacklogHTTPQLimiter struct {
-	httpDownstreamHandler http.Handler
 	backlogQLimiter
+
+	httpDownstreamHandler http.Handler
 }
 
 func MakeHTTPBacklogQueueLimiter(
@@ -52,8 +53,9 @@ func MakeHTTPBacklogQueueLimiter(
 }
 
 type BacklogJrpcQLimiter struct {
-	jrpcDownstreamHandler jrpc2.Handler
 	backlogQLimiter
+
+	jrpcDownstreamHandler jrpc2.Handler
 }
 
 func MakeJrpcBacklogQueueLimiter(

@@ -23,7 +23,7 @@ import (
 func buildSetOptionsTxParams(account txnbuild.Account) txnbuild.TransactionParams {
 	return infrastructure.CreateTransactionParams(
 		account,
-		&txnbuild.SetOptions{HomeDomain: txnbuild.NewHomeDomain("soroban.com")},
+		&txnbuild.SetOptions{HomeDomain: new("soroban.com")},
 	)
 }
 
@@ -57,7 +57,7 @@ func sendTransactions(t *testing.T, client *client.Client) []uint32 {
 
 func TestGetTransactions(t *testing.T) {
 	ctx := t.Context()
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 	client := test.GetRPCLient()
 
 	ledgers := sendTransactions(t, client)
