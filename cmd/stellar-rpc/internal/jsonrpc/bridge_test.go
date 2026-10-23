@@ -21,6 +21,7 @@ import (
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/support/http/mutil"
 	"github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
@@ -196,6 +197,49 @@ func TestBridge_ParityWithJHTTP(t *testing.T) {
 			require.Equal(t, want.Body.String(), got.Body.String())
 		})
 	}
+}
+
+// windowRecorder records how many bytes are written under each write deadline.
+type windowRecorder struct {
+	*httptest.ResponseRecorder
+
+	windows []int
+}
+
+func (r *windowRecorder) SetWriteDeadline(time.Time) error {
+	r.windows = append(r.windows, 0)
+	return nil
+}
+
+func (r *windowRecorder) Write(b []byte) (int, error) {
+	if len(r.windows) == 0 {
+		return 0, errors.New("write before any deadline")
+	}
+	r.windows[len(r.windows)-1] += len(b)
+	return r.ResponseRecorder.Write(b)
+}
+
+// The bridge moves the write deadline before each responseChunkSize bytes of
+// a response, however the response is split into parts.
+func TestBridge_WriteSetsADeadlinePerChunk(t *testing.T) {
+	result := json.RawMessage(`"` + strings.Repeat("x", 2*responseChunkSize-1) + `"`)
+	b := newBridge(handler.Map{"big": handler.New(func(context.Context) (any, error) { return result, nil })},
+		testMaxBatchSize, unlimited)
+	t.Cleanup(b.Close)
+	rec := &windowRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+	// The logging middleware wraps the writer, so the deadline has to reach through it.
+	b.ServeHTTP(mutil.WrapWriter(rec), newBridgeRequest(t, `{"jsonrpc":"2.0","id":1,"method":"big"}`))
+
+	require.Equal(t, `{"jsonrpc":"2.0","id":1,"result":`+string(result)+"}", rec.Body.String())
+	require.Equal(t, []int{responseChunkSize, responseChunkSize, rec.Body.Len() - 2*responseChunkSize}, rec.windows)
+}
+
+func newBridgeRequest(t *testing.T, body string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", contentTypeJSON)
+	return req
 }
 
 // A non-empty json.RawMessage result is written as is, with the Content-Length

@@ -31,9 +31,10 @@ func newServeReads(
 	return func(ctx context.Context, reg *query.Registry, listener net.Listener) error {
 		handler := newJSONRPCHandler(cfg, params.withRegistry(reg))
 		server := &http.Server{
-			Handler:     handler,
-			ReadTimeout: jsonrpc.DefaultHTTPReadTimeout,
-			IdleTimeout: jsonrpc.DefaultHTTPIdleTimeout,
+			Handler:      handler,
+			ReadTimeout:  jsonrpc.DefaultHTTPReadTimeout,
+			WriteTimeout: jsonrpc.WriteTimeout(deref(cfg.Service.MaxRequestExecutionDuration)),
+			IdleTimeout:  jsonrpc.DefaultHTTPIdleTimeout,
 		}
 
 		// Both exits close the server: on death this reaps established

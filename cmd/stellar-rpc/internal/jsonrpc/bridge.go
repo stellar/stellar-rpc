@@ -9,7 +9,6 @@ import (
 	"io"
 	"math"
 	"mime"
-	"net"
 	"net/http"
 	"runtime"
 	"slices"
@@ -28,6 +27,14 @@ import (
 )
 
 const contentTypeJSON = "application/json"
+
+// A response gets responseChunkTimeout for each responseChunkSize bytes, so a
+// client that stops reading is dropped without capping how long a large
+// response may take.
+const (
+	responseChunkSize    = 1 << 20
+	responseChunkTimeout = 30 * time.Second
+)
 
 var (
 	errBridgeClosed = errors.New("the bridge is closed")
@@ -303,7 +310,7 @@ type response struct {
 // write writes rsps as the body of a 200 response, as an array if batch is
 // set. Results are written without copying.
 func write(w http.ResponseWriter, batch bool, rsps []*response) error {
-	parts := make(net.Buffers, 0, 3*len(rsps)+2)
+	parts := make([][]byte, 0, 3*len(rsps)+2)
 	if batch {
 		parts = append(parts, []byte("["))
 	}
@@ -334,8 +341,28 @@ func write(w http.ResponseWriter, batch bool, rsps []*response) error {
 	w.Header().Set("Content-Type", contentTypeJSON)
 	w.Header().Set("Content-Length", strconv.Itoa(n))
 	w.WriteHeader(http.StatusOK)
-	_, _ = parts.WriteTo(w) // a write error means the client is gone
+	writeChunked(w, http.NewResponseController(w), parts)
 	return nil
+}
+
+// writeChunked writes parts to w, moving the write deadline on rc before each
+// responseChunkSize bytes. It stops at the first write error, which means the
+// client is gone.
+func writeChunked(w io.Writer, rc *http.ResponseController, parts [][]byte) {
+	left := 0 // bytes the current deadline still covers
+	for _, p := range parts {
+		for len(p) > 0 {
+			if left == 0 {
+				_ = rc.SetWriteDeadline(time.Now().Add(responseChunkTimeout))
+				left = responseChunkSize
+			}
+			n := min(len(p), left)
+			if _, err := w.Write(p[:n]); err != nil {
+				return
+			}
+			p, left = p[n:], left-n
+		}
+	}
 }
 
 // escapeID HTML-escapes a request ID before it is echoed, as re-encoding the
