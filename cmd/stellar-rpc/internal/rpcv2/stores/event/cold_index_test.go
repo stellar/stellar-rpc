@@ -629,19 +629,34 @@ func TestTermEncoder_WholeAndSplitTerms(t *testing.T) {
 	require.Empty(t, body)
 }
 
-// Slots must be dense: an entry past a gap, or one repeating a written
-// slot, is still pending when the pack is finished.
+// Slots must be dense and within reach of the next one to write: an entry
+// past a gap is still held when the pack is finished, and a repeated slot
+// or one too far ahead is refused.
 func TestIndexPackWriter_RejectsSlotGapsAndRepeats(t *testing.T) {
-	for _, slots := range [][]uint32{{0, 2}, {0, 0}} {
+	bitmap, err := roaring.BitmapOf(1).ToBytes()
+	require.NoError(t, err)
+	entries := append([]byte{termWhole}, bitmap...)
+	for _, tc := range []struct {
+		slots []uint32
+		want  string
+	}{
+		{[]uint32{0, 2}, "non-dense MPHF slots"},
+		{[]uint32{0, 0}, "out of reach"},
+		{[]uint32{1, 1}, "repeated"},
+		{[]uint32{4}, "out of reach"},
+	} {
 		pw, err := packfile.Create(filepath.Join(t.TempDir(), "index.pack"), indexPackWriterOptions())
 		require.NoError(t, err)
-		w := newIndexPackWriter(pw, 0)
-		bitmap, err := roaring.BitmapOf(1).ToBytes()
-		require.NoError(t, err)
-		for _, slot := range slots {
-			require.NoError(t, w.add(indexEntry{slot: slot}, append([]byte{termWhole}, bitmap...)))
+		w := newIndexPackWriter(pw, 0, 4)
+		for _, slot := range tc.slots {
+			if err = w.add(indexEntry{slot: slot}, entries); err != nil {
+				break
+			}
 		}
-		require.ErrorContains(t, w.finish(), "non-dense MPHF slots")
+		if err == nil {
+			err = w.finish()
+		}
+		require.ErrorContains(t, err, tc.want, "slots %v", tc.slots)
 		require.NoError(t, pw.Close())
 	}
 }
