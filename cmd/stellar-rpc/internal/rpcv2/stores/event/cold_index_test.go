@@ -515,6 +515,7 @@ func TestColdIndexBuilder_SpillsAFullBuffer(t *testing.T) {
 		require.NoError(t, b.Add(id, keys))
 	}
 	runsDir := filepath.Join(dir, IndexRunsDirName(indexTestChunkID))
+	require.NoError(t, b.awaitSpill())
 	require.FileExists(t, filepath.Join(runsDir, "00000"), "the buffer spilled before the slab ended")
 	require.NoError(t, b.Write(context.Background()))
 
@@ -532,6 +533,21 @@ func TestColdIndexBuilder_SpillsAFullBuffer(t *testing.T) {
 	require.Equal(t, uint64(len(want)), m.numKeys())
 }
 
+// A slab spills in the background, and a failed spill fails the build at
+// its next spill or at Write.
+func TestColdIndexBuilder_FailedSpillFailsTheBuild(t *testing.T) {
+	dir := t.TempDir()
+	// A file where the runs directory belongs fails every spill.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, IndexRunsDirName(indexTestChunkID)), nil, 0o600))
+	b := NewColdIndexBuilder(indexTestChunkID, dir, testIndexSecret)
+	var err error
+	for id := uint32(0); id <= 2*hotSlabEvents && err == nil; id++ {
+		err = b.Add(id, []TermKey{{1}})
+	}
+	require.ErrorContains(t, err, "spill index slab 0")
+	require.NoError(t, b.Close())
+}
+
 func TestColdIndexBuilder_RemovesRuns(t *testing.T) {
 	build := func(t *testing.T) (*ColdIndexBuilder, string, string) {
 		t.Helper()
@@ -540,6 +556,7 @@ func TestColdIndexBuilder_RemovesRuns(t *testing.T) {
 		for id := range uint32(hotSlabEvents + 1) {
 			require.NoError(t, b.Add(id, []TermKey{{1}}))
 		}
+		require.NoError(t, b.awaitSpill())
 		runsDir := filepath.Join(dir, IndexRunsDirName(chunk.ID(0)))
 		require.DirExists(t, runsDir)
 		return b, dir, runsDir
