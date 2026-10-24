@@ -94,6 +94,7 @@ func NewColdWriter(chunkID chunk.ID, bucketDir string, opts ColdWriterOptions) (
 	pw, err := packfile.Create(path, packfile.WriterOptions{
 		Format:           eventsPackFormat,
 		ItemsPerRecord:   eventsPackItemsPerRecord,
+		MaxRecordBytes:   eventsPackMaxRecordBytes,
 		NewRecordEncoder: newEventsPackEncoder,
 		Concurrency:      opts.Concurrency,
 		BytesPerSync:     opts.BytesPerSync,
