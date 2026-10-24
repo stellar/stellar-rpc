@@ -28,6 +28,7 @@ type eventsCold struct {
 	index   *event.ColdIndexBuilder
 	offsets *event.LedgerOffsets
 	metrics coldMetrics
+	keys    []event.TermKey // one event's terms, reused
 	// failed latches any write error. A failed write can leave the index
 	// and the pack ahead of offsets (offsets is the per-ledger commit point,
 	// appended last), so a subsequent finalize would commit an index whose
@@ -156,10 +157,11 @@ func (e *eventsCold) ingestSeq(seq uint32, closedAt int64, txParts []sdkingest.L
 	var termDur, writeDur time.Duration
 	for i := range payloads {
 		tstart := time.Now()
-		keys, terr := event.TermsForBytes(payloads[i].ContractEventBytes)
+		keys, terr := event.AppendTermsForBytes(e.keys[:0], payloads[i].ContractEventBytes)
 		if terr != nil {
 			return 0, fmt.Errorf("TermsForBytes seq %d eventIdx %d: %w", seq, i, terr)
 		}
+		e.keys = keys
 		if aerr := e.index.Add(startID+uint32(i), keys); aerr != nil {
 			return 0, fmt.Errorf("index seq %d eventIdx %d: %w", seq, i, aerr)
 		}
