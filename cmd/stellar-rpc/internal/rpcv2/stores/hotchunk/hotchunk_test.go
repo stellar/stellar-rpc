@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/linxGnu/grocksdb"
@@ -33,6 +35,9 @@ var termWindow = event.IDRange{End: math.MaxUint32}
 
 const testPassphrase = "Public Global Stellar Network ; September 2015"
 
+// testCatalogSecret is the catalog secret test hot DBs open with.
+var testCatalogSecret = [32]byte(bytes.Repeat([]byte{0xA5}, 32))
+
 func silentLogger() *supportlog.Entry {
 	log := supportlog.New()
 	log.SetLevel(logrus.ErrorLevel)
@@ -52,7 +57,7 @@ func ingestRaw(t *testing.T, db *DB, seq uint32, raw []byte) (LedgerReport, erro
 // openTestDB opens a fresh hot DB bound to chunk 0 (every test uses chunk 0).
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(t.TempDir(), chunk.ID(0), silentLogger())
+	db, err := Open(t.TempDir(), chunk.ID(0), testCatalogSecret, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	return db
@@ -91,6 +96,11 @@ func TestConfig_PerCFOptionRouting(t *testing.T) {
 		"events data CF keeps its ZSTD override")
 	assert.NotZero(t, perCF[event.DataCF].BlockSize, "events data CF keeps its block-size override")
 	assert.Zero(t, perCF[event.DataCF].BloomFilterBitsPerKey, "events data CF gets no bloom")
+
+	assert.True(t, perCF[event.IndexCF].CacheIndexAndFilterBlocks,
+		"events index CF keeps its files' index blocks in the block cache")
+	assert.True(t, perCF[event.IndexCF].DisableAutoCompactions, "events index CF keeps compaction off")
+	assert.Equal(t, 10, perCF[event.IndexCF].BloomFilterBitsPerKey, "events index CF keeps its bloom")
 }
 
 func TestConfig_DBWideTuningStaysShared(t *testing.T) {
@@ -102,10 +112,10 @@ func TestConfig_DBWideTuningStaysShared(t *testing.T) {
 }
 
 func TestOpen_ValidatesInputs(t *testing.T) {
-	_, err := Open("", chunk.ID(0), silentLogger())
+	_, err := Open("", chunk.ID(0), testCatalogSecret, silentLogger())
 	require.ErrorIs(t, err, stores.ErrInvalidConfig)
 
-	_, err = Open(t.TempDir(), chunk.ID(0), nil)
+	_, err = Open(t.TempDir(), chunk.ID(0), testCatalogSecret, nil)
 	require.ErrorIs(t, err, stores.ErrInvalidConfig)
 }
 
@@ -203,10 +213,10 @@ func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 	// txhash CFs — the hash is absent.
 	_, gerr = db.Txhash().Get(hash)
 	require.ErrorIs(t, gerr, stores.ErrNotFound)
-	// events CFs — no term indexed, no event committed (clean miss = nil bitmap).
+	// events CFs — no term indexed, no event committed (clean miss = empty bitmap).
 	bms, _, lerr := db.Events().LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
 	require.NoError(t, lerr)
-	require.Nil(t, bms[0])
+	require.True(t, bms[0].IsEmpty())
 	assert.Equal(t, uint32(0), eventCount(t, db.Events()))
 
 	// The single committed frontier is still empty — nothing committed.
@@ -224,7 +234,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 	first := chunkID.FirstLedger()
 	dir := t.TempDir()
 
-	db, err := Open(dir, chunkID, silentLogger())
+	db, err := Open(dir, chunkID, testCatalogSecret, silentLogger())
 	require.NoError(t, err)
 
 	// Commit one good ledger so there is a known last committed seq, then close the DB.
@@ -234,7 +244,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	// Reopen and confirm the last committed seq survived (sync=true durability).
-	db2, err := Open(dir, chunkID, silentLogger())
+	db2, err := Open(dir, chunkID, testCatalogSecret, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db2.Close() })
 
@@ -252,7 +262,7 @@ func TestIngestLedger_MidBatchCommitFailurePersistsNothing(t *testing.T) {
 
 	// Reopen a third time: the failed ledger left NO trace in any CF, and the
 	// last committed seq is still the last good seq.
-	db3, err := Open(dir, chunkID, silentLogger())
+	db3, err := Open(dir, chunkID, testCatalogSecret, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db3.Close() })
 
@@ -428,25 +438,73 @@ func TestIngestLedger_EventlessTxStillIndexesHash(t *testing.T) {
 	assert.Equal(t, uint32(1), eventCount(t, db.Events()))
 }
 
-// TestReopen_RecoversEventsMirror confirms the events facade's warmup runs over
-// the shared store on reopen (the mirror/offsets are reconstructed from the
+// TestReopen_RecoversEventsState confirms the events facade's warmup runs over
+// the shared store on reopen (the index/offsets are reconstructed from the
 // events CFs), so a reopened DB assigns event IDs continuing from disk.
-func TestReopen_RecoversEventsMirror(t *testing.T) {
+func TestReopen_RecoversEventsState(t *testing.T) {
 	chunkID := chunk.ID(0)
 	first := chunkID.FirstLedger()
 	dir := t.TempDir()
 
-	db, err := Open(dir, chunkID, silentLogger())
+	db, err := Open(dir, chunkID, testCatalogSecret, silentLogger())
 	require.NoError(t, err)
 	raw, _, _ := lcmWithEvent(t, first)
 	_, err = ingestRaw(t, db, first, raw)
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	db2, err := Open(dir, chunkID, silentLogger())
+	db2, err := Open(dir, chunkID, testCatalogSecret, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db2.Close() })
 	assert.Equal(t, uint32(1), eventCount(t, db2.Events()), "warmup recovered the events offsets")
+}
+
+// lcmWithEvents returns the bytes of a ledger whose one transaction carries n
+// contract events.
+func lcmWithEvents(t *testing.T, seq uint32, n int) []byte {
+	t.Helper()
+	events := make([]xdr.ContractEvent, n)
+	for i := range events {
+		events[i] = buildContractEvent("x")
+	}
+	meta := xdr.TransactionMeta{
+		V:  4,
+		V4: &xdr.TransactionMetaV4{Operations: []xdr.OperationMetaV2{{Events: events}}},
+	}
+	lcm, _ := buildLCMWithTx(t, seq, meta)
+	raw, err := lcm.MarshalBinary()
+	require.NoError(t, err)
+	return raw
+}
+
+// A ledger whose apply fails is committed, and the report says which phase
+// failed and what landed.
+func TestIngestLedger_FailedApplyIsCommitted(t *testing.T) {
+	chunkID := chunk.ID(0)
+	first := chunkID.FirstLedger()
+	dir := t.TempDir()
+	db, err := Open(dir, chunkID, testCatalogSecret, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	// A file where the events index wants its load directory makes every
+	// seal fail.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loading"), nil, 0o600))
+
+	// The first ledger fills index slab 0, whose seal fails; the second
+	// reaches the next slab boundary and learns of it.
+	_, err = ingestRaw(t, db, first, lcmWithEvents(t, first, 1<<16+1))
+	require.NoError(t, err)
+	rep, err := ingestRaw(t, db, first+1, lcmWithEvents(t, first+1, 1<<16))
+	require.ErrorContains(t, err, "seal index slab 0")
+	assert.Equal(t, PhaseApply, rep.Failed)
+	assert.Equal(t, 1, rep.Phases[PhaseLedgers].Items)
+	assert.Equal(t, 1, rep.Phases[PhaseTxhash].Items)
+	assert.Equal(t, 1<<16, rep.Phases[PhaseEvents].Items)
+
+	seq, ok, err := db.MaxCommittedSeq()
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, first+1, seq, "the ledger is committed")
 }
 
 // TestOpenReadOnly_ReadsCommittedAndRejectsWrites pins the freeze source's
@@ -459,7 +517,7 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 	dir := t.TempDir()
 
 	// Writer: ingest two ledgers, then close (flushes the WAL into SST).
-	db, err := Open(dir, chunkID, silentLogger())
+	db, err := Open(dir, chunkID, testCatalogSecret, silentLogger())
 	require.NoError(t, err)
 	for _, seq := range []uint32{first, first + 1} {
 		_, ierr := ingestRaw(t, db, seq, zeroTxLCM(t, seq))
@@ -468,7 +526,7 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	// Reader: a read-only open sees the committed frontier; Close must not flush.
-	ro, err := OpenReadOnly(dir, chunkID, silentLogger())
+	ro, err := OpenReadOnly(dir, chunkID, testCatalogSecret, silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ro.Close()) })
 
@@ -483,7 +541,7 @@ func TestOpenReadOnly_ReadsCommittedAndRejectsWrites(t *testing.T) {
 }
 
 // TestOpenReadOnly_SkipsEventsWarmup pins #834: a read-only (freeze/probe) open is
-// a ledgers-only view that never runs the event store's index-CF warmup scan, while a
+// a ledgers-only view that never runs the event store's warmup, while a
 // read-WRITE open still warms. The proof is a poisoned events-index row that
 // warmup's key-length check rejects: the write open fails on it (warmup ran), the
 // read-only open ignores it (warmup skipped) and still serves the ledgers-only
@@ -494,7 +552,7 @@ func TestOpenReadOnly_SkipsEventsWarmup(t *testing.T) {
 	dir := t.TempDir()
 
 	// Writer: ingest two ledgers, capture the exact wire bytes, then close.
-	db, err := Open(dir, chunkID, silentLogger())
+	db, err := Open(dir, chunkID, testCatalogSecret, silentLogger())
 	require.NoError(t, err)
 	want := map[uint32][]byte{}
 	for _, seq := range []uint32{first, first + 1} {
@@ -506,20 +564,21 @@ func TestOpenReadOnly_SkipsEventsWarmup(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	// Poison the events index with a malformed row (wrong key length). warmup's
-	// index scan rejects it; a scan-skipping open never sees it. Written through a
-	// bare read-write open of the same multi-CF DB, closed to free the LOCK.
+	// read of the index's last key rejects it; a read-only open never looks.
+	// Written through a bare read-write open of the same multi-CF DB, closed
+	// to free the LOCK.
 	raw, err := rocksdb.New(config(dir, silentLogger(), false, true))
 	require.NoError(t, err)
 	require.NoError(t, raw.Put(event.IndexCF, []byte("bad"), nil))
 	require.NoError(t, raw.Close())
 
 	// Read-WRITE open warms → the poisoned index row fails the scan.
-	_, werr := OpenExisting(dir, chunkID, silentLogger())
+	_, werr := OpenExisting(dir, chunkID, testCatalogSecret, silentLogger())
 	require.ErrorContains(t, werr, "events_index key length",
 		"a read-write open must run the events warmup scan and reject the poison")
 
 	// Read-only open skips the warmup → opens clean despite the poison.
-	ro, err := OpenReadOnly(dir, chunkID, silentLogger())
+	ro, err := OpenReadOnly(dir, chunkID, testCatalogSecret, silentLogger())
 	require.NoError(t, err, "read-only open must skip the events warmup and ignore the poison")
 	t.Cleanup(func() { require.NoError(t, ro.Close()) })
 
@@ -549,7 +608,7 @@ func TestOpenReadOnly_SkipsEventsWarmup(t *testing.T) {
 // rocksdb.ErrStoreClosed.
 func TestIngestLedger_ClosedDBFails(t *testing.T) {
 	chunkID := chunk.ID(0)
-	db, err := Open(t.TempDir(), chunkID, silentLogger())
+	db, err := Open(t.TempDir(), chunkID, testCatalogSecret, silentLogger())
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
