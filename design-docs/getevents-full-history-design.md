@@ -395,7 +395,7 @@ When populating cold segments from historical ledger data, the system writes col
 For each segment (10,000 ledgers):
 1. For each ledger:
    a. Append events to events.pack (record compression is handled internally by the packfile library).
-   b. Add the event's terms to the in-memory slab; when the next slab starts, write the slab's terms as one sorted run under `{chunk}-index.runs/` beside the index files.
+   b. Add the event's terms to the in-memory slab; when the next slab starts, write the slab's terms as one sorted run under `{chunk}-index.runs/` beside the index files, in the background while the next slab fills.
    c. Update in-memory ledger offset array.
 
 2. At segment completion (10,000 ledgers):
@@ -404,7 +404,7 @@ For each segment (10,000 ledgers):
    c. Mark segment as available in DB.
 ```
 
-Only the ledger offset array is retained for the whole segment (the packfile metadata needs it). The index build holds one slab of postings in memory; everything else waits on disk in the runs until step 2 merges them.
+Only the ledger offset array is retained for the whole segment (the packfile metadata needs it). The index build holds at most two slabs of postings in memory, the one filling and the one being written; everything else waits on disk in the runs until step 2 merges them.
 
 If a backfill worker fails mid-segment, the incomplete segment is discarded and restarted. Segments are independent so backfill can be parallelized across multiple workers. The cold segments produced are identical in format to those produced by freeze.
 
