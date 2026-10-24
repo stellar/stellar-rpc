@@ -262,19 +262,7 @@ func openFile(f readAtCloser, fileSize int64, firstRead func(int64) int) openRes
 			ErrChecksum, trailer.AppDataCRC, computed)}
 	}
 
-	// A trailer claiming records or items needs an itemsPerRecord. Checked
-	// before the default below, which would read it as one item per record.
-	if itemsPerRecord <= 0 && (recordCount > 0 || totalItems > 0) {
-		return openResult{err: fmt.Errorf("%w: invalid itemsPerRecord %d in trailer",
-			ErrCorrupt, itemsPerRecord)}
-	}
-
-	// Empty packfiles may legitimately have itemsPerRecord==0 on disk;
-	// default the *internal* int to 1 so modulo math is well-defined. The
-	// Trailer view keeps the on-disk value verbatim.
-	internalItemsPerRecord := max(itemsPerRecord, 1)
-
-	idx, err := parseIndex(tail[:indexSize], recordCount, totalItems, internalItemsPerRecord, indexBase)
+	idx, err := parseIndex(tail[:indexSize], recordCount, totalItems, itemsPerRecord, indexBase)
 	if err != nil {
 		return openResult{err: err}
 	}
