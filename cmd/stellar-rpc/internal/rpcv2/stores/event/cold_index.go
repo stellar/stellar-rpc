@@ -39,22 +39,28 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 }
 
 // ColdIndexBuilder builds a chunk's index.hash and index.pack from its
-// postings with bounded memory. One slab of postings is in memory; it is
-// written as a run in a directory beside the index files when the next
-// slab starts or the buffer fills, and Write merges the runs. Both cold
-// backfill and the live-chunk freeze feed it single-threaded, re-deriving
-// terms from raw LCMs with TermsForBytes. The directory is the chunk's, so
-// one builder works on a chunk at a time, which the backfill plan
-// guarantees: it builds a chunk once per pass.
+// postings with bounded memory. One slab of postings is in memory; when the
+// next slab starts or the buffer fills, it is written as a run in a
+// directory beside the index files in the background while the next fills,
+// and Write merges the runs. Both cold backfill and the live-chunk freeze
+// feed it single-threaded, re-deriving terms from raw LCMs with
+// TermsForBytes. The directory is the chunk's, so one builder works on a
+// chunk at a time, which the backfill plan guarantees: it builds a chunk
+// once per pass.
 type ColdIndexBuilder struct {
 	chunkID chunk.ID
 	dir     string
 	secret  [stores.SecretLen]byte
 	runs    coldRuns
 	live    *hotSlab
-	maxID   uint32
-	any     bool
-	written bool
+	// spare is the slab being spilled, or the free one once that is over;
+	// spilling yields the outcome of the spill in flight, at most one.
+	spare    *hotSlab
+	spilling chan error
+	spillErr error
+	maxID    uint32
+	any      bool
+	written  bool
 }
 
 // NewColdIndexBuilder returns a builder that writes chunkID's index into
@@ -92,6 +98,7 @@ func (b *ColdIndexBuilder) Add(eventID uint32, keys []TermKey) error {
 
 // Close removes the runs of a build that is not written.
 func (b *ColdIndexBuilder) Close() error {
+	_ = b.awaitSpill() // a spill error fails the build Close abandons
 	return b.runs.remove()
 }
 
@@ -118,6 +125,9 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 		return fmt.Errorf("events: build index: %w", err)
 	}
 	if err := b.spill(0); err != nil {
+		return err
+	}
+	if err := b.awaitSpill(); err != nil {
 		return err
 	}
 	var slabs uint32
@@ -151,16 +161,42 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 	return b.writePack(m, termsPath, slabs, filepath.Join(b.dir, IndexPackName(b.chunkID)))
 }
 
-// spill writes the postings in memory, if any, as a run and empties the slab
-// for slab.
+// spill starts writing the postings in memory, if any, as the next run and
+// empties a slab for slab. The spill before it is over first, so the runs
+// keep their order.
 func (b *ColdIndexBuilder) spill(slab uint32) error {
-	if b.live.n > 0 {
-		if err := b.runs.spill(b.live.slab, b.live.terms()); err != nil {
-			return fmt.Errorf("events: spill index slab %d: %w", b.live.slab, err)
-		}
+	if b.live.n == 0 {
+		b.live.reset(slab)
+		return nil
 	}
+	if err := b.awaitSpill(); err != nil {
+		return err
+	}
+	full := b.live
+	if b.spare == nil {
+		b.spare = newHotSlab(slab)
+	}
+	b.live, b.spare = b.spare, full
 	b.live.reset(slab)
+	done := make(chan error, 1)
+	b.spilling = done
+	go func() {
+		if err := b.runs.spill(full.slab, full.terms()); err != nil {
+			done <- fmt.Errorf("events: spill index slab %d: %w", full.slab, err)
+		}
+		close(done)
+	}()
 	return nil
+}
+
+// awaitSpill waits for the spill in flight, if any. A spill error fails
+// every later call.
+func (b *ColdIndexBuilder) awaitSpill() error {
+	if b.spilling != nil {
+		b.spillErr = <-b.spilling
+		b.spilling = nil
+	}
+	return b.spillErr
 }
 
 // writePack writes every term of the terms file at the slot m gives it.
