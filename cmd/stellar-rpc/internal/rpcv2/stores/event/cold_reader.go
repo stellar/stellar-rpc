@@ -7,15 +7,15 @@ package event
 // interface against them.
 //
 // Lifecycle: each ColdReader owns two stores.PackReader instances
-// plus an in-memory parsed MPHF index. Open returns immediately,
+// plus a memory-mapped MPHF index. Open returns immediately,
 // but all three I/O units start right away in background
 // goroutines: OpenPack opens each file (holding its fd) and
-// reads its trailer in the background, and the MPHF read kicks off
+// reads its trailer in the background, and the MPHF open kicks off
 // alongside them. Decoded metadata is awaited on the first call
 // that needs it. Close drains the MPHF goroutine and releases the
 // packfile handles. Multiple ColdReaders can be open against the
 // same chunk's files concurrently — the pack handle is safe for
-// concurrent reads and the MPHF is read-only after load.
+// concurrent reads and the MPHF is read-only once open.
 //
 // Concurrency contract: read methods (LookupKeys,
 // FetchEvents, All) are safe to call concurrently with each other
@@ -160,9 +160,8 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 	}
 	ch := make(chan mphfResult, 1)
 	go func() {
-		// openMPHF already wraps with the path on error — pass
-		// through without re-wrapping to avoid "events: read X:
-		// events: open X: ..." double prefixes.
+		// openMPHF already wraps its errors with the path; pass them
+		// through so the path isn't printed twice.
 		m, err := openMPHF(indexHashPath)
 		ch <- mphfResult{idx: m, err: err}
 	}()
@@ -321,7 +320,7 @@ func (c *ColdReader) Offsets() (*LedgerOffsets, error) {
 }
 
 // verifyAndDeserializeBitmap checks the index.pack record's leading
-// fingerprint against the one mphf.Lookup returned and, on match, unmarshals a fresh
+// fingerprint against the one mphf.LookupBatch returned and, on match, unmarshals a fresh
 // bitmap. On fingerprint mismatch (residual MPHF collision on an
 // unseen key) it returns (nil, nil) — the caller treats nil as
 // not-found. record is valid only inside ReadItem's callback;
@@ -349,7 +348,8 @@ func verifyAndDeserializeBitmap(
 //
 // Cold-side implementation:
 //
-//  1. MPHF-resolve every key. Keys rejected at the routing stage
+//  1. MPHF-resolve every key in one batch, so their index.hash pages
+//     are read together. Keys rejected at the routing stage
 //     (streamhash ErrKeyNotFound) get result[i] = nil and never
 //     touch index.pack.
 //  2. Sort the surviving (key, slot) pairs by slot and dedupe —
@@ -392,15 +392,14 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 		fp     [IndexRecordFingerprintLen]byte
 	}
 	pending := make([]pendingKey, 0, len(keys))
-	for i, key := range keys {
-		slot, fp, err := mphf.Lookup(key)
-		if err != nil {
-			if errors.Is(err, ErrKeyNotFound) {
+	for i, hit := range mphf.LookupBatch(keys) {
+		if hit.err != nil {
+			if errors.Is(hit.err, ErrKeyNotFound) {
 				continue // result[i] stays nil
 			}
-			return nil, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, err)
+			return nil, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, hit.err)
 		}
-		pending = append(pending, pendingKey{outIdx: i, slot: slot, fp: fp})
+		pending = append(pending, pendingKey{outIdx: i, slot: hit.slot, fp: hit.fp})
 	}
 	if len(pending) == 0 {
 		return results, nil
