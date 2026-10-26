@@ -49,7 +49,7 @@ func Open(store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte)
 func open(
 	store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte, maxKeys, maxLedgers int,
 ) (*HotStore, error) {
-	if err := checkSecret(store, secret); err != nil {
+	if err := checkSecret(store, secret, true); err != nil {
 		return nil, err
 	}
 	lastSealed, sealedKeys, err := readMarker(store)
@@ -57,7 +57,18 @@ func open(
 		return nil, err
 	}
 	index := newHotIndex(store, sealedKeys, maxKeys, maxLedgers)
-	if err := replayRows(store, index, max(lastSealed+1, chunkID.FirstLedger())); err != nil {
+	// The scan holds the store's lifecycle lock, which a seal takes too, so
+	// the rows are applied after the scan.
+	rows, _, err := scanRows(store, max(lastSealed+1, chunkID.FirstLedger()))
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if err := index.apply(r.seq, r.keys); err != nil {
+			return nil, err
+		}
+	}
+	if err := index.settle(); err != nil {
 		return nil, err
 	}
 	return &HotStore{store: store, secret: secret, index: index}, nil
@@ -137,20 +148,20 @@ func (h *HotStore) Get(hash [32]byte) (uint32, error) {
 }
 
 // secretKey, in the default CF, records the secret the chunk's hot keys are
-// blinded with: they cannot be blinded again, so a store given another
-// secret must fail rather than miss every key.
+// blinded with: they cannot be blinded again, so a store or a freeze given
+// another secret must fail rather than miss every key.
 const secretKey = "txhash:secret"
 
-// checkSecret compares secret with the one store records. A store that
-// records none records secret.
-func checkSecret(store *rocksdb.Store, secret [stores.SecretLen]byte) error {
+// checkSecret compares secret with the one store records. With adopt, a
+// store that records none records secret.
+func checkSecret(store *rocksdb.Store, secret [stores.SecretLen]byte, adopt bool) error {
 	v, found, err := store.Get("", []byte(secretKey))
 	switch {
 	case err != nil:
 		return err
-	case !found:
+	case !found && adopt:
 		return store.Put("", []byte(secretKey), secret[:])
-	case !bytes.Equal(v, secret[:]):
+	case !found || !bytes.Equal(v, secret[:]):
 		return errors.New("txhash: the chunk's hot keys are not blinded with this secret; re-ingest the chunk")
 	}
 	return nil
@@ -169,26 +180,21 @@ func readMarker(store *rocksdb.Store) (uint32, uint64, error) {
 	return rocksdb.DecodeUint32(v[:4]), binary.BigEndian.Uint64(v[4:]), nil
 }
 
-// replayRows applies the committed rows from ledger from on, as their commits
-// did.
-func replayRows(store *rocksdb.Store, index *hotIndex, from uint32) error {
-	// The scan holds the store's lifecycle lock, which a seal takes too, so
-	// the rows are applied after the scan.
+// scanRows returns the committed rows from ledger from on and how many keys
+// they hold.
+func scanRows(store *rocksdb.Store, from uint32) ([]row, uint64, error) {
 	var rows []row
+	var keys uint64
 	for e, err := range store.IterateRange(rowsCF, rocksdb.EncodeUint32(from), nil) {
 		if err != nil {
-			return fmt.Errorf("txhash: replay %s: %w", rowsCF, err)
+			return nil, 0, fmt.Errorf("txhash: scan %s: %w", rowsCF, err)
 		}
 		seq := from + uint32(len(rows)) //nolint:gosec // a chunk has 10,000 ledgers
 		if !bytes.Equal(e.Key, rocksdb.EncodeUint32(seq)) || len(e.Value)%ColdKeySize != 0 {
-			return fmt.Errorf("txhash: corrupt chunk: %s entry %x where ledger %d belongs", rowsCF, e.Key, seq)
+			return nil, 0, fmt.Errorf("txhash: corrupt chunk: %s entry %x where ledger %d belongs", rowsCF, e.Key, seq)
 		}
 		rows = append(rows, row{seq: seq, keys: bytes.Clone(e.Value)})
+		keys += uint64(len(e.Value) / ColdKeySize)
 	}
-	for _, r := range rows {
-		if err := index.apply(r.seq, r.keys); err != nil {
-			return err
-		}
-	}
-	return index.settle()
+	return rows, keys, nil
 }
