@@ -129,15 +129,15 @@ func OpenExisting(path string, chunkID chunk.ID, secrets SecretSource, logger *s
 // refinement DEPENDS on that replay to read a correct MaxCommittedSeq. (An
 // unsynced tail is exactly what a crash loses, and is not recovered.)
 //
-// A read-only open is a LEDGERS-ONLY view: it composes the ledger facade but SKIPS
-// the events and txhash facades, because both read-only callers (freeze re-derives
-// the cold artifacts from raw LCMs via Source(); the startup refiner reads only
-// MaxCommittedSeq()) touch the ledgers CF alone and never the indexes. Composing
-// those facades would run their unconditional warmups — indexing the unsealed
-// events again plus the offsets rebuild, and replaying the unsealed txhash rows —
-// discarded unread at Close (#834). The skip is enforced structurally: a read-only
-// DB has neither facade, so Events() and Txhash() panic and IngestLedger errors
-// rather than serving a cold, unwarmed surface.
+// A read-only open composes the ledger facade but SKIPS the events and txhash
+// facades, because neither read-only caller uses them: the freeze reads the
+// chunk's column families straight from the store, and the startup refiner
+// reads only MaxCommittedSeq(). Composing those facades would run their
+// unconditional warmups (indexing the unsealed events again plus the offsets
+// rebuild, and replaying the unsealed txhash rows), discarded unread at Close
+// (#834). The skip is enforced structurally: a read-only DB has neither facade,
+// so Events() and Txhash() panic and IngestLedger errors rather than serving a
+// cold, unwarmed surface.
 func OpenReadOnly(path string, chunkID chunk.ID, secrets SecretSource, logger *supportlog.Entry) (*DB, error) {
 	return open(path, chunkID, secrets, logger, true, false)
 }
@@ -262,11 +262,7 @@ func (d *DB) Events() *event.HotStore {
 	return d.events
 }
 
-// Source streams the chunk's LCMs from the ledgers CF as a ledgerbackend.LedgerStream
-// the cold writer (backfill's WriteColdChunk) drains, so a just-closed chunk freezes
-// straight from its hot DB without a refetch. The freeze reads through the
-// registry's shared handle when one is published; the read-only reopen is the
-// fallback for the startup catch-up, where no writer is open.
+// Source streams the chunk's LCMs from the ledgers CF as a ledgerbackend.LedgerStream.
 func (d *DB) Source() ledgerbackend.LedgerStream {
 	return &hotLedgerStream{store: d.ledger}
 }
