@@ -775,3 +775,12 @@ func readLedgerRaw(r interface {
 	})
 	return out, err
 }
+
+// The freeze refuses a .bin secret other than the one the hot keys are
+// blinded with.
+func TestFreezeTxhashCold_RefusesAnotherSecret(t *testing.T) {
+	db := openTestDB(t)
+	_, err := db.FreezeTxhashCold(context.Background(), filepath.Join(t.TempDir(), "x.bin"), [16]byte{1},
+		chunk.ID(0).FirstLedger(), 0)
+	require.ErrorContains(t, err, "secret")
+}

@@ -313,3 +313,16 @@ func TestDecodeNonZstdData(t *testing.T) {
 	_, err := Decode(nil, garbage)
 	require.Error(t, err)
 }
+
+func TestFrameHeaderValid(t *testing.T) {
+	src := bytes.Repeat([]byte("ledger "), 1000)
+	frame, err := NewCompressor(WithWorkers(2)).Encode(nil, src)
+	require.NoError(t, err)
+	require.NoError(t, FrameHeaderValid(frame))
+
+	unchecked, err := NewCompressor(WithoutChecksum()).Encode(nil, src)
+	require.NoError(t, err)
+	require.ErrorContains(t, FrameHeaderValid(unchecked), "checksum")
+	require.ErrorContains(t, FrameHeaderValid(src), "not a zstd frame")
+	require.ErrorContains(t, FrameHeaderValid(frame[:4]), "not a zstd frame")
+}
