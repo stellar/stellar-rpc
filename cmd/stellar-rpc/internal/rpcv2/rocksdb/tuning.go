@@ -86,4 +86,13 @@ type Tuning struct {
 	// replay scales with this cap; graceful Close drains the
 	// memtable so this only bounds ungraceful shutdowns.
 	MaxTotalWalSizeMB int
+
+	// BytesPerSyncMB starts writeback of flush and compaction output
+	// every this many MB as it is written, so its dirty pages never
+	// pile up in front of a WAL fsync.
+	BytesPerSyncMB int
+
+	// WALBytesPerSyncMB does the same for the WAL, so a write's fsync
+	// finds most of the write already on its way to disk.
+	WALBytesPerSyncMB int
 }
