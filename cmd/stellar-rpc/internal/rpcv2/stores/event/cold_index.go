@@ -45,11 +45,12 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // postings with bounded memory. The slab being filled is in memory; when the
 // next slab starts, the full one is written as a run under the scratch
 // directory in the background while the next fills, so at most two slabs are
-// in memory, and Write merges the runs. Both cold backfill and the live-chunk
-// freeze feed it single-threaded, re-deriving terms from raw LCMs with
-// TermsForBytes. The directory is the chunk's, so one builder works on a
-// chunk at a time, which the backfill plan guarantees: it builds a chunk once
-// per pass.
+// in memory, and Write merges the runs. Cold backfill feeds it every event's
+// terms, derived from raw LCMs with TermsForBytes; the live-chunk freeze
+// feeds it the hot index's sealed slabs as they are (AddSlab) and derives
+// terms only for the events after them. The directory is the chunk's, so one
+// builder works on a chunk at a time, which the backfill plan guarantees: it
+// builds a chunk once per pass.
 type ColdIndexBuilder struct {
 	chunkID      chunk.ID
 	dir          string
@@ -169,6 +170,33 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 	return b.writePack(ctx, m, termsPath, slabs, filepath.Join(b.dir, IndexPackName(b.chunkID)))
 }
 
+// AddSlab adds a full slab whose terms are already in key order, each with
+// its serialized bitmap: the form a sealed hot slab holds them in (see
+// hotIndex.seal), which is also the form a spilled slab takes, so the slab
+// becomes the next run as it is. Slabs must be added in slab order before
+// any Add. A slab with no terms is an error: a full slab has an event, and
+// every event has terms.
+func (b *ColdIndexBuilder) AddSlab(slab uint32, terms iter.Seq2[TermKey, []byte]) error {
+	if b.written {
+		return errors.New("events: index already written")
+	}
+	if b.live.n > 0 || slab < b.live.slab {
+		return fmt.Errorf("events: index slab %d added after slab %d", slab, b.live.slab)
+	}
+	if err := b.spiller.wait(); err != nil {
+		return err
+	}
+	n, err := b.runs.spill(slab, terms)
+	if err != nil {
+		return fmt.Errorf("events: spill index slab %d: %w", slab, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("events: index slab %d has no terms", slab)
+	}
+	b.live.reset(slab + 1)
+	return nil
+}
+
 // spill starts writing the live slab's postings, if any, as the next run,
 // and swaps in the spare slab for the caller to reset. The spill before it
 // is over first, so the runs keep their order.
@@ -185,7 +213,7 @@ func (b *ColdIndexBuilder) spill() error {
 	}
 	b.live, b.spare = b.spare, full
 	b.spiller.start(func() error {
-		if err := b.runs.spill(full.slab, full.terms()); err != nil {
+		if _, err := b.runs.spill(full.slab, full.terms()); err != nil {
 			return fmt.Errorf("events: spill index slab %d: %w", full.slab, err)
 		}
 		return nil
