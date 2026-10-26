@@ -194,28 +194,30 @@ func compactView(v ingest.LedgerTransactionView) ingest.LedgerTransactionView {
 		backing = append(backing, b...)
 		return slices.Clip(backing[start:])
 	}
-	takeAll := func(in [][]byte) [][]byte {
-		if in == nil {
-			return nil
-		}
-		out := make([][]byte, len(in))
-		for i, b := range in {
-			out[i] = take(b)
-		}
-		return out
-	}
 
 	v.Envelope = take(v.Envelope)
 	v.Result = take(v.Result)
 	v.Meta = take(v.Meta)
-	v.DiagnosticEvents = takeAll(v.DiagnosticEvents)
-	v.TransactionEvents = takeAll(v.TransactionEvents)
+	v.DiagnosticEvents = takeAll(take, v.DiagnosticEvents)
+	v.TransactionEvents = takeAll(take, v.TransactionEvents)
 	if v.ContractEvents != nil {
-		ops := make([][][]byte, len(v.ContractEvents))
+		ops := make([][]xdr.ContractEventView, len(v.ContractEvents))
 		for i, op := range v.ContractEvents {
-			ops[i] = takeAll(op)
+			ops[i] = takeAll(take, op)
 		}
 		v.ContractEvents = ops
 	}
 	return v
+}
+
+// takeAll applies take to each view, keeping a nil list nil.
+func takeAll[T ~[]byte](take func([]byte) []byte, in []T) []T {
+	if in == nil {
+		return nil
+	}
+	out := make([]T, len(in))
+	for i, b := range in {
+		out[i] = T(take(b))
+	}
+	return out
 }
