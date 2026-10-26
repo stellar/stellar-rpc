@@ -9,6 +9,7 @@ run rpcv2, so build with `RPCV2=true`.
 |---|---|
 | `bench ingest cold` | Runs the daemon backfill over a chunk range. Writes a cold dataset. |
 | `bench ingest hot` | Runs the daemon live ingestion loop over a chunk range. Writes a hot dataset. |
+| `bench ingest freeze` | Freezes a complete chunk of a hot dataset from its hot DB, which opens read-only as at daemon startup. The time includes rebuilding the tx-hash rows after the last seal, as every freeze does. |
 | `bench query` | Calls the daemon read handlers on a dataset at fixed request rates. Measures latency. |
 
 ```
