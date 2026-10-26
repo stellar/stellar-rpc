@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -89,16 +90,22 @@ func TestRunFreezeFromHot(t *testing.T) {
 	}), "a hot dir without the chunk")
 }
 
-func TestRunTxindex(t *testing.T) {
-	dir := t.TempDir()
+// writeWindowBins writes a one-key .bin for each of chunks into dir.
+func writeWindowBins(t *testing.T, dir string, chunks ...chunk.ID) {
+	t.Helper()
 	secret := [stores.SecretLen]byte{3}
-	for _, c := range []chunk.ID{0, 1, 3} {
+	for _, c := range chunks {
 		var key [txhash.ColdKeySize]byte
 		key[0] = byte(c + 1)
 		bin := txhash.ColdBin{Secret: secret, Base: chunk.ID(0).FirstLedger(), Chunk: c}
 		entries := []txhash.ColdEntry{{Key: key, Seq: c.FirstLedger()}}
 		rpcv2test.WriteColdBin(t, filepath.Join(dir, txhash.ColdBinName(c)), bin, entries)
 	}
+}
+
+func TestRunTxindex(t *testing.T) {
+	dir := t.TempDir()
+	writeWindowBins(t, dir, 0, 1, 3)
 	index := filepath.Join(t.TempDir(), "x.idx")
 	require.NoError(t, runTxindex(context.Background(), testLogger(), txindexOptions{
 		BinDir: dir, NumBins: 2, IndexOut: index, OutDir: t.TempDir(),
@@ -107,4 +114,46 @@ func TestRunTxindex(t *testing.T) {
 	require.ErrorContains(t, runTxindex(context.Background(), testLogger(), txindexOptions{
 		BinDir: dir, IndexOut: index, OutDir: t.TempDir(),
 	}), "chunk gap")
+}
+
+// A hot run with --txindex-bin-dir rebuilds the window index back to back
+// beside the ingest loop, and a failed build fails the run.
+func TestRunHotTxindex(t *testing.T) {
+	const numLedgers = 20
+	chunkID := chunk.ID(0)
+	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, numLedgers)
+	binDir := t.TempDir()
+	writeWindowBins(t, binDir, 0, 1, 3)
+	csvDir := t.TempDir()
+	opts := hotOptions{
+		Source: sourceConfig{Kind: sourcePack, PackDir: packDir}, StartChunk: chunkID, NumChunks: 1,
+		NumLedgers: numLedgers, HotRoot: t.TempDir(), CloseInterval: 10 * time.Millisecond, OutDir: csvDir,
+		Txindex: hotTxindexOptions{
+			BinDir: binDir, NumBins: 2, Workers: 2, Yield: true, IndexOut: filepath.Join(t.TempDir(), "x.idx"),
+		},
+	}
+	require.NoError(t, runHot(context.Background(), testLogger(), opts))
+
+	_, builds := readCSVTable(t, filepath.Join(csvDir, txindexFile))
+	completed := 0
+	for i, build := range builds {
+		require.Equal(t, strconv.Itoa(i+1), build["build"])
+		require.Equal(t, "2", build["keys"], "the keys of the first two .bin files")
+		if build["status"] == buildOK {
+			completed++
+			require.NotEmpty(t, build["keys_per_s"])
+			continue
+		}
+		require.Equal(t, buildCanceled, build["status"])
+		require.Len(t, builds, i+1, "only the build in flight at the end is canceled")
+		require.Empty(t, build["keys_per_s"])
+	}
+	require.Positive(t, completed)
+	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
+	require.EqualValues(t, completed, driver[driverIndexRebuild]["n"])
+
+	opts.HotRoot, opts.OutDir = t.TempDir(), t.TempDir()
+	opts.Txindex.IndexOut = filepath.Join(t.TempDir(), "missing", "x.idx")
+	require.ErrorContains(t, runHot(context.Background(), testLogger(), opts), "txindex build 1:")
+	require.FileExists(t, filepath.Join(opts.OutDir, txindexFile))
 }
