@@ -27,7 +27,7 @@ const (
 // driver.csv row labels.
 const (
 	driverBackfillWall = "backfill_wall" // cold: RunBackfill's plan-and-execute wall
-	driverIndexRebuild = "index_rebuild" // cold: one txhash index build, including its eager sweep
+	driverIndexRebuild = "index_rebuild" // one txhash index build; cold includes its eager sweep
 	driverChunkTotal   = "chunk_total"   // cold: per-chunk ColdService lifetime
 	driverTotalSuffix  = "_total"        // cold: "<type>_total", per-chunk ingester total
 	driverColdExtract  = "cold_extract"  // cold: the per-ledger ExtractLedgerTxParts walk, shared by all types
@@ -217,8 +217,7 @@ func (*csvSink) BackfillPlanned(int) {}
 
 func (*csvSink) BackfillCompleted(int) {}
 
-// Rebuild records one txhash index build's wall-clock (including its eager
-// post-build sweep).
+// Rebuild records one txhash index build's wall-clock.
 func (s *csvSink) Rebuild(d time.Duration) {
 	s.observe(fileDriver, driverIndexRebuild, d, 0)
 }
