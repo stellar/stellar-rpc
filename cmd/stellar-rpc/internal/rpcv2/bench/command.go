@@ -19,6 +19,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // NewCommand returns the `bench` root command for benchmarking ingestion and reads.
@@ -278,6 +279,7 @@ func newHotCommand() *cobra.Command {
 		hotDir        string
 		closeInterval time.Duration
 		trace         bool
+		txindex       hotTxindexOptions
 		prof          profileFlags
 	)
 	opts := func() hotOptions {
@@ -289,6 +291,7 @@ func newHotCommand() *cobra.Command {
 			HotRoot:       hotDir,
 			CloseInterval: closeInterval,
 			Trace:         trace,
+			Txindex:       txindex,
 		}
 	}
 	cmd := newBenchCommand("hot",
@@ -316,6 +319,15 @@ func newHotCommand() *cobra.Command {
 		"assumed time between ledger closes; >0 paces ingestion to that steady-state cadence "+
 			"and reports pace_lag (0 = ingest back-to-back, catch-up throughput)")
 	fs.BoolVar(&trace, "trace", false, "also write "+traceFile+": one row per ingested ledger with every phase's duration")
+	fs.StringVar(&txindex.BinDir, "txindex-bin-dir", "",
+		"dir of a window's <chunkID:08d>.bin files; when set, the run rebuilds the window's index from them "+
+			"back to back beside the ingest loop and writes "+txindexFile)
+	fs.IntVar(&txindex.NumBins, "txindex-bins", 0, "cap on the .bin files the builds take, in chunk order (0 = all)")
+	fs.IntVar(&txindex.Workers, "txindex-workers", txhash.DefaultBuildWorkers(), "workers of each index build")
+	fs.BoolVar(&txindex.Yield, "txindex-yield", true,
+		"the index builds wait before each block while the ingest loop holds its gate, as the daemon's do")
+	fs.StringVar(&txindex.IndexOut, "txindex-out", "",
+		".idx output path, overwritten by each build (required with --txindex-bin-dir)")
 	markRequired(cmd, "start-chunk", "hot-dir")
 	return cmd
 }
