@@ -161,7 +161,16 @@ type Store struct {
 	// snapRefs counts snapshots not yet returned to ReleaseSnapshot; teardown
 	// logs a leak when it closes with snapRefs > 0.
 	snapRefs atomic.Int64
+
+	// stats records that RocksDB statistics are being collected (see
+	// statsEnv); Close dumps them to STATISTICS.txt in the DB dir.
+	stats bool
 }
+
+// statsEnv, set to 1, makes every store collect RocksDB statistics and dump
+// them at Close: a diagnostic for benchmarks, deliberately not a Tuning field
+// so no deployment config can turn it on. It costs a few percent of writes.
+const statsEnv = "STELLAR_RPC_ROCKSDB_STATS"
 
 // New validates cfg and returns a fully-open Store. On any failure
 // no Store is returned and every C resource allocated as a side
@@ -548,6 +557,12 @@ func (s *Store) teardownLocked() {
 	if n := s.snapRefs.Load(); n > 0 {
 		s.cfg.Logger.Warnf("rocksdb: closing %s with %d unreleased snapshot(s)", s.cfg.Path, n)
 	}
+	if s.stats {
+		path := filepath.Join(s.cfg.Path, "STATISTICS.txt")
+		if err := os.WriteFile(path, []byte(s.opts.GetStatisticsString()), 0o600); err != nil {
+			s.cfg.Logger.WithError(err).Warnf("rocksdb: writing %s", path)
+		}
+	}
 
 	for _, cfh := range s.cfHandles {
 		cfh.Destroy()
@@ -717,6 +732,10 @@ func (s *Store) constructAndOpen() error {
 	if !s.cfg.ReadOnly && !s.cfg.MustExist {
 		opts.SetCreateIfMissing(true)
 		opts.SetCreateIfMissingColumnFamilies(true)
+	}
+	if os.Getenv(statsEnv) == "1" {
+		opts.EnableStatistics()
+		s.stats = true
 	}
 
 	cfOpts := make([]*grocksdb.Options, len(cfNames))
