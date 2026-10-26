@@ -271,6 +271,16 @@ func (d *DB) Source() ledgerbackend.LedgerStream {
 	return &hotLedgerStream{store: d.ledger}
 }
 
+// FreezeEventsCold builds the chunk's cold events artifacts in dirs from the
+// shared store, with no ledger stream: see event.FreezeColdFromStore. It
+// returns how many events it wrote. The chunk must be complete, and the
+// DB may be open read-only.
+func (d *DB) FreezeEventsCold(
+	ctx context.Context, dirs event.ColdDirs, secret [stores.SecretLen]byte, opts event.ColdWriterOptions,
+) (uint32, error) {
+	return event.FreezeColdFromStore(ctx, d.chunkID, d.store, dirs, secret, opts)
+}
+
 // Close releases the shared store exactly once. Idempotent, and safe against
 // in-flight reads/writes: the store drains them under its lock before freeing,
 // and any operation arriving after gets ErrStoreClosed.

@@ -42,16 +42,19 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // postings with bounded memory. One slab of postings is in memory; when the
 // next slab starts or the buffer fills, it is written as a run under the
 // scratch directory in the background while the next fills, and Write
-// merges the runs. Both cold backfill and the live-chunk freeze feed it
-// single-threaded, re-deriving terms from raw LCMs with TermsForBytes. The
+// merges the runs. Cold backfill feeds it
+// every event's terms, derived from raw LCMs with TermsForBytes; the
+// live-chunk freeze feeds it the hot index's sealed slabs as they are
+// (AddSlab) and derives terms only for the events after them. The
 // directory is the chunk's, so one builder works on a chunk at a time,
 // which the backfill plan guarantees: it builds a chunk once per pass.
 type ColdIndexBuilder struct {
-	chunkID chunk.ID
-	dir     string
-	secret  [stores.SecretLen]byte
-	runs    coldRuns
-	live    *hotSlab
+	chunkID      chunk.ID
+	dir          string
+	secret       [stores.SecretLen]byte
+	bytesPerSync int
+	runs         coldRuns
+	live         *hotSlab
 	// spare is the slab being spilled, or the free one once that is over;
 	// spilling yields the outcome of the spill in flight, at most one.
 	spare    *hotSlab
@@ -64,14 +67,19 @@ type ColdIndexBuilder struct {
 
 // NewColdIndexBuilder returns a builder that writes chunkID's index into
 // dirs.Index, which must exist, with its runs under dirs.Scratch. secret is
-// the chunk's deterministic routing secret (ColdIndexSecret).
-func NewColdIndexBuilder(chunkID chunk.ID, dirs ColdDirs, secret [stores.SecretLen]byte) *ColdIndexBuilder {
+// the chunk's deterministic routing secret (ColdIndexSecret). bytesPerSync
+// is index.pack's writeback cadence, as ColdWriterOptions.BytesPerSync is
+// events.pack's.
+func NewColdIndexBuilder(
+	chunkID chunk.ID, dirs ColdDirs, secret [stores.SecretLen]byte, bytesPerSync int,
+) *ColdIndexBuilder {
 	return &ColdIndexBuilder{
-		chunkID: chunkID,
-		dir:     dirs.Index,
-		secret:  secret,
-		runs:    coldRuns{dir: filepath.Join(dirs.Scratch, IndexRunsDirName(chunkID))},
-		live:    newHotSlab(0),
+		chunkID:      chunkID,
+		dir:          dirs.Index,
+		secret:       secret,
+		bytesPerSync: bytesPerSync,
+		runs:         coldRuns{dir: filepath.Join(dirs.Scratch, IndexRunsDirName(chunkID))},
+		live:         newHotSlab(0),
 	}
 }
 
@@ -160,6 +168,34 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 	return b.writePack(m, termsPath, slabs, filepath.Join(b.dir, IndexPackName(b.chunkID)))
 }
 
+// AddSlab adds a full slab whose terms are already in key order, each with
+// its serialized bitmap: the form a sealed hot slab holds them in (see
+// hotIndex.seal), which is also the form a spilled slab takes, so the slab
+// becomes the next run as it is. Slabs must be added in slab order before
+// any Add. A slab with no terms is an error: a full slab has an event, and
+// every event has terms.
+func (b *ColdIndexBuilder) AddSlab(slab uint32, terms iter.Seq2[TermKey, []byte]) error {
+	if b.written {
+		return errors.New("events: index already written")
+	}
+	if b.live.n > 0 || slab < b.live.slab {
+		return fmt.Errorf("events: index slab %d added after slab %d", slab, b.live.slab)
+	}
+	if err := b.awaitSpill(); err != nil {
+		return err
+	}
+	n, err := b.runs.spill(slab, terms)
+	if err != nil {
+		return fmt.Errorf("events: spill index slab %d: %w", slab, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("events: index slab %d has no terms", slab)
+	}
+	b.live.reset(slab + 1)
+	b.maxID, b.any = slab<<indexSlabShift|(hotSlabEvents-1), true
+	return nil
+}
+
 // spill starts writing the postings in memory, if any, as the next run and
 // empties a slab for slab. The spill before it is over first, so the runs
 // keep their order.
@@ -180,7 +216,7 @@ func (b *ColdIndexBuilder) spill(slab uint32) error {
 	done := make(chan error, 1)
 	b.spilling = done
 	go func() {
-		if err := b.runs.spill(full.slab, full.terms()); err != nil {
+		if _, err := b.runs.spill(full.slab, full.terms()); err != nil {
 			done <- fmt.Errorf("events: spill index slab %d: %w", full.slab, err)
 		}
 		close(done)
@@ -200,7 +236,9 @@ func (b *ColdIndexBuilder) awaitSpill() error {
 
 // writePack writes every term of the terms file at the slot m gives it.
 func (b *ColdIndexBuilder) writePack(m *mphf, termsPath string, slabs uint32, path string) (err error) {
-	pw, err := packfile.Create(path, indexPackWriterOptions())
+	opts := indexPackWriterOptions()
+	opts.BytesPerSync = b.bytesPerSync
+	pw, err := packfile.Create(path, opts)
 	if err != nil {
 		return fmt.Errorf("events: create index.pack at %s: %w", path, err)
 	}

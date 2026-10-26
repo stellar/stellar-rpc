@@ -25,36 +25,38 @@ type coldRuns struct {
 }
 
 // spill writes slab's terms, in key order with their serialized bitmaps, as
-// the next run.
-func (r *coldRuns) spill(slab uint32, terms iter.Seq2[TermKey, []byte]) error {
+// the next run, and returns how many it wrote.
+func (r *coldRuns) spill(slab uint32, terms iter.Seq2[TermKey, []byte]) (int, error) {
 	if len(r.paths) == 0 {
 		if err := os.MkdirAll(r.dir, 0o755); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	path := filepath.Join(r.dir, fmt.Sprintf("%05d", len(r.paths)))
 	f, err := os.Create(path)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	err = writeRun(f, terms)
+	n, err := writeRun(f, terms)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
-		return err
+		return 0, err
 	}
 	r.paths = append(r.paths, path)
 	r.slabs = append(r.slabs, slab)
-	return nil
+	return n, nil
 }
 
-func writeRun(f *os.File, terms iter.Seq2[TermKey, []byte]) error {
+func writeRun(f *os.File, terms iter.Seq2[TermKey, []byte]) (int, error) {
 	w := bufio.NewWriterSize(f, 1<<16)
+	n := 0
 	for key, bitmap := range terms {
 		writeEntry(w, key, bitmap)
+		n++
 	}
-	return w.Flush()
+	return n, w.Flush()
 }
 
 // writeEntry writes key || uvarint(len(value)) || value. A bufio.Writer
