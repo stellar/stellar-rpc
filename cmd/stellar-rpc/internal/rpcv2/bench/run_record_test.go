@@ -76,6 +76,10 @@ func TestCommandRejectsBadFlagsBeforeOut(t *testing.T) {
 			"--hot-dir", t.TempDir(),
 		}, "--source=bogus"},
 		{"hot missing required flags", []string{"hot"}, `required flag(s) "hot-dir", "start-chunk" not set`},
+		{"hot txindex without its output", []string{
+			"hot", "--start-chunk", "0", "--hot-dir", t.TempDir(), "--pack-dir", t.TempDir(),
+			"--txindex-bin-dir", t.TempDir(),
+		}, "--txindex-out is required"},
 		{"cold non-empty dataset dir", []string{
 			"cold", "--start-chunk", "0", "--cold-out-dir", nonEmptyDir(t), "--pack-dir", t.TempDir(),
 		}, "--cold-out-dir"},
