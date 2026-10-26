@@ -76,7 +76,7 @@ func refineWithHotDB(cat *catalog.Catalog, live int64) (uint32, error) {
 	// read-only open through the single ready-open enforcement site: must-exist,
 	// never auto-healed, uniform won't-open error.
 	hot, openErr := hotchunk.OpenReadyView(
-		geometry.HotReady, cat.Layout().HotChunkPath(id), id, cat.Secret(), cat.Logger())
+		geometry.HotReady, cat.Layout().HotChunkPath(id), id, cat, cat.Logger())
 	if openErr != nil {
 		return 0, openErr
 	}
