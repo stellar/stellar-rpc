@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/writeback"
 )
 
 // coldRuns are a chunk's postings spilled one slab at a time. Run i holds
@@ -22,9 +24,11 @@ import (
 // runs are appended to one file, runGap apart, so the merge holds one file
 // open however many runs a chunk spills.
 type coldRuns struct {
-	dir   string
-	f     *os.File // the runs, one after another; nil before the first spill
-	spans []runSpan
+	dir          string
+	bytesPerSync int               // writeback cadence of the runs file
+	f            *os.File          // the runs, one after another; nil before the first spill
+	w            *writeback.Writer // appends to f
+	spans        []runSpan
 }
 
 // runSpan is where a run sits in the runs file, and its slab.
@@ -51,15 +55,15 @@ func (r *coldRuns) spill(slab uint32, terms iter.Seq2[TermKey, []byte]) error {
 		if err != nil {
 			return err
 		}
-		r.f = f
-	} else if _, err := r.f.Seek(runGap, io.SeekCurrent); err != nil {
+		r.f, r.w = f, writeback.NewWriter(f, r.bytesPerSync)
+	} else if err := r.w.Skip(runGap); err != nil {
 		return err
 	}
 	off, err := r.f.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return err
 	}
-	if err := writeRun(r.f, terms); err != nil {
+	if err := writeRun(r.w, terms); err != nil {
 		return err
 	}
 	end, err := r.f.Seek(0, io.SeekCurrent)
@@ -70,13 +74,13 @@ func (r *coldRuns) spill(slab uint32, terms iter.Seq2[TermKey, []byte]) error {
 	return nil
 }
 
-func writeRun(f *os.File, terms iter.Seq2[TermKey, []byte]) error {
-	w := bufio.NewWriterSize(f, 1<<16)
+func writeRun(w io.Writer, terms iter.Seq2[TermKey, []byte]) error {
+	bw := bufio.NewWriterSize(w, 1<<16)
 	for key, bitmap := range terms {
-		writeHead(w, &key, len(bitmap))
-		_, _ = w.Write(bitmap)
+		writeHead(bw, &key, len(bitmap))
+		_, _ = bw.Write(bitmap)
 	}
-	return w.Flush()
+	return bw.Flush()
 }
 
 // writeHead writes the head of an entry, key || uvarint(n), n being the
@@ -103,7 +107,7 @@ func (r *coldRuns) removeRuns() error {
 	}
 	_ = r.f.Close()
 	err := os.Remove(r.f.Name())
-	r.f, r.spans = nil, nil
+	r.f, r.w, r.spans = nil, nil, nil
 	return err
 }
 
