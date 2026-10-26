@@ -12,9 +12,8 @@ import (
 )
 
 // HotService commits one ledger to the shared per-chunk hot DB as ONE atomic
-// synced WriteBatch across all hot CFs (decision (a)) and emits the single hot
-// signal family: one HotPhase per hotchunk.Phase. No fan-out — the three types are
-// CFs of one RocksDB committing in one WriteBatch (hotchunk.DB.IngestLedger).
+// synced WriteBatch (decision (a)) and emits the single hot signal family: one
+// HotPhase per hotchunk.Phase.
 //
 // It also owns the ONE ExtractLedgerTxParts walk of the live path: the walk
 // output feeds both the storage write (hotchunk takes the parts) and the fee

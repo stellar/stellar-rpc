@@ -14,7 +14,7 @@
 //     caller-owned per-chunk hot DB, driven by the daemon's live
 //     ingestion loop. The DB is INJECTED and never opened or closed
 //     here. Each ledger is written as ONE atomic synced WriteBatch
-//     across all column families (decision (a) — no per-type fan-out),
+//     (decision (a) — no per-type fan-out),
 //     so a ledger is fully present or absent before the next is pulled.
 //   - Cold (WriteColdChunk): one chunk into per-chunk cold artifacts
 //     (ledger .pack, txhash .bin, events pack+index). It is

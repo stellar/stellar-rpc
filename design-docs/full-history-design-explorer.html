@@ -501,7 +501,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <p>
     One RocksDB per chunk at <code>hot/{chunk:08d}/</code>, holding everything for that chunk not yet
     materialized to cold artifacts. The data types are column families of one instance — they share the
-    instance's WAL, so each ledger commits as <b>one atomic WriteBatch across all CFs</b>.
+    instance's WAL, so each ledger commits as <b>one atomic WriteBatch</b>.
   </p>
   <table class="t">
     <tr><th>Column family</th><th>Holds</th><th>Serves</th></tr>
@@ -1466,7 +1466,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
   };
   const STEPS = [
     { a:"ingestion", t:"Final batch commits",
-      d:"Seq 53,510,001 lands as one atomic synced WriteBatch across all CFs of hot/00005350 — a ledger is either fully in the hot DB or absent. The batch is the durability boundary; the loop keeps no progress variable at all.",
+      d:"Seq 53,510,001 lands as one atomic synced WriteBatch in hot/00005350 — a ledger is either fully in the hot DB or absent. The batch is the durability boundary; the loop keeps no progress variable at all.",
       f:s => { s.files[0].note = "complete: all 10,000 ledgers durable"; mark(s, "f", 0); } },
     { a:"ingestion", t:"hotDB.Close()",
       d:"Chunk 5350's write handle is released before anything announces completion. Load-bearing: the next chunk's hot key is what makes 5350 visibly complete to the lifecycle's derivation, and no writer may hold the DB once a run can claim it — otherwise a run still in flight from the previous notification could rmdir a dir whose writer is live.",

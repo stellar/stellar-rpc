@@ -10,7 +10,7 @@ package rpcv2
 //       lock), the stateful validateConfig gate (pins the floor), and the
 //       daemon body.
 //     - run → backfillToTip → openHotDBForChunk → runIngestionLoop (the real
-//       atomic per-ledger WriteBatch across all CFs of the real per-chunk
+//       atomic per-ledger WriteBatch into the real per-chunk
 //       hotchunk RocksDB), the real boundary handoff, the real boundary signal.
 //     - lifecycle.Loop / runLifecycle: the real resolve + executePlan
 //       freeze (cold artifacts derived FROM the live hot DB), the real txhash
@@ -437,7 +437,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	// writer closed (the same transient a production reader retries through).
 	var liveDB *hotchunk.DB
 	require.Eventually(t, func() bool {
-		db, oerr := hotchunk.Open(postCat.Layout().HotChunkPath(c2), c2, postCat.Secret(), silentLogger())
+		db, oerr := hotchunk.Open(postCat.Layout().HotChunkPath(c2), c2, postCat, silentLogger())
 		if oerr != nil {
 			return false
 		}

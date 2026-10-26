@@ -22,7 +22,7 @@ import (
 
 // The hot-DB ingestion loop (decision (a)). One goroutine consumes a single
 // sequence-validated ledger stream into the per-chunk shared multi-CF hot DB,
-// committing each ledger as one atomic synced WriteBatch across all CFs. It keeps
+// committing each ledger as one atomic synced WriteBatch. It keeps
 // NO progress variable — the last synced batch IS the last-committed ledger,
 // re-derived at startup. Its only couplings to the lifecycle are the boundary
 // signal, published at each boundary, and the gate the lifecycle's index
@@ -50,7 +50,7 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 
 	if state == geometry.HotReady {
 		// OpenReadyWrite is the single ready-open enforcement site.
-		return hotchunk.OpenReadyWrite(state, dir, chunkID, cat.Secret(), logger)
+		return hotchunk.OpenReadyWrite(state, dir, chunkID, cat, logger)
 	}
 
 	// The create bracket: BeginHotCreate wipes + marks transient; FinishHotCreate
@@ -58,7 +58,7 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 	if beginErr := cat.BeginHotCreate(chunkID); beginErr != nil {
 		return nil, beginErr
 	}
-	db, openErr := hotchunk.Open(dir, chunkID, cat.Secret(), logger)
+	db, openErr := hotchunk.Open(dir, chunkID, cat, logger)
 	if openErr != nil {
 		return nil, fmt.Errorf("create hot DB chunk %s: %w", chunkID, openErr)
 	}
@@ -189,7 +189,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		}
 		cfg.Gate.Hold()
 
-		// One atomic synced WriteBatch across all hot CFs (via hotDB.IngestLedger).
+		// One atomic synced WriteBatch (via hotDB.IngestLedger).
 		view := xdr.LedgerCloseMetaView(raw)
 		start := time.Now()
 		closeUnix, ierr := hotService.Ingest(seq, view)
