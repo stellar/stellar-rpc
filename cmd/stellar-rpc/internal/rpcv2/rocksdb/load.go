@@ -39,13 +39,25 @@ func (s *Store) removeUnfinishedLoads(dir string) {
 // their buffers. The store's lifecycle lock is held throughout, so Close
 // waits for the load and entries must not call back into the store.
 func (s *Store) LoadSorted(cf string, entries iter.Seq2[[]byte, []byte]) error {
+	return s.load(cf, entries, true)
+}
+
+// LoadSortedOverlapping is LoadSorted for entries whose keys may overlap the
+// keys cf already holds. The file then lands in level 0 above the files it
+// overlaps, and a key both hold reads as this file's value. cf must not
+// compact, and its level 0 write triggers must allow every file loaded.
+func (s *Store) LoadSortedOverlapping(cf string, entries iter.Seq2[[]byte, []byte]) error {
+	return s.load(cf, entries, false)
+}
+
+func (s *Store) load(cf string, entries iter.Seq2[[]byte, []byte], bottommost bool) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if err := s.checkOpen(); err != nil {
 		return err
 	}
 	if s.cfg.ReadOnly {
-		return errors.New("rocksdb: LoadSorted on a read-only store")
+		return errors.New("rocksdb: load into a read-only store")
 	}
 	if cf == "" {
 		cf = defaultCFName
@@ -54,13 +66,15 @@ func (s *Store) LoadSorted(cf string, entries iter.Seq2[[]byte, []byte]) error {
 	if err != nil {
 		return err
 	}
-	if err := s.loadSorted(cf, cfh, entries); err != nil {
+	if err := s.loadSorted(cf, cfh, entries, bottommost); err != nil {
 		return fmt.Errorf("rocksdb: load sorted entries into %q: %w", cf, err)
 	}
 	return nil
 }
 
-func (s *Store) loadSorted(cf string, cfh *grocksdb.ColumnFamilyHandle, entries iter.Seq2[[]byte, []byte]) error {
+func (s *Store) loadSorted(
+	cf string, cfh *grocksdb.ColumnFamilyHandle, entries iter.Seq2[[]byte, []byte], bottommost bool,
+) error {
 	dir := filepath.Join(s.cfg.Path, loadDirName)
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return err
@@ -97,6 +111,6 @@ func (s *Store) loadSorted(cf string, cfh *grocksdb.ColumnFamilyHandle, entries 
 	opts := grocksdb.NewDefaultIngestExternalFileOptions()
 	defer opts.Destroy()
 	opts.SetMoveFiles(true)
-	opts.SetFailIfNotBottommostLevel(true)
+	opts.SetFailIfNotBottommostLevel(bottommost)
 	return s.db.IngestExternalFileCF(cfh, []string{path}, opts)
 }
