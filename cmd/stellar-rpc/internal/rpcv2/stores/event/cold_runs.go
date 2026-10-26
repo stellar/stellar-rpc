@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/writeback"
 )
 
 // coldRuns are a chunk's postings spilled one slab at a time. Run i holds
@@ -21,9 +23,11 @@ import (
 // runs are appended to one file, runGap apart, so the merge holds one file
 // open however many runs a chunk spills.
 type coldRuns struct {
-	dir   string
-	f     *os.File // the runs, one after another; nil before the first spill
-	spans []runSpan
+	dir          string
+	bytesPerSync int               // writeback cadence of the runs file
+	f            *os.File          // the runs, one after another; nil before the first spill
+	w            *writeback.Writer // appends to f
+	spans        []runSpan
 }
 
 // runSpan is where a run sits in the runs file, and its slab.
@@ -49,15 +53,15 @@ func (r *coldRuns) spill(slab uint32, terms iter.Seq2[TermKey, []byte]) (int, er
 		if err != nil {
 			return 0, err
 		}
-		r.f = f
-	} else if _, err := r.f.Seek(runGap, io.SeekCurrent); err != nil {
+		r.f, r.w = f, writeback.NewWriter(f, r.bytesPerSync)
+	} else if err := r.w.Skip(runGap); err != nil {
 		return 0, err
 	}
 	off, err := r.f.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return 0, err
 	}
-	n, err := writeRun(r.f, terms)
+	n, err := writeRun(r.w, terms)
 	if err != nil {
 		return 0, err
 	}
@@ -69,14 +73,14 @@ func (r *coldRuns) spill(slab uint32, terms iter.Seq2[TermKey, []byte]) (int, er
 	return n, nil
 }
 
-func writeRun(f *os.File, terms iter.Seq2[TermKey, []byte]) (int, error) {
-	w := bufio.NewWriterSize(f, 1<<16)
+func writeRun(w io.Writer, terms iter.Seq2[TermKey, []byte]) (int, error) {
+	bw := bufio.NewWriterSize(w, 1<<16)
 	n := 0
 	for key, bitmap := range terms {
-		writeEntry(w, key, bitmap)
+		writeEntry(bw, key, bitmap)
 		n++
 	}
-	return n, w.Flush()
+	return n, bw.Flush()
 }
 
 // writeEntry writes key || uvarint(len(value)) || value. A bufio.Writer
@@ -95,7 +99,7 @@ func (r *coldRuns) removeRuns() error {
 	}
 	_ = r.f.Close()
 	err := os.Remove(r.f.Name())
-	r.f, r.spans = nil, nil
+	r.f, r.w, r.spans = nil, nil, nil
 	return err
 }
 
@@ -104,7 +108,7 @@ func (r *coldRuns) remove() error {
 	if r.f != nil {
 		_ = r.f.Close()
 	}
-	r.f, r.spans = nil, nil
+	r.f, r.w, r.spans = nil, nil, nil
 	return os.RemoveAll(r.dir)
 }
 
