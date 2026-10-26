@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -389,10 +390,9 @@ func TestTxReader_ExactSourceUnavailableLedgerErrors(t *testing.T) {
 func TestTxReader_HotAndColdFederation(t *testing.T) {
 	hotSeq := chunk.ID(10).FirstLedger()
 	flHot := buildLedgers(t, []uint32{hotSeq}, 1)
-	hotStore := openTestHotStore(t)
-	for h, seq := range flHot.byHash {
-		require.NoError(t, addEntries(hotStore, []Entry{{Hash: h, LedgerSeq: seq}}))
-	}
+	hotStore, err := Open(openTestRocks(t, t.TempDir()), chunk.ID(10), hotSecret)
+	require.NoError(t, err)
+	require.NoError(t, commit(t, hotStore, hotSeq, slices.Collect(maps.Keys(flHot.byHash))))
 
 	coldSeq := chunk.ID(5).FirstLedger()
 	flCold := buildLedgers(t, []uint32{coldSeq}, 1)
