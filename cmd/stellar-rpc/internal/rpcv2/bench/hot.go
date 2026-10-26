@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"path/filepath"
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
@@ -50,6 +51,9 @@ type hotOptions struct {
 
 	// OutDir receives the CSV report.
 	OutDir string
+
+	// Trace writes a per-ledger trace to OutDir/trace.csv.
+	Trace bool
 }
 
 // validate checks the flags and chunk range before runHot touches the
@@ -119,6 +123,17 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	sink := newCSVSink()
 	stream, schedule := buildHotStream(backend, first, last, opts.CloseInterval)
 	sink.schedule = schedule
+	if opts.Trace {
+		if sink.trace, err = newHotTrace(filepath.Join(opts.OutDir, traceFile)); err != nil {
+			return err
+		}
+		// A failed run keeps the rows of the ledgers it committed.
+		defer func() {
+			if cerr := sink.trace.close(); cerr != nil {
+				logger.Warnf("--trace: %v", cerr)
+			}
+		}()
+	}
 
 	start := time.Now()
 	err = rpcv2.RunBoundedIngestionLoop(ctx, rpcv2.BoundedIngestConfig{
