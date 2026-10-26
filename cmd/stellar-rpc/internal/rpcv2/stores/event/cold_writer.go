@@ -124,6 +124,13 @@ func (w *ColdWriter) Append(p Payload) error {
 	return w.pw.AppendItem(b)
 }
 
+// AppendMarshaled writes a payload already in the wire format Append
+// produces, as a hot store holds it, unchanged. The eventID-order contract
+// is Append's.
+func (w *ColdWriter) AppendMarshaled(b []byte) error {
+	return w.pw.AppendItem(b)
+}
+
 // Finish serializes offsets as packfile app data and finalizes
 // events.pack. After Finish returns nil, the file is fsync'd and
 // safe to fence with an atomic durability flag.
