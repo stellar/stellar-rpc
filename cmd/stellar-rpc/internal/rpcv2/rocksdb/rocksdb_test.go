@@ -446,6 +446,40 @@ func TestStore_Iterate_SortedPrefixScan(t *testing.T) {
 	}, got)
 }
 
+func TestStore_IterateUncached_LeavesBlockCacheAlone(t *testing.T) {
+	s, err := New(Config{Path: t.TempDir(), Logger: silentLogger(), Tuning: Tuning{BlockCacheMB: 4}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	value := bytes.Repeat([]byte{0xAB}, 1024)
+	require.NoError(t, s.Batch(func(b *BatchWriter) error {
+		for i := range uint32(1000) {
+			b.Put(defaultCFName, EncodeUint32(i), value)
+		}
+		return nil
+	}))
+	require.NoError(t, s.Flush())
+
+	count := func(cached bool) int {
+		scan := s.IterateUncached
+		if cached {
+			scan = s.Iterate
+		}
+		n := 0
+		for e, err := range scan(defaultCFName, nil) {
+			require.NoError(t, err)
+			require.Equal(t, value, e.Value)
+			n++
+		}
+		return n
+	}
+	before := s.cache.GetUsage()
+	assert.Equal(t, 1000, count(false))
+	assert.Equal(t, before, s.cache.GetUsage(), "an uncached scan must not fill the block cache")
+	assert.Equal(t, 1000, count(true))
+	assert.Greater(t, s.cache.GetUsage(), before, "a cached scan fills it, so the check above can fail")
+}
+
 func TestStore_DataPersistsAcrossNewOnSamePath(t *testing.T) {
 	dir := t.TempDir()
 
