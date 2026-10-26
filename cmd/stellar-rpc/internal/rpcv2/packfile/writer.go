@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/intpack"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/writeback"
 )
 
 // recordCRCLen is the width of the CRC32C at the tail of a record.
@@ -527,7 +528,7 @@ func (w *Writer) writeRecord(data []byte) error {
 		return w.recordErr(err)
 	}
 	if w.bytesPerSync > 0 && w.pos-w.lastSyncPos >= w.bytesPerSync {
-		initiateWriteback(w.file, w.lastSyncPos, w.pos-w.lastSyncPos)
+		writeback.Start(w.file, w.lastSyncPos, w.pos-w.lastSyncPos)
 		w.lastSyncPos = w.pos
 	}
 	return nil
