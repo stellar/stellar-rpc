@@ -27,6 +27,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/writeback"
 )
 
 // coldRoutingDomain is the DeriveIndexSecret domain for events cold indexes
@@ -50,11 +51,12 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // a chunk at a time, which the backfill plan guarantees: it builds a chunk
 // once per pass.
 type ColdIndexBuilder struct {
-	chunkID chunk.ID
-	dir     string
-	secret  [stores.SecretLen]byte
-	runs    coldRuns
-	live    *hotSlab
+	chunkID      chunk.ID
+	dir          string
+	secret       [stores.SecretLen]byte
+	bytesPerSync int
+	runs         coldRuns
+	live         *hotSlab
 	// spare is the slab being spilled, or a free one once that spill is over.
 	spare   *hotSlab
 	spiller stores.Sealer // runs one spill at a time, in the background
@@ -63,15 +65,20 @@ type ColdIndexBuilder struct {
 
 // NewColdIndexBuilder returns a builder that writes chunkID's index into
 // dirs.Index, which must exist, with its runs under dirs.Scratch. secret is
-// the chunk's deterministic routing secret (ColdIndexSecret).
-func NewColdIndexBuilder(chunkID chunk.ID, dirs ColdDirs, secret [stores.SecretLen]byte) *ColdIndexBuilder {
+// the chunk's deterministic routing secret (ColdIndexSecret). bytesPerSync
+// is index.pack's writeback cadence, as ColdWriterOptions.BytesPerSync is
+// events.pack's.
+func NewColdIndexBuilder(
+	chunkID chunk.ID, dirs ColdDirs, secret [stores.SecretLen]byte, bytesPerSync int,
+) *ColdIndexBuilder {
 	return &ColdIndexBuilder{
-		chunkID: chunkID,
-		dir:     dirs.Index,
-		secret:  secret,
-		runs:    coldRuns{dir: filepath.Join(dirs.Scratch, IndexRunsDirName(chunkID))},
-		live:    newHotSlab(0),
-		spiller: stores.NewSealer(),
+		chunkID:      chunkID,
+		dir:          dirs.Index,
+		secret:       secret,
+		bytesPerSync: bytesPerSync,
+		runs:         coldRuns{dir: filepath.Join(dirs.Scratch, IndexRunsDirName(chunkID)), bytesPerSync: bytesPerSync},
+		live:         newHotSlab(0),
+		spiller:      stores.NewSealer(),
 	}
 }
 
@@ -136,7 +143,7 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 	b.live, b.spare = nil, nil // the slabs are all in the runs now
 	slabs := b.runs.slabs()
 	termsPath := filepath.Join(b.runs.dir, "terms")
-	terms, err := writeTerms(ctx, termsPath, b.runs.merge(), slabs)
+	terms, err := writeTerms(ctx, termsPath, b.runs.merge(), slabs, b.bytesPerSync)
 	if err != nil {
 		return fmt.Errorf("events: merge index runs: %w", err)
 	}
@@ -190,7 +197,9 @@ func (b *ColdIndexBuilder) spill() error {
 func (b *ColdIndexBuilder) writePack(
 	ctx context.Context, m *mphf, termsPath string, slabs uint32, path string,
 ) (err error) {
-	pw, err := packfile.Create(path, indexPackWriterOptions())
+	opts := indexPackWriterOptions()
+	opts.BytesPerSync = b.bytesPerSync
+	pw, err := packfile.Create(path, opts)
 	if err != nil {
 		return fmt.Errorf("events: create index.pack at %s: %w", path, err)
 	}
@@ -238,7 +247,7 @@ const termsFileBufferBytes = 1 << 20
 // writeTerms writes terms to path, each as key || uvarint(len) || its tagged
 // index.pack entries, and returns how many it wrote.
 func writeTerms(
-	ctx context.Context, path string, terms iter.Seq2[runTerm, error], slabs uint32,
+	ctx context.Context, path string, terms iter.Seq2[runTerm, error], slabs uint32, bytesPerSync int,
 ) (_ uint64, err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return 0, err
@@ -252,7 +261,7 @@ func writeTerms(
 			err = cerr
 		}
 	}()
-	w := bufio.NewWriterSize(f, termsFileBufferBytes)
+	w := bufio.NewWriterSize(writeback.NewWriter(f, bytesPerSync), termsFileBufferBytes)
 	var (
 		enc termEncoder
 		n   uint64
