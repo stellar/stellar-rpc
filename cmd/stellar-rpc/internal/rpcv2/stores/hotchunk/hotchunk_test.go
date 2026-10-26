@@ -115,6 +115,8 @@ func TestConfig_DBWideTuningStaysShared(t *testing.T) {
 	assert.Equal(t, 1024, tuning.MaxTotalWalSizeMB)
 	assert.Equal(t, 8, tuning.MaxBackgroundJobs)
 	assert.Equal(t, 10_000, tuning.MaxOpenFiles)
+	assert.Equal(t, 1, tuning.BytesPerSyncMB)
+	assert.Equal(t, 1, tuning.WALBytesPerSyncMB)
 }
 
 func TestOpen_ValidatesInputs(t *testing.T) {

@@ -86,4 +86,13 @@ type Tuning struct {
 	// replay scales with this cap; graceful Close drains the
 	// memtable so this only bounds ungraceful shutdowns.
 	MaxTotalWalSizeMB int
+
+	// BytesPerSyncMB starts writeback of flush and compaction output
+	// every this many MB as it is written, so its dirty pages never
+	// pile up in front of a WAL fsync.
+	BytesPerSyncMB int
+
+	// WALBytesPerSyncMB does the same for the WAL, which helps only a commit
+	// larger than 1 MiB: RocksDB never range-syncs a file's last 1 MiB.
+	WALBytesPerSyncMB int
 }
