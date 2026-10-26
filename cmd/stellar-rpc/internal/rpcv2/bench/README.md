@@ -68,7 +68,7 @@ sum of the items in the samples. The bench drops samples of 0 ns, except in
 |---|---|
 | `ledgers.csv`, `txhash.csv`, `events.csv` | Cold: one row for each freeze stage of the data type (`term_index`, `write`, `finalize`) |
 | `hot.csv` | Hot: one row for each phase of one ledger (`extract`, `ledgers`, `txhash`, `events`, `commit`, `apply`) |
-| `driver.csv` | Cold: `backfill_wall`, `index_rebuild`, `chunk_total`, `<type>_total`, `cold_extract`. Hot: `ingest_total` (sum of the phases of one ledger), `run_wall`, `pace_lag` |
+| `driver.csv` | Cold: `backfill_wall`, `index_rebuild`, `chunk_total`, `<type>_total`, `cold_extract`. Hot: `ingest_total` (sum of the phases of one ledger), `run_wall`, `pace_lag`, and `index_rebuild` with `--txindex-bin-dir` |
 
 The row labels in `csvsink.go` say what each `driver.csv` row times.
 

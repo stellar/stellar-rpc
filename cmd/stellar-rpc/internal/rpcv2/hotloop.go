@@ -275,6 +275,7 @@ type BoundedIngestConfig struct {
 	Logger   *supportlog.Entry
 	Metrics  observability.Metrics
 	Sink     ingest.MetricSink
+	Gate     *ingest.Gate
 }
 
 // RunBoundedIngestionLoop runs the ingestion loop over a bounded stream: it
@@ -297,6 +298,7 @@ func RunBoundedIngestionLoop(ctx context.Context, cfg BoundedIngestConfig) error
 		Metrics:  cfg.Metrics,
 		Sink:     cfg.Sink,
 		Registry: &closingSink{},
+		Gate:     cfg.Gate,
 	})
 	if errors.Is(err, errStreamEnded) {
 		return nil
