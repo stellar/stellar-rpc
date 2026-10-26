@@ -12,8 +12,12 @@ import (
 
 // newColdPackEncoder constructs a fresh zstd encoder for one
 // packfile writer goroutine. packfile.RecordEncoder is not safe for
-// concurrent use, so the writer invokes this per worker.
-func newColdPackEncoder() packfile.RecordEncoder { return zstd.NewCompressor() }
+// concurrent use, so the writer invokes this per worker. It encodes as the
+// hot store does, so a pack built from the ledgers is byte-identical to one
+// copied from the hot store's frames.
+func newColdPackEncoder() packfile.RecordEncoder {
+	return zstd.NewCompressor(zstd.WithWorkers(zstdWorkers))
+}
 
 // ColdWriterOptions configures the underlying packfile writer.
 // The zero value is a sensible default (serial encoding, no
@@ -29,6 +33,10 @@ type ColdWriterOptions struct {
 	// across the write phase so the final fsync in Commit has less
 	// to flush. 0 disables.
 	BytesPerSync int
+
+	// PreCompressed takes ledgers the hot store has already compressed,
+	// through AppendCompressedLedger, and writes them unchanged.
+	PreCompressed bool
 }
 
 // ColdWriter is two-phase: Commit finalizes; Close cleans up a
@@ -45,10 +53,11 @@ type ColdWriterOptions struct {
 //	}
 //	return w.Commit()
 type ColdWriter struct {
-	pw       *packfile.Writer
-	firstSeq uint32
-	nextSeq  uint32
-	path     string
+	pw            *packfile.Writer
+	firstSeq      uint32
+	nextSeq       uint32
+	path          string
+	preCompressed bool
 }
 
 // NewColdWriter truncates any pre-existing file at path so a crashed
@@ -64,11 +73,15 @@ func NewColdWriter(path string, firstSeq uint32, opts ColdWriterOptions) (*ColdW
 	if opts.Concurrency < 0 || opts.BytesPerSync < 0 {
 		return nil, fmt.Errorf("%w: Concurrency and BytesPerSync must be non-negative", stores.ErrInvalidConfig)
 	}
+	newEncoder := newColdPackEncoder
+	if opts.PreCompressed {
+		newEncoder = nil
+	}
 	pw, err := packfile.Create(path, packfile.WriterOptions{
 		ItemsPerRecord:   1,
 		Format:           formatLedgerCold,
 		Overwrite:        true,
-		NewRecordEncoder: newColdPackEncoder,
+		NewRecordEncoder: newEncoder,
 		Concurrency:      opts.Concurrency,
 		BytesPerSync:     opts.BytesPerSync,
 	})
@@ -76,10 +89,11 @@ func NewColdWriter(path string, firstSeq uint32, opts ColdWriterOptions) (*ColdW
 		return nil, fmt.Errorf("cold: create packfile %q: %w", path, err)
 	}
 	return &ColdWriter{
-		pw:       pw,
-		firstSeq: firstSeq,
-		nextSeq:  firstSeq,
-		path:     path,
+		pw:            pw,
+		firstSeq:      firstSeq,
+		nextSeq:       firstSeq,
+		path:          path,
+		preCompressed: opts.PreCompressed,
 	}, nil
 }
 
@@ -87,14 +101,23 @@ func NewColdWriter(path string, firstSeq uint32, opts ColdWriterOptions) (*ColdW
 // current nextSeq; a gap or out-of-order seq returns an error
 // without advancing internal state.
 func (w *ColdWriter) AppendLedger(seq uint32, ledgerBytes []byte) error {
-	if seq != w.nextSeq {
-		return fmt.Errorf("cold %q: expected seq %d, got %d", w.path, w.nextSeq, seq)
+	if w.preCompressed {
+		return fmt.Errorf("cold %q: AppendLedger on a PreCompressed writer", w.path)
 	}
-	if err := w.pw.AppendItem(ledgerBytes); err != nil {
-		return translateWriterErr(err)
+	return w.append(seq, ledgerBytes)
+}
+
+// AppendCompressedLedger appends one ledger as the hot store compressed it,
+// on a PreCompressed writer. The frame's header is checked, so a frame the
+// cold reader would reject fails here.
+func (w *ColdWriter) AppendCompressedLedger(seq uint32, frame []byte) error {
+	if !w.preCompressed {
+		return fmt.Errorf("cold %q: AppendCompressedLedger on a writer that compresses", w.path)
 	}
-	w.nextSeq++
-	return nil
+	if err := zstd.FrameHeaderValid(frame); err != nil {
+		return fmt.Errorf("cold %q: ledger %d: %w", w.path, seq, err)
+	}
+	return w.append(seq, frame)
 }
 
 // Commit writes firstSeq into AppData, finalizes the trailer, and
@@ -114,6 +137,17 @@ func (w *ColdWriter) Commit() error {
 }
 
 func (w *ColdWriter) Close() error { return w.pw.Close() }
+
+func (w *ColdWriter) append(seq uint32, ledgerBytes []byte) error {
+	if seq != w.nextSeq {
+		return fmt.Errorf("cold %q: expected seq %d, got %d", w.path, w.nextSeq, seq)
+	}
+	if err := w.pw.AppendItem(ledgerBytes); err != nil {
+		return translateWriterErr(err)
+	}
+	w.nextSeq++
+	return nil
+}
 
 // translateWriterErr maps packfile-level lifecycle errors to the
 // stores sentinels so callers depend only on stores.* errors.

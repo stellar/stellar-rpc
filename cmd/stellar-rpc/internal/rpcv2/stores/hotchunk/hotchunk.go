@@ -281,6 +281,24 @@ func (d *DB) FreezeEventsCold(
 	return event.FreezeColdFromStore(ctx, d.chunkID, d.store, dirs, secret, opts)
 }
 
+// FreezeLedgersCold builds the chunk's cold ledger pack at packPath from the
+// shared store: see ledger.FreezeColdFromStore. The chunk must be complete,
+// and the DB may be open read-only.
+func (d *DB) FreezeLedgersCold(ctx context.Context, packPath string, opts ledger.ColdWriterOptions) (int, error) {
+	return ledger.FreezeColdFromStore(ctx, d.chunkID, d.store, packPath, opts)
+}
+
+// FreezeTxhashCold writes the chunk's cold .bin at path from the shared
+// store, its keys blinded with secret and its payloads counted from base: see
+// txhash.FreezeColdFromStore. The chunk must be complete, and the DB may be
+// open read-only.
+func (d *DB) FreezeTxhashCold(
+	ctx context.Context, path string, secret [stores.SecretLen]byte, base uint32, bytesPerSync int,
+) (uint64, error) {
+	bin := txhash.ColdBin{Secret: secret, Base: base, Chunk: d.chunkID}
+	return txhash.FreezeColdFromStore(ctx, d.store, path, bin, bytesPerSync)
+}
+
 // Close releases the shared store exactly once. Idempotent, and safe against
 // in-flight reads/writes: the store drains them under its lock before freeing,
 // and any operation arriving after gets ErrStoreClosed.
