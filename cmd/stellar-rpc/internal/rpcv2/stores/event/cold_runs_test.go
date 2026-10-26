@@ -138,7 +138,7 @@ func TestColdRuns_ShareOneFile(t *testing.T) {
 
 func spillSlab(t *testing.T, runs *coldRuns, s *hotSlab) {
 	t.Helper()
-	err := runs.spill(s.slab, s.terms())
+	_, err := runs.spill(s.slab, s.terms())
 	require.NoError(t, err)
 }
 

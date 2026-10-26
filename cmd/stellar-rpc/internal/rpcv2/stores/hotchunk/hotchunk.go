@@ -416,6 +416,32 @@ func (d *DB) Source() ledgerbackend.LedgerStream {
 	return &hotLedgerStream{store: d.ledger}
 }
 
+// FreezeEventsCold builds the chunk's cold events artifacts in dirs from the
+// shared store: see event.FreezeColdFromStore. It returns how many events it
+// wrote. The chunk must be complete, and the DB may be open read-only.
+func (d *DB) FreezeEventsCold(
+	ctx context.Context, dirs event.ColdDirs, secret [stores.SecretLen]byte, opts event.ColdWriterOptions,
+) (uint32, error) {
+	unsealed := func(from uint32) ([]event.LedgerEvents, error) {
+		return ledgersFrom(ctx, d.ledger, from, freezeWorkers,
+			func(seq uint32, lcmView xdr.LedgerCloseMetaView, txParts []sdkingest.LedgerTxParts) (event.LedgerEvents, error) {
+				closeTime, err := lcmView.LedgerCloseTime()
+				if err != nil {
+					return event.LedgerEvents{}, err
+				}
+				payloads, err := event.PayloadsFromLedgerEvents(txParts, seq, closeTime)
+				if err != nil {
+					return event.LedgerEvents{}, err
+				}
+				return event.MarshalLedgerEvents(seq, payloads)
+			})
+	}
+	return event.FreezeColdFromStore(ctx, d.chunkID, d.store, unsealed, dirs, secret, opts)
+}
+
+// freezeWorkers is one: a freeze runs beside live ingestion.
+const freezeWorkers = 1
+
 // Close releases the shared store exactly once. Idempotent, and safe against
 // in-flight reads/writes: the store drains them under its lock before freeing,
 // and any operation arriving after gets ErrStoreClosed.
