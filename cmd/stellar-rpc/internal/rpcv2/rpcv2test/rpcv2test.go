@@ -89,7 +89,7 @@ func SeedHotChunkSeq(
 	t testing.TB, cat *catalog.Catalog, c chunk.ID, publish func(*hotchunk.DB), lcms iter.Seq[[]byte],
 ) {
 	t.Helper()
-	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, cat.Secret(), SilentLogger())
+	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, cat, SilentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	seq := c.FirstLedger()
