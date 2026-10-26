@@ -136,6 +136,10 @@ type csvSink struct {
 	// schedule is the paced hot run's close schedule; nil when the run is not
 	// paced.
 	schedule *paceSchedule
+
+	// trace, set with --trace, gets every hot phase and writes a row per
+	// committed ledger. Guarded by mu.
+	trace *hotTrace
 }
 
 var (
@@ -166,6 +170,9 @@ func (s *csvSink) HotPhase(phase hotchunk.Phase, d time.Duration, items int, err
 	}
 	s.hotBurst += d
 	total := s.hotBurst
+	if s.trace != nil {
+		s.trace.recordPhase(phase, d)
+	}
 	s.mu.Unlock()
 
 	if phase == hotchunk.PhaseApply && err == nil {
@@ -216,13 +223,19 @@ func (s *csvSink) Rebuild(d time.Duration) {
 	s.observe(fileDriver, driverIndexRebuild, d, 0)
 }
 
-// LastCommitted stores the hot loop's committed gauge and, in a paced run,
-// records that ledger's pace lag.
+// LastCommitted stores the hot loop's committed gauge, in a paced run records
+// that ledger's pace lag, and with --trace writes its trace row.
 func (s *csvSink) LastCommitted(lastCommitted uint32) {
 	s.lastSeq.Store(lastCommitted)
+	var lag time.Duration
 	if s.schedule != nil {
-		s.recordPaceLag(lastCommitted)
+		lag = s.recordPaceLag(lastCommitted)
 	}
+	s.mu.Lock()
+	if s.trace != nil {
+		s.trace.writeRow(lastCommitted, lag)
+	}
+	s.mu.Unlock()
 }
 
 func (s *csvSink) RetentionFloor(uint32) {}
@@ -277,14 +290,15 @@ func (s *csvSink) sumDriver(name string) time.Duration {
 // clamped at zero, as one pace_lag sample. A ledger starts no earlier than its
 // due time, so a ledger that keeps up has a lag about equal to its ingest time.
 // A lag that grows across the run means ingestion does not keep up with the
-// close cadence.
-func (s *csvSink) recordPaceLag(seq uint32) {
+// close cadence. It returns the lag.
+func (s *csvSink) recordPaceLag(seq uint32) time.Duration {
 	due, ok := s.schedule.dueForSeq(seq)
 	if !ok {
-		return
+		return 0
 	}
 	lag := max(s.schedule.clock().Sub(due), 0)
 	s.observe(fileDriver, driverPaceLag, lag, 1)
+	return lag
 }
 
 // row is one aggregated CSV row.
