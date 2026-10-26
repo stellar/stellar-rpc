@@ -13,8 +13,14 @@ For example, you can build an application and have it send a transaction, get le
 ## Building Stellar-Core
 Stellar-RPC requires an instance of stellar-core binary on the same host. This is referred to as the `Captive Core`. 
 Since, we are building RPC from source, we recommend considering two approaches to get the stellar-core binary:
-- If saving time is top priority and your development machine is on a linux debian OS, then consider installing the 
-testnet release candidates from the [testing repository.](https://apt.stellar.org/pool/unstable/s/stellar-core/)
+- If saving time is top priority and your development machine runs one of the supported Ubuntu releases, then consider installing a prebuilt stellar-core Debian package from the SDF apt repository (`jammy` and `noble` are published). See the [installation guide](https://developers.stellar.org/docs/validators/admin-guide/installation).
+    - Once you have added the repo, you can list the available packages and install the one you want:
+        ```bash
+        apt-cache policy stellar-core
+        sudo apt-get install stellar-core=<version>
+        ```
+    - If you want to allow installation of untested, bleeding-edge packages, add the `unstable` repo to the system.
+      See the [installation guide](https://developers.stellar.org/docs/validators/admin-guide/installation) for more detail.
 - The recommended option is to compile the core source directly on your machine:
     - Clone the stellar-core repo:
         ```bash

@@ -10,53 +10,71 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/daemon/interfaces"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/sqlitedb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 func BenchmarkGetProtocolVersion(b *testing.B) {
 	dbx := NewTestDB(b)
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 
-	ledgerReader := db.NewLedgerReader(dbx)
-	_, exists, err := ledgerReader.GetLedger(b.Context(), 1)
+	ledgerReader := sqlitedb.NewLedgerReader(dbx)
+	_, exists, err := store.GetLedger(b.Context(), ledgerReader, 1)
 	require.NoError(b, err)
 	assert.False(b, exists)
 
 	ledgerSequence := uint32(1)
-	tx, err := db.NewReadWriter(log.DefaultLogger, dbx, daemon, 15, "passphrase").NewTx(b.Context())
+	tx, err := sqlitedb.NewReadWriter(log.DefaultLogger, dbx, daemon, 15, "passphrase").NewTx(b.Context())
 	require.NoError(b, err)
 	ledgerCloseMeta := createMockLedgerCloseMeta(ledgerSequence)
 	require.NoError(b, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
 	require.NoError(b, tx.Commit(ledgerCloseMeta, nil))
 
 	for b.Loop() {
-		_, err := getProtocolVersion(b.Context(), ledgerReader)
+		_, err := readProtocolVersion(b.Context(), ledgerReader, ledgerSequence)
 		if err != nil {
-			b.Fatalf("getProtocolVersion failed: %v", err)
+			b.Fatalf("readProtocolVersion failed: %v", err)
 		}
 	}
 }
 
 func TestGetProtocolVersion(t *testing.T) {
 	dbx := NewTestDB(t)
-	daemon := interfaces.MakeNoOpDeamon()
+	daemon := host.MakeNoOpDaemon()
 
-	ledgerReader := db.NewLedgerReader(dbx)
-	_, exists, err := ledgerReader.GetLedger(t.Context(), 1)
+	ledgerReader := sqlitedb.NewLedgerReader(dbx)
+	_, exists, err := store.GetLedger(t.Context(), ledgerReader, 1)
 	require.NoError(t, err)
 	assert.False(t, exists)
 
 	ledgerSequence := uint32(1)
-	tx, err := db.NewReadWriter(log.DefaultLogger, dbx, daemon, 15, "passphrase").NewTx(t.Context())
+	tx, err := sqlitedb.NewReadWriter(log.DefaultLogger, dbx, daemon, 15, "passphrase").NewTx(t.Context())
 	require.NoError(t, err)
 	ledgerCloseMeta := createMockLedgerCloseMeta(ledgerSequence)
 	require.NoError(t, tx.LedgerWriter().InsertLedger(ledgerCloseMeta))
 	require.NoError(t, tx.Commit(ledgerCloseMeta, nil))
 
-	protocolVersion, err := getProtocolVersion(t.Context(), ledgerReader)
+	protocolVersion, err := newProtocolVersionCache(ledgerReader).get(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, uint32(20), protocolVersion)
+}
+
+func TestGetProtocolVersionServesMemoUntilLedgerAdvances(t *testing.T) {
+	reader := &memoLedgerReader{latest: expectedLatestLedgerSequence}
+	versions := newProtocolVersionCache(reader)
+
+	for range 2 {
+		v, err := versions.get(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, expectedLatestLedgerProtocolVersion, v)
+	}
+	assert.Equal(t, int32(1), reader.rawReads.Load(), "second call must be served from the memo")
+
+	reader.latest = expectedLatestLedgerSequence + 1
+	_, err := versions.get(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), reader.rawReads.Load(), "a new latest ledger must re-read the header")
 }
 
 func createMockLedgerCloseMeta(ledgerSequence uint32) xdr.LedgerCloseMeta {
@@ -78,10 +96,10 @@ func createMockLedgerCloseMeta(ledgerSequence uint32) xdr.LedgerCloseMeta {
 	}
 }
 
-func NewTestDB(tb testing.TB) *db.DB {
+func NewTestDB(tb testing.TB) *sqlitedb.DB {
 	tmp := tb.TempDir()
-	dbPath := path.Join(tmp, "db.sqlite")
-	dbConn, err := db.OpenSQLiteDB(dbPath)
+	dbPath := path.Join(tmp, "sqlitedb.sqlite")
+	dbConn, err := sqlitedb.OpenSQLiteDB(dbPath)
 	require.NoError(tb, err)
 	tb.Cleanup(func() {
 		require.NoError(tb, dbConn.Close())

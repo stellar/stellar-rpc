@@ -21,9 +21,9 @@ import (
 )
 
 func TestSendTransactionSucceedsWithoutResults(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 	test.SendMasterOperation(
-		&txnbuild.SetOptions{HomeDomain: txnbuild.NewHomeDomain("soroban.com")},
+		&txnbuild.SetOptions{HomeDomain: new("soroban.com")},
 	)
 }
 
@@ -79,12 +79,11 @@ func TestSendTransactionSucceedsWithResults(t *testing.T) {
 }
 
 func TestSendTransactionBadSequence(t *testing.T) {
-	ctx := t.Context()
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 
 	params := infrastructure.CreateTransactionParams(
 		test.MasterAccount(),
-		&txnbuild.SetOptions{HomeDomain: txnbuild.NewHomeDomain("soroban.com")},
+		&txnbuild.SetOptions{HomeDomain: new("soroban.com")},
 	)
 	params.IncrementSequenceNum = false
 	tx, err := txnbuild.NewTransaction(params)
@@ -94,10 +93,8 @@ func TestSendTransactionBadSequence(t *testing.T) {
 	b64, err := tx.Base64()
 	require.NoError(t, err)
 
-	request := protocol.SendTransactionRequest{Transaction: b64}
 	client := test.GetRPCLient()
-	result, err := client.SendTransaction(ctx, request)
-	require.NoError(t, err)
+	result := infrastructure.SendTransaction(t, client, b64)
 
 	require.NotZero(t, result.LatestLedger)
 	require.NotZero(t, result.LatestLedgerCloseTime)
@@ -111,7 +108,6 @@ func TestSendTransactionBadSequence(t *testing.T) {
 }
 
 func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
-	ctx := t.Context()
 	test := infrastructure.NewTest(t, nil)
 
 	client := test.GetRPCLient()
@@ -137,9 +133,7 @@ func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
 	b64, err := tx.Base64()
 	require.NoError(t, err)
 
-	request := protocol.SendTransactionRequest{Transaction: b64}
-	result, err := client.SendTransaction(ctx, request)
-	require.NoError(t, err)
+	result := infrastructure.SendTransaction(t, client, b64)
 
 	require.Equal(t, proto.TXStatusError, result.Status)
 	var errorResult xdr.TransactionResult
@@ -153,8 +147,7 @@ func TestSendTransactionFailedInsufficientResourceFee(t *testing.T) {
 }
 
 func TestSendTransactionFailedInLedger(t *testing.T) {
-	ctx := t.Context()
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 
 	client := test.GetRPCLient()
 
@@ -177,9 +170,7 @@ func TestSendTransactionFailedInLedger(t *testing.T) {
 	b64, err := tx.Base64()
 	require.NoError(t, err)
 
-	request := protocol.SendTransactionRequest{Transaction: b64}
-	result, err := client.SendTransaction(ctx, request)
-	require.NoError(t, err)
+	result := infrastructure.SendTransaction(t, client, b64)
 
 	expectedHashHex, err := tx.HashHex(infrastructure.StandaloneNetworkPassphrase)
 	require.NoError(t, err)
@@ -206,7 +197,7 @@ func TestSendTransactionFailedInLedger(t *testing.T) {
 }
 
 func TestSendTransactionFailedInvalidXDR(t *testing.T) {
-	test := infrastructure.NewTest(t, nil)
+	test := infrastructure.NewTest(t, &infrastructure.TestConfig{ApplyLimits: infrastructure.SkipLimitsUpgrade()})
 
 	client := test.GetRPCLient()
 

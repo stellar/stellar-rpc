@@ -1,0 +1,266 @@
+//nolint:funcorder // transaction ingestion and query helpers are grouped for readability
+package sqlitedb
+
+import (
+	"context"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"time"
+
+	sq "github.com/Masterminds/squirrel"
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/stellar/go-stellar-sdk/ingest"
+	"github.com/stellar/go-stellar-sdk/support/db"
+	"github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
+)
+
+const (
+	transactionTableName = "transactions"
+)
+
+// TransactionWriter is used during ingestion to write LCM.
+type TransactionWriter interface {
+	InsertTransactions(lcm xdr.LedgerCloseMeta) error
+	RegisterMetrics(ingest, count prometheus.Observer)
+}
+
+type transactionHandler struct {
+	log        *log.Entry
+	db         db.SessionInterface
+	stmtCache  *sq.StmtCache
+	passphrase string
+	pending    []pendingTx
+
+	ingestMetric, countMetric prometheus.Observer
+}
+
+type pendingTx struct {
+	hash  xdr.Hash
+	seq   uint32
+	index uint32
+}
+
+// 3 bind variables/row * 10,000 rows stays under SQLite's 32,766 limit
+const maxTxRowsPerBatch = 10000
+
+func NewTransactionReader(log *log.Entry, db db.SessionInterface, passphrase string) store.TransactionReader {
+	return &transactionHandler{log: log, db: db, passphrase: passphrase}
+}
+
+func (txn *transactionHandler) InsertTransactions(lcm xdr.LedgerCloseMeta) error {
+	start := time.Now()
+	txCount := lcm.CountTransactions()
+	L := txn.log.
+		WithField("ledger_seq", lcm.LedgerSequence()).
+		WithField("tx_count", txCount)
+
+	defer func() {
+		if txn.ingestMetric != nil {
+			txn.ingestMetric.Observe(time.Since(start).Seconds())
+			txn.countMetric.Observe(float64(txCount))
+		}
+	}()
+
+	if txn.stmtCache == nil {
+		return errors.New("TransactionWriter incorrectly initialized without stmtCache")
+	} else if txCount == 0 {
+		return nil
+	}
+
+	reader, err := ingest.NewLedgerTransactionReaderFromLedgerCloseMeta(txn.passphrase, lcm)
+	if err != nil {
+		return fmt.Errorf("failed to open transaction reader for ledger %d: %w", lcm.LedgerSequence(), err)
+	}
+
+	transactions := make(map[xdr.Hash]ingest.LedgerTransaction, txCount)
+	for i := range txCount {
+		tx, err := reader.Read()
+		if err != nil {
+			return fmt.Errorf("failed reading tx %d: %w", i, err)
+		}
+
+		// For fee-bump transactions, we store lookup entries for both the outer
+		// and inner hashes.
+		if tx.Envelope.IsFeeBump() {
+			transactions[tx.Result.InnerHash()] = tx
+		}
+		transactions[tx.Result.TransactionHash] = tx
+	}
+
+	for hash, tx := range transactions {
+		txn.pending = append(txn.pending, pendingTx{hash, lcm.LedgerSequence(), tx.Index})
+	}
+	// Full fixed-size batches keep the SQL text constant so the statement
+	// cache reuses one prepare; the remainder is flushed at Commit.
+	for len(txn.pending) >= maxTxRowsPerBatch {
+		if err = txn.flush(maxTxRowsPerBatch); err != nil {
+			return err
+		}
+	}
+
+	L.WithField("duration", time.Since(start)).
+		Debugf("Ingested %d transaction lookups", len(transactions))
+
+	return nil
+}
+
+func (txn *transactionHandler) flush(n int) error {
+	query := sq.Insert(transactionTableName).
+		Columns("hash", "ledger_sequence", "application_order")
+	for _, row := range txn.pending[:n] {
+		query = query.Values(row.hash[:], row.seq, row.index)
+	}
+	if _, err := query.RunWith(txn.stmtCache).Exec(); err != nil {
+		return err
+	}
+	txn.pending = txn.pending[:copy(txn.pending, txn.pending[n:])]
+	return nil
+}
+
+func (txn *transactionHandler) flushPending() error {
+	if len(txn.pending) == 0 {
+		return nil
+	}
+	return txn.flush(len(txn.pending))
+}
+
+func (txn *transactionHandler) RegisterMetrics(ingest, count prometheus.Observer) {
+	txn.ingestMetric = ingest
+	txn.countMetric = count
+}
+
+// trimTransactions removes all transactions which fall outside the ledger retention window.
+func (txn *transactionHandler) trimTransactions(latestLedgerSeq uint32, retentionWindow uint32) error {
+	if latestLedgerSeq+1 <= retentionWindow {
+		return nil
+	}
+
+	cutoff := latestLedgerSeq + 1 - retentionWindow
+	_, err := sq.StatementBuilder.
+		RunWith(txn.stmtCache).
+		Delete(transactionTableName).
+		Where(sq.Lt{"ledger_sequence": cutoff}).
+		Exec()
+	return err
+}
+
+// GetTransaction conforms to the interface in
+// methods/get_transaction.go#NewGetTransactionHandler so that it can be used
+// directly against the RPC handler.
+//
+// Errors occur if there are issues with the DB connection or the XDR is
+// corrupted somehow. If the transaction is not found, store.ErrNoTransaction
+// is returned.
+func (txn *transactionHandler) GetTransaction(ctx context.Context, hash xdr.Hash) (store.Transaction, error) {
+	start := time.Now()
+
+	tx, err := txn.getTransactionByHash(ctx, hash)
+	if err != nil {
+		return tx, err
+	}
+
+	txn.log.
+		WithField("txhash", hex.EncodeToString(hash[:])).
+		WithField("duration", time.Since(start)).
+		Debugf("Fetched and encoded transaction from ledger %d", tx.Ledger.Sequence)
+
+	return tx, nil
+}
+
+// getTransactionByHash actually performs the DB ops to cross-reference a
+// transaction hash with a particular set of ledger close meta and parses out
+// the relevant transaction efficiently by leveraging the `application_order` db
+// field.
+//
+// Note: Caller must do input sanitization on the hash.
+func (txn *transactionHandler) getTransactionByHash(ctx context.Context, hash xdr.Hash) (
+	store.Transaction, error,
+) {
+	var rows []struct {
+		TxIndex int                     `db:"application_order"`
+		Lcm     xdr.LedgerCloseMetaView `db:"meta"`
+	}
+	rowQ := sq.
+		Select("t.application_order", "lcm.meta").
+		From(transactionTableName + " t").
+		Join(ledgerCloseMetaTableName + " lcm ON (t.ledger_sequence = lcm.sequence)").
+		Where(sq.Eq{"t.hash": hash[:]}).
+		Limit(1)
+
+	if err := txn.db.Select(ctx, &rows, rowQ); err != nil {
+		return store.Transaction{}, fmt.Errorf("db read failed for txhash %s: %w", hex.EncodeToString(hash[:]), err)
+	} else if len(rows) < 1 {
+		return store.Transaction{}, store.ErrNoTransaction
+	}
+
+	txIndex, lcm := rows[0].TxIndex, rows[0].Lcm
+	ledgerSeq, err := lcm.LedgerSequence()
+	if err != nil {
+		return store.Transaction{}, fmt.Errorf("failed to get ledger sequence: %w", err)
+	}
+	txnViewRange, err := ingest.LedgerTransactionViewRange(lcm, txIndex-1, 1, txn.passphrase)
+	if err != nil {
+		return store.Transaction{}, fmt.Errorf("failed to index to tx %d in ledger %d (txhash=%s): %w",
+			txIndex, ledgerSeq, hex.EncodeToString(hash[:]), err)
+	}
+	if len(txnViewRange) == 0 {
+		return store.Transaction{}, fmt.Errorf(
+			"application_order %d does not resolve to a transaction in ledger %d (txhash=%s): index/meta mismatch",
+			txIndex, ledgerSeq, hex.EncodeToString(hash[:]))
+	}
+	txView := txnViewRange[0]
+	return store.ParseTransactionView(txView), nil
+}
+
+type transactionTableMigration struct {
+	firstLedger uint32
+	lastLedger  uint32
+	writer      *transactionHandler
+}
+
+func (t *transactionTableMigration) ApplicableRange() LedgerSeqRange {
+	return LedgerSeqRange{
+		First: t.firstLedger,
+		Last:  t.lastLedger,
+	}
+}
+
+func (t *transactionTableMigration) Apply(_ context.Context, meta xdr.LedgerCloseMeta) error {
+	return t.writer.InsertTransactions(meta)
+}
+
+func (t *transactionTableMigration) flushPending() error {
+	return t.writer.flushPending()
+}
+
+func newTransactionTableMigration(
+	ctx context.Context,
+	logger *log.Entry,
+	passphrase string,
+	ledgerSeqRange LedgerSeqRange,
+) migrationApplierFactory {
+	return migrationApplierFactoryF(func(db *DB) (MigrationApplier, error) {
+		// Truncate the table, since it may contain data, causing insert conflicts later on.
+		// (the migration was shipped after the actual transactions table change)
+		_, err := db.Exec(ctx, sq.Delete(transactionTableName))
+		if err != nil {
+			return nil, fmt.Errorf("couldn't delete table %q: %w", transactionTableName, err)
+		}
+		migration := transactionTableMigration{
+			firstLedger: ledgerSeqRange.First,
+			lastLedger:  ledgerSeqRange.Last,
+			writer: &transactionHandler{
+				log:        logger,
+				db:         db,
+				stmtCache:  sq.NewStmtCache(db.GetTx()),
+				passphrase: passphrase,
+			},
+		}
+		return &migration, nil
+	})
+}

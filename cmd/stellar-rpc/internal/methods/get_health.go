@@ -9,13 +9,13 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/db"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
 // NewHealthCheck returns a health check json rpc handler
 func NewHealthCheck(
 	retentionWindow uint32,
-	ledgerReader db.LedgerReader,
+	ledgerReader store.LedgerReader,
 	maxHealthyLedgerLatency time.Duration,
 ) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, _ protocol.GetHealthRequest) (protocol.GetHealthResponse, error) {

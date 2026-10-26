@@ -1,0 +1,46 @@
+package bench
+
+import (
+	"testing"
+
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
+)
+
+// TestNewCommand builds the full command tree — executing every markRequired
+// call, whose panic on a bad flag name this test exists to catch (main.go
+// calls NewCommand unconditionally at startup) — and pins each subcommand's
+// required flags.
+func TestNewCommand(t *testing.T) {
+	root := NewCommand()
+	require.Equal(t, "bench", root.Use)
+	cmd, _, err := root.Find([]string{"ingest"})
+	require.NoError(t, err)
+	require.Equal(t, "ingest", cmd.Use)
+
+	requiredBySubcommand := map[string][]string{
+		"cold": {"start-chunk", "cold-out-dir"},
+		"hot":  {"start-chunk", "hot-dir"},
+	}
+	subs := make(map[string]*cobra.Command, len(cmd.Commands()))
+	for _, sub := range cmd.Commands() {
+		subs[sub.Use] = sub
+	}
+	for name, flags := range requiredBySubcommand {
+		sub := subs[name]
+		require.NotNil(t, sub, "subcommand %q missing", name)
+		for _, fn := range flags {
+			f := sub.Flags().Lookup(fn)
+			require.NotNil(t, f, "%s: flag --%s missing", name, fn)
+			require.Contains(t, f.Annotations, cobra.BashCompOneRequiredFlag,
+				"%s: flag --%s not marked required", name, fn)
+		}
+	}
+
+	query, _, err := root.Find([]string{"query"})
+	require.NoError(t, err)
+	require.Equal(t, "query", query.Use)
+	f := query.Flags().Lookup("data-dir")
+	require.NotNil(t, f, "query: flag --data-dir missing")
+	require.Contains(t, f.Annotations, cobra.BashCompOneRequiredFlag, "query: flag --data-dir not marked required")
+}
