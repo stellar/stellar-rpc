@@ -7,7 +7,7 @@
 //
 // Both tiers extract each ledger with a SINGLE ExtractLedgerTxParts walk
 // (the hot DB's IngestLedger, the cold coldChunk.ingest) — txhash reads
-// each element's Hash and events shapes its EventsFromTxParts product —
+// each element's Hash and events shapes its Events —
 // but they differ in everything else:
 //
 //   - Hot (HotService): one ledger at a time into the long-lived,

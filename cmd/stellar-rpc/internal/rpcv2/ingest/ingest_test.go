@@ -1734,10 +1734,12 @@ func TestEventsCold_FinalizeAfterFailedIngest_Refuses(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
-	// A txParts element with a garbage meta view fails the events-product read
-	// inside PayloadsFromLedgerEvents — the walk itself is coldChunk's job, so
-	// the per-writer failure is a shaping error over the shared walk's output.
-	badParts := []sdkingest.LedgerTxParts{{Meta: xdr.TransactionMetaView([]byte{0xff, 0xff})}}
+	// A part with a garbage transaction event fails shaping inside
+	// PayloadsFromLedgerEvents. The walk itself is coldChunk's job, so the
+	// per-writer failure is a shaping error over the shared walk's output.
+	badParts := []sdkingest.LedgerTxParts{{Events: sdkingest.TxEvents{
+		TransactionEvents: []xdr.TransactionEventView{{0xff, 0xff}},
+	}}}
 	require.Error(t, ing.write(chunkID.FirstLedger(), 0, badParts))
 
 	ferr := ing.finalize(context.Background())

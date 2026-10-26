@@ -34,8 +34,8 @@ import (
 // assignment the SQLite path makes (sqlitedb/event.go), so the trailing
 // <TOID>-<eventIdx> component of the v1 getEvents ID matches across backends.
 // The navigation, per-tx hashing, and event grouping live in the SDK
-// (ingest.ExtractLedgerTxParts — one TxProcessing walk — and its
-// ingest.EventsFromTxParts product). This function adds only the RPC-specific
+// (ingest.ExtractLedgerTxParts, one TxProcessing walk that gives each part its
+// Events). This function adds only the RPC-specific
 // Payload shape, the Stage→(TxIdx, OpIdx) cursor-sentinel mapping, EventIdx,
 // and the cursor ordering.
 //
@@ -43,34 +43,28 @@ import (
 // caller that already holds them — the hot ingest path and the cold
 // materializer, both of which also need the tx hashes (txParts[i].Hash) —
 // feed BOTH txhash and events from ONE ExtractLedgerTxParts walk instead of
-// walking TxProcessing twice. The events product (ingest.EventsFromTxParts,
-// a cheap read over the already-located meta views, not a walk) is derived
-// HERE, not passed in: the slimmed TxEvents carries no hash, so each payload's
-// TxHash must come from txParts at the same index, and deriving internally
-// makes that alignment structural — no caller can pair the wrong slices.
+// walking TxProcessing twice. Each part holds its events next to its hash, so
+// each payload's TxHash comes from the part its event came from.
 // ledgerSeq and ledgerClosedAt are the view's header values (cheap reads, not
 // a walk).
 func PayloadsFromLedgerEvents(
 	txParts []ingest.LedgerTxParts, ledgerSeq uint32, ledgerClosedAt int64,
 ) ([]Payload, error) {
-	txEvents, err := ingest.EventsFromTxParts(txParts)
-	if err != nil {
-		return nil, fmt.Errorf("events: extract ledger events: %w", err)
-	}
+	var err error
 	at := func(i int) (uint32, xdr.Hash) {
 		return uint32(i) + 1, xdr.Hash(txParts[i].Hash) //nolint:gosec // 1-based, matching ingest reader's tx.Index
 	}
 	// Every top-level TransactionEvent emits exactly one payload (in whichever
 	// pass matches its stage) and every per-op event one more, so the total is
 	// known up front — preallocate to avoid the append growth.
-	payloads := make([]Payload, 0, countPayloads(txEvents))
+	payloads := make([]Payload, 0, countPayloads(txParts))
 	// Pass 1 — BeforeAllTxs across the whole ledger (cursor (0, 0); eventIdx
 	// is the apply-order position within the group, so the counter spans the
 	// whole ledger).
 	var beforeIdx uint32
-	for i := range txEvents {
+	for i := range txParts {
 		applyIdx, txHash := at(i)
-		payloads, err = appendStageEventPayloads(payloads, txEvents[i].TransactionEvents,
+		payloads, err = appendStageEventPayloads(payloads, txParts[i].Events.TransactionEvents,
 			xdr.TransactionEventStageTransactionEventStageBeforeAllTxs,
 			txHash, applyIdx, ledgerSeq, ledgerClosedAt, &beforeIdx)
 		if err != nil {
@@ -79,9 +73,9 @@ func PayloadsFromLedgerEvents(
 	}
 	// Pass 2 — per tx: op events, then the tx's AfterTx events (whose
 	// (txIdx, OperationMask) cursor sorts after every op event of the tx).
-	for i := range txEvents {
+	for i := range txParts {
 		applyIdx, txHash := at(i)
-		for opIdx, opEvents := range txEvents[i].OperationEvents {
+		for opIdx, opEvents := range txParts[i].Events.OperationEvents {
 			// eventIdx is the event's position within its operation.
 			for evIdx, evRaw := range opEvents {
 				payloads = append(payloads, Payload{
@@ -98,7 +92,7 @@ func PayloadsFromLedgerEvents(
 		// AfterTx cursor (txIdx, OperationMask) is per-transaction, so eventIdx
 		// resets for each tx.
 		var afterTxIdx uint32
-		payloads, err = appendStageEventPayloads(payloads, txEvents[i].TransactionEvents,
+		payloads, err = appendStageEventPayloads(payloads, txParts[i].Events.TransactionEvents,
 			xdr.TransactionEventStageTransactionEventStageAfterTx,
 			txHash, applyIdx, ledgerSeq, ledgerClosedAt, &afterTxIdx)
 		if err != nil {
@@ -109,9 +103,9 @@ func PayloadsFromLedgerEvents(
 	// (TransactionMask, 0), the ledger tail; eventIdx counts ledger-wide in
 	// apply order, like BeforeAllTxs).
 	var afterAllIdx uint32
-	for i := range txEvents {
+	for i := range txParts {
 		applyIdx, txHash := at(i)
-		payloads, err = appendStageEventPayloads(payloads, txEvents[i].TransactionEvents,
+		payloads, err = appendStageEventPayloads(payloads, txParts[i].Events.TransactionEvents,
 			xdr.TransactionEventStageTransactionEventStageAfterAllTxs,
 			txHash, applyIdx, ledgerSeq, ledgerClosedAt, &afterAllIdx)
 		if err != nil {
@@ -124,11 +118,11 @@ func PayloadsFromLedgerEvents(
 // countPayloads sums the per-tx top-level event + per-op event counts — the
 // exact number of payloads PayloadsFromLedgerEvents emits across its three passes,
 // used to size the result slice once.
-func countPayloads(txEvents []ingest.TxEvents) int {
+func countPayloads(txParts []ingest.LedgerTxParts) int {
 	total := 0
-	for i := range txEvents {
-		total += len(txEvents[i].TransactionEvents)
-		for _, opEvents := range txEvents[i].OperationEvents {
+	for i := range txParts {
+		total += len(txParts[i].Events.TransactionEvents)
+		for _, opEvents := range txParts[i].Events.OperationEvents {
 			total += len(opEvents)
 		}
 	}
@@ -152,11 +146,10 @@ func countPayloads(txEvents []ingest.TxEvents) int {
 // each emitted (matching-stage) payload and then incremented, so it tracks the
 // event's position within its cursor group.
 func appendStageEventPayloads(
-	dst []Payload, txEventRaws [][]byte, wantStage xdr.TransactionEventStage,
+	dst []Payload, txEvents []xdr.TransactionEventView, wantStage xdr.TransactionEventStage,
 	txHash xdr.Hash, applyIdx, ledgerSeq uint32, ledgerClosedAt int64, eventIdx *uint32,
 ) ([]Payload, error) {
-	for _, raw := range txEventRaws {
-		tev := xdr.TransactionEventView(raw)
+	for _, tev := range txEvents {
 		stageView, err := tev.Stage()
 		if err != nil {
 			return nil, fmt.Errorf("events: tx event Stage: %w", err)
