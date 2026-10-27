@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"os"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
@@ -626,6 +628,61 @@ func TestRunIngestionLoop_StreamErrorReturnsError(t *testing.T) {
 	err := runIngestionLoop(context.Background(), cfg)
 	require.Error(t, err)
 	require.ErrorIs(t, err, boom)
+}
+
+// gateHeld reports whether g is held: Wait on a done context errs only then.
+func gateHeld(ctx context.Context, g *ingest.Gate) bool {
+	done, cancel := context.WithCancel(ctx)
+	cancel()
+	return g.Wait(done) != nil
+}
+
+// gateProbe is the loop's stream and registry. It records whether the gate is
+// held at each ledger's publish and each time the loop comes back for the
+// next ledger.
+type gateProbe struct {
+	closingSink
+
+	inner ledgerbackend.LedgerStream
+	gate  *ingest.Gate
+	held  []bool
+}
+
+func (p *gateProbe) RawLedgers(
+	ctx context.Context, r ledgerbackend.Range, opts ...ledgerbackend.StreamOption,
+) iter.Seq2[[]byte, error] {
+	return func(yield func([]byte, error) bool) {
+		for raw, err := range p.inner.RawLedgers(ctx, r, opts...) {
+			if !yield(raw, err) {
+				return
+			}
+			p.held = append(p.held, gateHeld(ctx, p.gate))
+		}
+	}
+}
+
+func (p *gateProbe) SetLatestLedger(uint32, query.CloseTime) {
+	p.held = append(p.held, gateHeld(context.Background(), p.gate))
+}
+
+// TestRunIngestionLoop_HoldsTheGatePerLedger: the gate is held through each
+// ledger's publish, released while the loop waits for the next ledger, and
+// released when the loop fails inside a ledger.
+func TestRunIngestionLoop_HoldsTheGatePerLedger(t *testing.T) {
+	cat, _ := testCatalog(t)
+	first := chunk.ID(0).FirstLedger()
+
+	inner := streamForSeqs(t, first, first+1)
+	inner.frames[first+2] = bytes.Repeat([]byte{0xff}, 16)
+	probe := &gateProbe{inner: inner, gate: new(ingest.Gate)}
+	cfg, _ := loopConfig(t, probe, cat, first)
+	cfg.Registry = probe
+	cfg.Gate = probe.gate
+
+	err := runIngestionLoop(context.Background(), cfg)
+	require.ErrorContains(t, err, fmt.Sprintf("ingest ledger %d", first+2))
+	assert.Equal(t, []bool{true, false, true, false}, probe.held)
+	assert.False(t, gateHeld(context.Background(), probe.gate), "the loop's exit releases the gate")
 }
 
 // ---------------------------------------------------------------------------
