@@ -111,6 +111,7 @@ Every TOML leaf is also settable from the command line:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `workers` | int | `GOMAXPROCS` | Concurrent task slots for backfill. |
+| `index_workers` | int | half of `GOMAXPROCS` | Workers each txhash index build uses. |
 | `max_retries` | int | `3` | Retries per backfill task, after the first attempt, before the task fails the run. |
 
 **[backfill.datastore]** — the bulk ledger source (`type`, `params`, `schema.ledgers_per_file`, `schema.files_per_partition`; key names match the SDK's `datastore.DataStoreConfig`):
@@ -493,7 +494,7 @@ func buildThenSweep(cfg Config, b IndexBuild) error {
 }
 ```
 
-- **`cfg.Workers`** (default `GOMAXPROCS`) is the only resource knob: at most that many tasks run at once, drawn from all windows' eligible work. Goroutines are cheap structure — thousands may be parked on the semaphore or on done-channels.
+- **`cfg.Workers`** (default `GOMAXPROCS`) bounds the tasks: at most that many run at once, drawn from all windows' eligible work. Each index build among them runs on `index_workers` workers. Goroutines are cheap structure — thousands may be parked on the semaphore or on done-channels.
 - Done-channels signal *success*: a chunk build closes its channel only once its `.bin` is frozen, so an index build proceeds only when every input it needs exists. A chunk build that exhausts its retries leaves its channel open and returns an error, which cancels `gctx`; any dependent waiting on it unblocks through the `<-gctx.Done()` case and bails. A task that exhausts its retries fails the run ([error policy](#lifecycle)); the next startup re-resolves from durable keys, so completed work never repeats.
 
 ---
@@ -930,7 +931,9 @@ Two writer goroutines and read-only readers. The catalog partitions their domain
 - **Ingestion** owns the live chunk: the writer of its hot DB (its ledger batches, and the events index seal it starts in the background one slab at a time; warmup on any read-write open may seal a slab a crash left unsealed), and the creator of each `hot:chunk` key (via `openHotDBForChunk` at the boundary).
 - **The lifecycle** owns everything below it: handed-off hot DBs (freeze + discard), all `chunk:*` and `index:*` keys, and the deletion side of `hot:chunk` keys.
 
-Their only link is the boundary notification. The handoff is by write ordering — ingestion closes the chunk and opens the next (moving the partition) *before* notifying — so the lifecycle never freezes a chunk a writer still holds. Both write the catalog at the same time but never the same key (RocksDB handles concurrent writes safely). And because the chunk ids ingestion hands over only increase, a chunk completing while a lifecycle run is already in progress just bumps the starting point of the *next* run — it can't disturb the one underway. Readers hold their own read-only handles and resolve files through keys, so writer activity never races them.
+Their two links are the boundary notification, which hands over each completed chunk, and the gate. The handoff is by write ordering — ingestion closes the chunk and opens the next (moving the partition) *before* notifying — so the lifecycle never freezes a chunk a writer still holds. Both write the catalog at the same time but never the same key (RocksDB handles concurrent writes safely). And because the chunk ids ingestion hands over only increase, a chunk completing while a lifecycle run is already in progress just bumps the starting point of the *next* run — it can't disturb the one underway. Readers hold their own read-only handles and resolve files through keys, so writer activity never races them.
+
+The gate (`ingest.Gate`) gives ingestion priority over the lifecycle's index builds. The hot loop holds it per ledger, from the ledger's arrival until the ledger is published. The index builds wait on it between blocks of about 3,000 keys, so they run while ingestion waits for the next ledger. It carries no data and only affects timing.
 
 **Single-process enforcement.** All of the above assumes a *single* daemon owns the data. The catalog's RocksDB holds an exclusive lock, so a second daemon pointed at the same catalog fails to start; the lock releases on any exit, including `kill -9`, so it never goes stale. The storage trees carry no locks of their own: cold trees are write-once (a redundant writer produces identical bytes), and each hot chunk DB holds its own RocksDB lock. Pointing two daemons with *different* catalogs at the same storage tree is an unsupported misconfiguration the daemon does not defend against.
 
