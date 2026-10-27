@@ -403,6 +403,7 @@ func startConfig(
 			Backend: backend,
 			Sink:    sink,
 		},
+		Build: backfill.BuildConfig{Workers: deref(cfg.Backfill.IndexWorkers)},
 	}
 	return StartConfig{
 		Exec:       exec,

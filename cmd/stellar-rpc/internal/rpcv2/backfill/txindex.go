@@ -9,6 +9,7 @@ import (
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -32,6 +33,13 @@ type BuildConfig struct {
 
 	// Metrics meters the eager post-build sweep (Prune); nil ⇒ Nop via MetricsOrNop.
 	Metrics observability.Metrics
+
+	// Workers is each index build's worker count; 0 takes BuildColdIndex's
+	// default.
+	Workers int
+
+	// Yield is each index build's streamhash.WithYield; nil never yields.
+	Yield func(ctx context.Context) error
 }
 
 func (cfg BuildConfig) validate() error {
@@ -94,8 +102,12 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 	if mkErr := os.MkdirAll(indexDir, 0o755); mkErr != nil {
 		return fmt.Errorf("buildTxhashIndex mkdir %s: %w", indexDir, mkErr)
 	}
+	opts := []streamhash.BuildOption{streamhash.WithYield(cfg.Yield)}
+	if cfg.Workers > 0 {
+		opts = append(opts, streamhash.WithWorkers(cfg.Workers))
+	}
 	if berr := txhash.BuildColdIndex(
-		ctx, inputs, idxPath, cat.TxHashIndexLayout().FirstChunk(w).FirstLedger(), hi.LastLedger(),
+		ctx, inputs, idxPath, cat.TxHashIndexLayout().FirstChunk(w).FirstLedger(), hi.LastLedger(), opts...,
 	); berr != nil {
 		return fmt.Errorf("buildTxhashIndex build window %s coverage [%s,%s]: %w", w, lo, hi, berr)
 	}

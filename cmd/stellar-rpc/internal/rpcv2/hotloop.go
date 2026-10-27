@@ -24,8 +24,9 @@ import (
 // sequence-validated ledger stream into the per-chunk shared multi-CF hot DB,
 // committing each ledger as one atomic synced WriteBatch across all CFs. It keeps
 // NO progress variable — the last synced batch IS the last-committed ledger,
-// re-derived at startup. Its only coupling to the lifecycle is the boundary
-// signal: at each boundary it publishes the just-completed chunk id.
+// re-derived at startup. Its only couplings to the lifecycle are the boundary
+// signal, published at each boundary, and the gate the lifecycle's index
+// builds wait at while it ingests a ledger.
 // Clean-shutdown vs crash is decided at the daemon top level (a ctx-canceled
 // return is clean).
 
@@ -99,6 +100,9 @@ type ingestionLoopConfig struct {
 	// boundary rebuilds must not wipe fee history — and never resets it. nil
 	// (the bounded bench loop) means fees are never computed.
 	FeeWindows *feewindow.FeeWindows
+
+	// Gate is held from each ledger's arrival until it is published.
+	Gate *ingest.Gate
 }
 
 // handleSink is the slice of the registry the loop publishes into. The daemon's
@@ -178,10 +182,12 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	// loop for the daemon to classify.
 	seq := cfg.Resume
 	var lastLogged time.Time
+	defer cfg.Gate.Release()
 	for raw, verr := range cfg.Stream.RawLedgers(ctx, ledgerbackend.UnboundedRange(cfg.Resume)) {
 		if verr != nil {
 			return fmt.Errorf("ingestion stream: %w", verr)
 		}
+		cfg.Gate.Hold()
 
 		// One atomic synced WriteBatch across all hot CFs (via hotDB.IngestLedger).
 		view := xdr.LedgerCloseMetaView(raw)
@@ -201,6 +207,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// every hot store. This one write carries the sequence and its close
 		// time, so getLedgerRange never point-reads the tip.
 		cfg.Registry.SetLatestLedger(seq, query.CloseTimeAt(closeUnix))
+		cfg.Gate.Release()
 		// One line per ledger at network pace. A replay that commits many a
 		// second (catch-up after downtime, a bench) gets one a second instead.
 		if now := time.Now(); now.Sub(lastLogged) >= time.Second {
