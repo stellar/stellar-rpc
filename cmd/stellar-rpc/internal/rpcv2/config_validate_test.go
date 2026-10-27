@@ -101,7 +101,9 @@ func TestValidateConfig_AcceptsNumericFirstStart(t *testing.T) {
 
 func TestValidateConfig_AcceptsMinWorkersAndZeroRetries(t *testing.T) {
 	cat, _ := testCatalog(t)
-	_, err := callValidate(t, validCfg(1, 0, "genesis"), cat, downTip())
+	cfg := validCfg(1, 0, "genesis")
+	cfg.Backfill.IndexWorkers = new(1)
+	_, err := callValidate(t, cfg, cat, downTip())
 	require.NoError(t, err)
 }
 
@@ -110,6 +112,11 @@ func TestValidateConfig_AcceptsMinWorkersAndZeroRetries(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestValidateConfig_RejectsMalformed(t *testing.T) {
+	indexWorkers := func(n int) config.Config {
+		cfg := validCfg(4, 3, "genesis")
+		cfg.Backfill.IndexWorkers = &n
+		return cfg
+	}
 	tests := []struct {
 		name string
 		cfg  config.Config
@@ -117,6 +124,8 @@ func TestValidateConfig_RejectsMalformed(t *testing.T) {
 	}{
 		{"zero workers", validCfg(0, 3, "genesis"), "workers"},
 		{"negative workers", validCfg(-1, 3, "genesis"), "workers"},
+		{"zero index_workers", indexWorkers(0), "index_workers"},
+		{"negative index_workers", indexWorkers(-1), "index_workers"},
 		{"negative max_retries", validCfg(4, -1, "genesis"), "max_retries"},
 		{"bogus earliest string", validCfg(4, 3, "yesterday"), "earliest_ledger"},
 		{"sub-genesis numeric floor", validCfg(4, 3, "1"), "earliest_ledger"},
