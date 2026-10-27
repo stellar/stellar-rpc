@@ -21,11 +21,9 @@ import (
 // catches calls starting after Close returns, not one mid-flight when Close
 // unmaps.
 type ColdReader struct {
-	idx       *streamhash.PayloadIndex
-	secret    [stores.SecretLen]byte
-	minLedger uint32
-	maxLedger uint32
-	closed    atomic.Bool
+	idx    *streamhash.PayloadIndex
+	meta   ColdMetadata
+	closed atomic.Bool
 }
 
 // OpenColdReader opens the mmap-backed cold txhash index at path (the
@@ -42,12 +40,12 @@ func OpenColdReader(path string) (*ColdReader, error) {
 		_ = idx.Close()
 		return nil, fmt.Errorf("txhash: cold index %s payload size %d, want %d", path, got, ColdPayloadSize)
 	}
-	minLedger, maxLedger, secret, err := ParseColdMetadata(idx.UserMetadata())
+	meta, err := ParseColdMetadata(idx.UserMetadata())
 	if err != nil {
 		_ = idx.Close()
 		return nil, fmt.Errorf("txhash: open cold index %s: %w", path, err)
 	}
-	return &ColdReader{idx: idx, secret: secret, minLedger: minLedger, maxLedger: maxLedger}, nil
+	return &ColdReader{idx: idx, meta: meta}, nil
 }
 
 // Get returns the ledgerSeq the hash was committed in, stores.ErrNotFound
@@ -59,7 +57,7 @@ func (r *ColdReader) Get(hash [32]byte) (uint32, error) {
 	if r.closed.Load() {
 		return 0, stores.ErrStoreClosed
 	}
-	rk := stores.BlindKey(r.secret, hash[:ColdKeySize])
+	rk := stores.BlindKey(r.meta.Secret, hash[:ColdKeySize])
 	_, payload, err := r.idx.QueryPayload(rk[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {
@@ -67,16 +65,16 @@ func (r *ColdReader) Get(hash [32]byte) (uint32, error) {
 		}
 		return 0, fmt.Errorf("txhash: cold index query: %w", err)
 	}
-	return r.minLedger + uint32(payload), nil //nolint:gosec // 24-bit payload (width enforced at open)
+	return r.meta.MinLedger + uint32(payload), nil //nolint:gosec // 24-bit payload (width enforced at open)
 }
 
-// MinLedger returns the first ledger of the index's window (the payload anchor).
+// MinLedger returns the first ledger the index covers.
 // Immutable; safe after Close.
-func (r *ColdReader) MinLedger() uint32 { return r.minLedger }
+func (r *ColdReader) MinLedger() uint32 { return r.meta.MinLedger }
 
 // MaxLedger returns the last ledger the index covers.
 // Immutable; safe after Close.
-func (r *ColdReader) MaxLedger() uint32 { return r.maxLedger }
+func (r *ColdReader) MaxLedger() uint32 { return r.meta.MaxLedger }
 
 // Close releases the mmap. Idempotent. Not safe concurrent with Get.
 func (r *ColdReader) Close() error {
