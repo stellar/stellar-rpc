@@ -105,10 +105,11 @@ func TestStreamingRebuild_ByteIdenticalToColdPath(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestStreamingBin_MatchesSpecFormat asserts the .bin a frozen chunk leaves on
-// disk matches gettransaction §6.1: the "SBIN" magic-and-version prelude, a
-// uint64-LE entry-count, the 16-byte index secret the keys were blinded with,
-// then 20-byte [16-byte key | 4-byte LE seq] entries. freezeChunkBin uses the
-// real txhash.WriteColdBin, so this is the producer's actual on-disk contract.
+// disk matches gettransaction §6.1, streamhash's sorted-file format: a header
+// padded to 4096 bytes with the "STSF" magic, version and uint64-LE entry count,
+// then 19-byte [16-byte key | 3-byte LE payload] entries, the payload counting
+// from the window's first ledger. freezeChunkBin uses the real
+// txhash.WriteColdBin, so this is the producer's actual on-disk contract.
 func TestStreamingBin_MatchesSpecFormat(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 4)
 
@@ -119,30 +120,30 @@ func TestStreamingBin_MatchesSpecFormat(t *testing.T) {
 	raw, err := os.ReadFile(cat.Layout().TxHashBinPath(0))
 	require.NoError(t, err)
 
-	// §6.1: 32-byte header (8-byte magic/version prelude + 8-byte uint64-LE
-	// count + 16-byte index secret) + N * 20-byte entries.
+	// §6.1: 4096-byte header (8-byte magic/version prelude + 8-byte uint64-LE
+	// count + metadata, zero-padded) + N * 19-byte entries.
 	const (
-		preludeW  = 8                // magic "SBIN" + version + reserved
-		countW    = 8                // uint64-LE entry count
-		secretW   = stores.SecretLen // index secret the keys were blinded with
-		hdrSize   = preludeW + countW + secretW
+		preludeW  = 8 // magic "STSF" + version + payload size + reserved
+		countW    = 8 // uint64-LE entry count
+		hdrSize   = 4096
 		keyW      = 16 // streamhash.MinKeySize
-		seqW      = 4
-		entryW    = keyW + seqW // 20 bytes exactly
+		payloadW  = 3
+		entryW    = keyW + payloadW // 19 bytes exactly
 		wantCount = 2
 	)
 	require.Equal(t, txhash.ColdKeySize, keyW, "spec pins the .bin key to 16 bytes")
 	require.Equal(t, streamhash.MinKeySize, keyW, "16-byte key == streamhash routing-key width")
-	require.Len(t, raw, hdrSize+wantCount*entryW, "header + 20-byte entries")
+	require.Len(t, raw, hdrSize+wantCount*entryW, "header + 19-byte entries")
 
-	require.Equal(t, []byte("SBIN"), raw[:4], "magic in on-disk byte order")
+	require.Equal(t, []byte("FSTS"), raw[:4], "magic 0x53545346 little-endian")
 	require.Equal(t, byte(1), raw[4], ".bin format version")
 	count := binary.LittleEndian.Uint64(raw[preludeW : preludeW+countW])
 	require.Equal(t, uint64(wantCount), count, "uint64-LE entry-count header")
 
 	// Each entry: the 16-byte secret-keyed routing key (keyed at ingest — never
-	// the raw hash prefix), then a uint32-LE absolute seq. Entries are written
-	// sorted lex by keyed key, so locate each by its expected keyed key.
+	// the raw hash prefix), then the seq minus window 0's first ledger, 3 bytes
+	// LE. Entries are written sorted lex by keyed key, so locate each by its
+	// expected keyed key.
 	secret := chunkSecret(cat, 0)
 	wantSeqByKey := map[[keyW]byte]uint32{}
 	for _, e := range []txEntry{e0, e1} {
@@ -152,8 +153,9 @@ func TestStreamingBin_MatchesSpecFormat(t *testing.T) {
 		off := hdrSize + i*entryW
 		var k [keyW]byte
 		copy(k[:], raw[off:off+keyW])
-		gotSeq := binary.LittleEndian.Uint32(raw[off+keyW : off+entryW])
-		require.Equal(t, wantSeqByKey[k], gotSeq, "entry %d: 16-byte key then uint32-LE seq", i)
+		p := raw[off+keyW : off+entryW]
+		gotSeq := chunk.ID(0).FirstLedger() + (uint32(p[0]) | uint32(p[1])<<8 | uint32(p[2])<<16)
+		require.Equal(t, wantSeqByKey[k], gotSeq, "entry %d: 16-byte key then 3-byte LE payload", i)
 	}
 }
 

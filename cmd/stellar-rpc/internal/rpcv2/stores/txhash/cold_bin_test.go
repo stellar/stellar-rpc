@@ -55,7 +55,8 @@ func readColdBin(path string) ([]ColdEntry, error) {
 			return nil, fmt.Errorf("txhash: read entry %d of %s: %w", i, path, err)
 		}
 		copy(entries[i].Key[:], entryBuf[:ColdKeySize])
-		entries[i].Seq = binary.LittleEndian.Uint32(entryBuf[ColdKeySize:])
+		p := entryBuf[ColdKeySize:]
+		entries[i].Seq = uint32(p[0]) | uint32(p[1])<<8 | uint32(p[2])<<16
 	}
 	return entries, nil
 }
@@ -70,16 +71,17 @@ func TestColdBin_RoundTrip(t *testing.T) {
 		{Key: [ColdKeySize]byte{0x02}, Seq: 11},
 		{Key: [ColdKeySize]byte{0x02}, Seq: 12}, // duplicate truncated key preserved
 	}
-	require.NoError(t, WriteColdBin(path, testBinSecret, entries))
+	require.NoError(t, WriteColdBin(path, testBinSecret, 0, 0, entries))
 
 	got, err := readColdBin(path)
 	require.NoError(t, err)
 	assert.Equal(t, entries, got)
 }
 
-// TestColdBin_HeaderAndLayout pins the raw on-disk layout: the "SBIN" magic,
-// the version byte, three reserved zero bytes, the uint64 LE count, the
-// secret, then fixed-width (key, uint32 LE seq) entries.
+// TestColdBin_HeaderAndLayout pins the raw on-disk layout, streamhash's sorted
+// file: the "STSF" magic, version, payload size, reserved byte, uint64 LE count,
+// metadata length and metadata (version, chunk ID, secret), zero padding to
+// 4096 bytes, then fixed-width (key, 3-byte LE payload) entries.
 func TestColdBin_HeaderAndLayout(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.bin")
@@ -87,21 +89,20 @@ func TestColdBin_HeaderAndLayout(t *testing.T) {
 		{Key: [ColdKeySize]byte{0xaa}, Seq: 7},
 		{Key: [ColdKeySize]byte{0xbb}, Seq: 8},
 	}
-	require.NoError(t, WriteColdBin(path, testBinSecret, entries))
+	require.NoError(t, WriteColdBin(path, testBinSecret, 9, 5, entries))
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.Len(t, data, coldBinHeaderSize+2*coldBinEntrySize)
-	assert.Equal(t, []byte("SBIN"), data[:4], "magic in on-disk byte order")
-	assert.Equal(t, coldBinVersion, data[4])
-	assert.Equal(t, []byte{0, 0, 0}, data[5:coldBinPreludeSize], "reserved bytes zero")
-	assert.Equal(t, uint64(2),
-		binary.LittleEndian.Uint64(data[coldBinPreludeSize:coldBinPreludeSize+coldBinCountSize]))
-	assert.Equal(t, testBinSecret[:], data[coldBinPreludeSize+coldBinCountSize:coldBinHeaderSize],
-		"secret recorded after the count")
-	assert.Equal(t, byte(0xaa), data[coldBinHeaderSize])
-	assert.Equal(t, uint32(7),
-		binary.LittleEndian.Uint32(data[coldBinHeaderSize+ColdKeySize:coldBinHeaderSize+coldBinEntrySize]))
+	require.Len(t, data, 4096+2*19)
+	assert.Equal(t, []byte("FSTS"), data[:4], "magic 0x53545346 little-endian")
+	assert.Equal(t, []byte{1, 0, 3, 0}, data[4:8], "version, payload size, reserved")
+	assert.Equal(t, uint64(2), binary.LittleEndian.Uint64(data[8:16]))
+	assert.Equal(t, uint32(21), binary.LittleEndian.Uint32(data[16:20]), "metadata length")
+	assert.Equal(t, []byte{1, 9, 0, 0, 0}, data[20:25], "metadata version and chunk ID")
+	assert.Equal(t, testBinSecret[:], data[25:41], "secret recorded in the metadata")
+	assert.Equal(t, make([]byte, 4096-41), data[41:4096], "zero padding")
+	assert.Equal(t, byte(0xaa), data[4096])
+	assert.Equal(t, []byte{2, 0, 0}, data[4096+16:4096+19], "payload = seq - base")
 }
 
 // TestColdBin_ScanRejectsForeignHeader pins the prelude refusals in BOTH .bin
@@ -111,7 +112,7 @@ func TestColdBin_HeaderAndLayout(t *testing.T) {
 func TestColdBin_ScanRejectsForeignHeader(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.bin")
-	require.NoError(t, WriteColdBin(path, testBinSecret, []ColdEntry{{Key: [ColdKeySize]byte{1}, Seq: 2}}))
+	require.NoError(t, WriteColdBin(path, testBinSecret, 0, 0, []ColdEntry{{Key: [ColdKeySize]byte{1}, Seq: 2}}))
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 
@@ -121,8 +122,8 @@ func TestColdBin_ScanRejectsForeignHeader(t *testing.T) {
 		want   string
 	}{
 		{"bad magic", func(b []byte) { copy(b, "JUNK") }, "not a cold txhash .bin"},
-		{"newer version", func(b []byte) { b[4] = coldBinVersion + 1 }, "written by a newer stellar-rpc"},
-		{"reserved byte set", func(b []byte) { b[6] = 0x01 }, "reserved header bytes set"},
+		{"newer version", func(b []byte) { b[4] = 2 }, "written by a newer stellar-rpc"},
+		{"reserved byte set", func(b []byte) { b[7] = 0x01 }, "unexpected .bin header"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,6 +139,14 @@ func TestColdBin_ScanRejectsForeignHeader(t *testing.T) {
 	}
 }
 
+// TestColdBin_RejectsLedgerBelowBase pins the writer's refusal of a ledger its
+// payload can't hold.
+func TestColdBin_RejectsLedgerBelowBase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.bin")
+	err := WriteColdBin(path, testBinSecret, 0, 10, []ColdEntry{{Key: [ColdKeySize]byte{1}, Seq: 9}})
+	require.ErrorContains(t, err, "outside the window")
+}
+
 // TestColdBin_CreateFails forces os.Create on the destination to fail by
 // pre-creating the final path as a DIRECTORY (so create returns EISDIR). The
 // error must propagate; the pre-existing directory is untouched.
@@ -146,7 +155,7 @@ func TestColdBin_CreateFails(t *testing.T) {
 	path := filepath.Join(dir, "out.bin")
 	require.NoError(t, os.Mkdir(path, 0o755)) // create() will hit EISDIR
 
-	err := WriteColdBin(path, testBinSecret, []ColdEntry{{Key: [ColdKeySize]byte{0x01}, Seq: 7}})
+	err := WriteColdBin(path, testBinSecret, 0, 0, []ColdEntry{{Key: [ColdKeySize]byte{0x01}, Seq: 7}})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "create")
 
@@ -168,7 +177,7 @@ func TestColdBin_OverwritesPriorAttempt(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, make([]byte, 4096), 0o600))
 
 	entries := []ColdEntry{{Key: [ColdKeySize]byte{0x03}, Seq: 21}}
-	require.NoError(t, WriteColdBin(path, testBinSecret, entries))
+	require.NoError(t, WriteColdBin(path, testBinSecret, 0, 0, entries))
 
 	got, err := readColdBin(path)
 	require.NoError(t, err)
@@ -180,7 +189,7 @@ func TestColdBin_OverwritesPriorAttempt(t *testing.T) {
 func TestColdBin_ReadRejectsTruncated(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.bin")
-	require.NoError(t, WriteColdBin(path, testBinSecret, []ColdEntry{
+	require.NoError(t, WriteColdBin(path, testBinSecret, 0, 0, []ColdEntry{
 		{Key: [ColdKeySize]byte{0x01}, Seq: 1},
 		{Key: [ColdKeySize]byte{0x02}, Seq: 2},
 	}))
@@ -203,8 +212,8 @@ func TestBuildColdIndex_RejectsMixedSecrets(t *testing.T) {
 	secretB := [stores.SecretLen]byte{0xb2}
 	binA := filepath.Join(dir, "a.bin")
 	binB := filepath.Join(dir, "b.bin")
-	require.NoError(t, WriteColdBin(binA, secretA, []ColdEntry{{Key: [ColdKeySize]byte{0x01}, Seq: 1}}))
-	require.NoError(t, WriteColdBin(binB, secretB, []ColdEntry{{Key: [ColdKeySize]byte{0x02}, Seq: 2}}))
+	require.NoError(t, WriteColdBin(binA, secretA, 0, 0, []ColdEntry{{Key: [ColdKeySize]byte{0x01}, Seq: 1}}))
+	require.NoError(t, WriteColdBin(binB, secretB, 0, 0, []ColdEntry{{Key: [ColdKeySize]byte{0x02}, Seq: 2}}))
 
 	err := BuildColdIndex(context.Background(), []string{binA, binB}, filepath.Join(dir, "out.idx"), 0, 100)
 	require.Error(t, err)

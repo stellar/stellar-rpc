@@ -532,7 +532,7 @@ func TestTxhashColdWriter_Bin(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret())
+	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret(), 0)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -1428,7 +1428,7 @@ func TestTxhashColdWriter_BinContent(t *testing.T) {
 	first := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret())
+	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret(), 0)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
@@ -1861,7 +1861,7 @@ func TestTxhashColdWriter_FeeBumpBothHashes(t *testing.T) {
 	seq := chunkID.FirstLedger()
 	coldDir := t.TempDir()
 
-	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret())
+	ing, err := newTxhashCold(txhashBinPath(coldDir), chunkID, nil, testTxhashSecret(), 0)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
