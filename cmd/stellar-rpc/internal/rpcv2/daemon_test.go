@@ -115,8 +115,8 @@ func TestRunDaemon_LoadValidateWireStartCleanShutdown(t *testing.T) {
 	assert.Equal(t, uint32(chunk.FirstLedgerSeq), earliest)
 }
 
-// someTxGen generates mostly zero-tx ledgers with a sparse few carrying one tx:
-// an all-zero-tx chunk can't build a txhash index ("zero keys"), so it needs some.
+// someTxGen generates mostly zero-tx ledgers with a sparse few carrying one tx,
+// so the txhash index build has keys to index.
 func someTxGen(t *testing.T) func(*testing.T, uint32) []byte {
 	t.Helper()
 	src := xdr.MustMuxedAddress(keypair.MustRandom().Address())
@@ -264,7 +264,7 @@ func TestRunDaemon_BackfillMaterializesAllColdTypesAndIndex(t *testing.T) {
 	assert.FileExists(t, layout.TxHashIndexFilePath(cov))
 
 	// (3) Non-terminal build keeps its inputs: chunk 0's txhash key stays frozen,
-	// .bin retained for a future merge (terminal demote+sweep is in txindex_test).
+	// .bin retained for the next rebuild (terminal demote+sweep is in txindex_test).
 	ts, err := cat.State(0, geometry.KindTxHash)
 	require.NoError(t, err)
 	assert.Equal(t, geometry.StateFrozen, ts, "chunk 0 txhash key retained (non-terminal rolling index)")

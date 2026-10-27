@@ -14,42 +14,48 @@ import (
 )
 
 func TestEncodeParseColdMetadata_RoundTrip(t *testing.T) {
-	secret := testSecret()
-	cases := [][2]uint32{{0, 0}, {2, 2}, {100, 12345}, {50002, 60001}, {0, 0xFFFFFFFF}}
-	for _, c := range cases {
-		gotMin, gotMax, gotSecret, err := ParseColdMetadata(EncodeColdMetadata(c[0], c[1], secret))
+	for _, m := range []ColdMetadata{
+		{MinLedger: 0, MaxLedger: 0},
+		{MinLedger: 2, MaxLedger: 2},
+		{MinLedger: 100, MaxLedger: 12345},
+		{MinLedger: 50002, MaxLedger: 60001},
+		{MinLedger: 0, MaxLedger: 0xFFFFFFFF},
+	} {
+		m.Secret = testSecret()
+		got, err := ParseColdMetadata(EncodeColdMetadata(m))
 		require.NoError(t, err)
-		assert.Equal(t, c[0], gotMin)
-		assert.Equal(t, c[1], gotMax)
-		assert.Equal(t, secret, gotSecret)
+		assert.Equal(t, m, got)
 	}
 }
 
 func TestParseColdMetadata_WrongSizeErrors(t *testing.T) {
-	// 8 is the pre-secret layout, 24 the pre-version one; 25 is the only
-	// valid width. Blobs carry a valid version byte so the size check is what
-	// fires (the version check runs first by design).
-	for _, sz := range []int{1, 4, 7, 8, 9, 16, 24, 26} {
+	// 25 is the only valid width. Blobs carry a valid version byte so the size
+	// check is what fires (the version check runs first by design).
+	for _, sz := range []int{1, 4, 13, 24, 26, 29} {
 		blob := make([]byte, sz)
 		blob[0] = coldMetadataVersion
-		_, _, _, err := ParseColdMetadata(blob)
+		_, err := ParseColdMetadata(blob)
 		assert.ErrorIs(t, err, ErrInvalidMetadata, "size %d should error", sz)
 	}
-	_, _, _, err := ParseColdMetadata(nil)
+	_, err := ParseColdMetadata(nil)
 	require.ErrorIs(t, err, ErrInvalidMetadata, "empty blob should error")
 	require.ErrorContains(t, err, "empty")
 }
 
 func TestParseColdMetadata_UnknownVersionErrors(t *testing.T) {
-	blob := EncodeColdMetadata(5, 9, testSecret())
+	blob := EncodeColdMetadata(ColdMetadata{MinLedger: 5, MaxLedger: 9, Secret: testSecret()})
 	blob[0] = coldMetadataVersion + 1
-	_, _, _, err := ParseColdMetadata(blob)
+	_, err := ParseColdMetadata(blob)
 	require.ErrorContains(t, err, "written by a newer stellar-rpc")
 }
 
-func TestParseColdMetadata_MaxBelowMinErrors(t *testing.T) {
-	_, _, _, err := ParseColdMetadata(EncodeColdMetadata(100, 99, testSecret()))
-	assert.ErrorIs(t, err, ErrInvalidMetadata)
+func TestParseColdMetadata_OutOfOrderErrors(t *testing.T) {
+	for _, m := range []ColdMetadata{
+		{MinLedger: 100, MaxLedger: 99},
+	} {
+		_, err := ParseColdMetadata(EncodeColdMetadata(m))
+		assert.ErrorIs(t, err, ErrInvalidMetadata, "%+v should error", m)
+	}
 }
 
 func TestColdReader_UnseenKeyReturnsNotFound(t *testing.T) {
@@ -92,8 +98,8 @@ func TestColdReader_UnseenKeyReturnsNotFound(t *testing.T) {
 }
 
 func TestOpenColdReader_BadMetadataErrors(t *testing.T) {
-	// An index built without ColdBuildOptions' metadata must be rejected
-	// at open: ParseColdMetadata requires exactly coldMetadataSize bytes.
+	// An index built without the cold metadata must be rejected at open:
+	// ParseColdMetadata requires exactly coldMetadataSize bytes.
 	path := filepath.Join(t.TempDir(), "no-metadata.idx")
 	sb, err := streamhash.NewSortedBuilder(context.Background(), path, 1,
 		streamhash.WithPayload(ColdPayloadSize),
@@ -118,7 +124,7 @@ func TestOpenColdReader_WrongPayloadSizeErrors(t *testing.T) {
 	sb, err := streamhash.NewSortedBuilder(context.Background(), path, 1,
 		streamhash.WithPayload(ColdPayloadSize+1), // wrong width
 		streamhash.WithFingerprint(ColdFingerprintSize),
-		streamhash.WithMetadata(EncodeColdMetadata(2, 2, testSecret())),
+		streamhash.WithMetadata(EncodeColdMetadata(ColdMetadata{MinLedger: 2, MaxLedger: 2, Secret: testSecret()})),
 	)
 	require.NoError(t, err)
 	var k [ColdKeySize]byte
