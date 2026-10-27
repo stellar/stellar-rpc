@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -183,6 +184,16 @@ func TestBuildTxhashIndex_AllEmptyWindowFreezes(t *testing.T) {
 	require.Equal(t, chunk.ID(1), frozen.Hi)
 	require.Equal(t, geometry.StateFrozen, frozen.State)
 	require.FileExists(t, cat.Layout().TxHashIndexFilePath(frozen))
+}
+
+func TestBuildTxhashIndex_YieldErrorFailsTheBuild(t *testing.T) {
+	cat, _ := smallTxHashIndexCatalog(t, 4)
+	cfg := testBuildConfig(cat)
+	errYield := errors.New("yield")
+	cfg.Yield = func(context.Context) error { return errYield }
+	freezeChunkBin(t, cat, 0, []txEntry{{hashAt(1), seqIn(0, 5)}})
+
+	require.ErrorIs(t, buildTxhashIndex(context.Background(), 0, 0, 0, cfg), errYield)
 }
 
 // ---------------------------------------------------------------------------

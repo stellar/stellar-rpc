@@ -41,6 +41,7 @@ func TestSampleConfig_ShownValuesAreDefaults(t *testing.T) {
 	cfg.Service.Methods.GetNetwork.FriendbotURL = ""
 	cfg.Service.Preflight = config.PreflightConfig{}
 	cfg.Backfill.Workers = nil
+	cfg.Backfill.IndexWorkers = nil
 	cfg.Backfill.DataStore = config.DataStoreConfig{}
 	cfg.Ingestion.CaptiveCoreConfig = ""
 	cfg.Ingestion.HistoryArchiveURLs = nil

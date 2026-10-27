@@ -40,10 +40,12 @@ default_data_dir = "/var/stellar/rpc-v2"
 # slows queries on a shared volume, and on the NVMe disk they would have to
 # be regenerated from the ledger packs after losing the disk. A first start
 # holds every window's .bin files at once, so size that volume for the full
-# history. events and events_index move independently: the indexes are small
-# and read randomly, so a fast disk speeds up filtered event queries over wide
-# ranges, but only use one that survives a node replacement. After losing
-# events_index, every chunk's events have to be rebuilt from the ledger packs.
+# history. With only slow disks, keep hot on a disk of its own: on a slow
+# shared disk, the txhash index build slows ingestion. events and events_index
+# move independently: the indexes are small and read randomly, so a fast disk
+# speeds up filtered event queries over wide ranges, but only use one that
+# survives a node replacement. After losing events_index, every chunk's events
+# have to be rebuilt from the ledger packs.
 #catalog = ""        # {default_data_dir}/catalog/rocksdb  (catalog RocksDB)
 #ledgers = ""        # {default_data_dir}/ledgers          (ledger packs)
 #events = ""         # {default_data_dir}/events/data      (event packs)
@@ -200,6 +202,8 @@ enable_debug = false
 [backfill]
 # Chunks backfilled in parallel. Default: GOMAXPROCS.
 #workers = 8
+# Workers each txhash index build uses. Default: half of GOMAXPROCS.
+#index_workers = 4
 # Retries for a failed chunk before the daemon stops; 0 means none.
 max_retries = 3
 
