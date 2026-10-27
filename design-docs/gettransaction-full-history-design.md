@@ -237,7 +237,7 @@ Transient peaks: ~2× the index size in the window dir during each rebuild (~25 
 
 - **Ingest, hot**: one `(hash, seq)` put per transaction, inside the ledger's existing write.
 - **Ingest, cold**: sorted runs of 2²⁰ entries merged into the `.bin`, negligible against the chunk's streaming pass; the `.bin` write is sequential.
-- **Rebuild**: a full dense window builds a ~12.5 GB `.idx` from ~57 GB of sorted `.bin` files in about a minute (~200 MB/s write burst) at the default 8 build workers: streamhash's sorted-file build runs at about 6M keys/s per worker, up to what the disk reads. Mid-window rebuilds scale with `hi − lo`. Against a ~14-hour boundary cadence at mainnet rates, the rebuild is a ~0.1% duty cycle.
+- **Rebuild**: a full dense window builds a ~12.5 GB `.idx` from ~57 GB of sorted `.bin` files in about a minute (~200 MB/s write burst) on 8 build workers: streamhash's sorted-file build runs at about 6M keys/s per worker, up to what the disk reads. A build gets `[backfill] index_workers` workers, half of `GOMAXPROCS` by default. Mid-window rebuilds scale with `hi − lo`. Against a ~14-hour boundary cadence at mainnet rates, the rebuild is a ~0.1% duty cycle.
 - **Lookup, cold**: one MPHF probe per in-retention window — fingerprint screen, then fetch-and-verify on a hit. The hash is in at most one window, so at most one fetch confirms; fingerprint false positives (~1/256 per window, §6.2) are rejected by the full-hash verify. Probe ordering, parallelism, and the resulting latency/throughput are the query-routing design's concern (§8.1).
 - **Lookup, hot**: one RocksDB point get in a bloom-filtered CF, then the same ledger fetch.
 
