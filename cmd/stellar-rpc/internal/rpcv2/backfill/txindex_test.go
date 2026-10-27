@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 
@@ -49,32 +48,32 @@ func hashAt(tag uint64) [32]byte {
 	return sha256.Sum256(seed[:])
 }
 
+// chunkBin is what chunkID's .bin records, from the secret and payload base
+// the backfill derives for the chunk.
+func chunkBin(cat *catalog.Catalog, chunkID chunk.ID) txhash.ColdBin {
+	ic := ingestConfigFor(catalog.NewArtifactSet(geometry.KindTxHash), chunkID, ProcessConfig{Catalog: cat})
+	return txhash.ColdBin{
+		Secret: [stores.SecretLen]byte(ic.TxhashSecret), Base: ic.TxhashPayloadBase, Chunk: chunkID,
+	}
+}
+
 // freezeChunkBin writes a real sorted .bin for chunkID holding entries, fsyncs
 // it, and flips chunk:{c}:txhash to "frozen" through the one-write protocol —
 // the exact state buildTxhashIndex's precondition demands. Each entry's seq must
 // fall in the chunk's ledger range; the helper assigns seqs the caller chose.
-// Returns the entries (so the test can later assert each resolves to its seq).
 func freezeChunkBin(t *testing.T, cat *catalog.Catalog, chunkID chunk.ID, entries []txEntry) {
 	t.Helper()
 
-	secret := chunkSecret(cat, chunkID)
+	bin := chunkBin(cat, chunkID)
 	cold := make([]txhash.ColdEntry, len(entries))
 	for i, e := range entries {
-		require.GreaterOrEqual(t, e.seq, chunkID.FirstLedger(), "seq in chunk range")
-		require.LessOrEqual(t, e.seq, chunkID.LastLedger(), "seq in chunk range")
-		cold[i] = txhash.ColdEntry{Key: stores.BlindKey(secret, e.hash[:txhash.ColdKeySize]), Seq: e.seq}
+		cold[i] = txhash.ColdEntry{Key: stores.BlindKey(bin.Secret, e.hash[:txhash.ColdKeySize]), Seq: e.seq}
 	}
-	// WriteColdBin writes entries verbatim; they must be sorted lex by (keyed) key.
-	sort.Slice(cold, func(i, j int) bool {
-		return string(cold[i].Key[:]) < string(cold[j].Key[:])
-	})
 
 	path := cat.Layout().TxHashBinPath(chunkID)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, cat.MarkChunkFreezing(chunkID, geometry.KindTxHash))
-	txLayout := cat.TxHashIndexLayout()
-	base := txLayout.FirstChunk(txLayout.TxHashIndexID(chunkID)).FirstLedger()
-	require.NoError(t, txhash.WriteColdBin(path, secret, chunkID, base, cold))
+	rpcv2test.WriteColdBin(t, path, bin, cold)
 	require.NoError(t, durable.BarrierNewFile(path))
 	require.NoError(t, cat.FlipChunkFrozen(chunkID, geometry.KindTxHash))
 }

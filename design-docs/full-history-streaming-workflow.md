@@ -172,7 +172,7 @@ The per-chunk artifacts are each written once at chunk freeze; the txhash index 
 | Sorted txhash file | per chunk | `.bin` (sorted **streamhash** entries — the sorted on-disk tx-hash index format, specified in [the transactions design](./gettransaction-full-history-design.md) §6) | `processChunk` |
 | Streamhash txhash index | per index | one `.idx` file per **coverage** (the chunk range `[lo, hi]` an index spans), named `{lo:08d}-{hi:08d}.idx` inside the window's dir; at most one coverage frozen at any moment | `buildTxhashIndex` |
 
-The `.bin` files are transient — they are the input `buildTxhashIndex` merges, and the terminal build deletes them once its window is complete (or retention pruning removes them first, once its chunks drop below the floor). The pack files, events segments, and `.idx` files persist until retention pruning removes them. State for each lives in [Catalog keys](#catalog-keys); the write ordering is [One write protocol](#one-write-protocol).
+The `.bin` files are transient — they are the input `buildTxhashIndex` builds from, and the terminal build deletes them once its window is complete (or retention pruning removes them first, once its chunks drop below the floor). The pack files, events segments, and `.idx` files persist until retention pruning removes them. State for each lives in [Catalog keys](#catalog-keys); the write ordering is [One write protocol](#one-write-protocol).
 
 ### Directory layout
 
@@ -184,7 +184,8 @@ Chunk-level files group into buckets of 1,000 chunks (`bucket_id = chunk_id / 10
 ├── hot/
 │   ├── {chunk:08d}/                               ← per-chunk hot RocksDB (transient)
 │   ├── txhash-index-{window:08d}/{lo:08d}-{hi:08d}.idx  ← the window still being rebuilt
-│   └── scratch/{chunk:08d}-index.runs/            ← while the events key is "freezing": the index build's spilled slabs and their merge, removed before the key flips
+│   ├── scratch/{chunk:08d}-index.runs/            ← while the events key is "freezing": the index build's spilled slabs and their merge, removed before the key flips
+│   └── scratch/{chunk:08d}-txhash.runs/           ← while the txhash key is "freezing": the .bin build's sorted runs, removed before the key flips
 ├── ledgers/{bucket:05d}/{chunk:08d}.pack
 ├── events/
 │   ├── data/{bucket:05d}/{chunk:08d}-events.pack
@@ -399,11 +400,7 @@ func buildTxhashIndex(w WindowID, lo, hi ChunkID, cat Catalog) error {
 	key := indexKey(w, lo, hi)
 	cat.Put(key, "freezing") // mark before the writes
 
-	sb := streamhash.NewSortedBuilder(indexFilePath(key))
-	for entry := range kWayMerge(binFiles(lo, hi)) { // sorted .bin files → one stream
-		sb.Add(entry)
-	}
-	sb.Finish()
+	streamhash.BuildFromSortedFiles(ctx, indexFilePath(key), binFiles(lo, hi)) // reads each sorted .bin once
 	fsyncFile(indexFilePath(key))
 	fsyncDirs(indexFilePath(key)) // the dirent chain — incl. a just-created window dir — durable before the key freezes
 
@@ -412,7 +409,7 @@ func buildTxhashIndex(w WindowID, lo, hi ChunkID, cat Catalog) error {
 	if prev != nil {
 		batch.Put(indexKey(w, prev.Lo, prev.Hi), "pruning") // demote predecessor
 	}
-	if hi == windowLastChunk(w) { // terminal: the merged .bin inputs are spent
+	if hi == windowLastChunk(w) { // terminal: the window's .bin inputs are spent
 		for c := lo; c <= hi; c++ {
 			batch.Put(chunkKey(c, TxHashBin), "pruning")
 		}
@@ -422,7 +419,7 @@ func buildTxhashIndex(w WindowID, lo, hi ChunkID, cat Catalog) error {
 }
 ```
 
-`kWayMerge` and `SortedBuilder` are streamhash internals, covered in [the transactions design](./gettransaction-full-history-design.md) (§6–§7). A coverage containing no transactions builds a valid **empty** index — a zero-key `.idx` is an ordinary artifact, and lookups against it simply miss.
+The build is covered in [the transactions design](./gettransaction-full-history-design.md) (§6–§7). A coverage containing no transactions builds a valid **empty** index — a zero-key `.idx` is an ordinary artifact, and lookups against it simply miss.
 
 ### Execution model
 
@@ -512,7 +509,7 @@ Startup runs in two steps, both in `startStreaming` below:
 1. **Backfill** brings on-disk coverage in line with the retention window, up through the last *complete* chunk at the tip. The partial chunk still forming at the tip is left to hot-DB ingestion: on a restart its ledgers so far are already in the live hot DB, on a first start ingestion fetches them from the resume ledger forward, and either way ingestion completes the chunk as new ledgers arrive. Backfill re-runs if the tip advances mid-pass, and when it returns, the whole in-retention history up to that point is on disk as frozen files — ready to serve.
 2. **Serve + ingest** opens the resume chunk's hot DB, starts captive core, serving, the lifecycle goroutine, and the hot-DB ingestion loop. The lifecycle is seeded with the last complete chunk — when one exists; a young network's first run waits for the first boundary — so its first run fires at once and finishes any crash/downtime leftovers concurrently with serving. Reads never wait for it, because a reader only ever resolves a `"ready"` hot DB or a `"frozen"` cold file — never a transient key.
 
-Operational note — **peak disk after long downtime**: pruning runs only in the first run's prune stage, *after* backfill has materialized every newly-in-retention chunk, so a downtime approaching or exceeding the retention window transiently holds up to ~2× the retention footprint (the stale window plus its replacement). A deep backfill also holds the transient `.bin` inputs for every window it is building at once, not just one (the transactions design, §7.4), and, under the hot root's `scratch/`, the spilled index runs of every events build in flight (about two index.packs' worth per chunk, the runs and their merge, `workers` chunks at once). Size volumes accordingly; a disk-full during backfill fails the run before the relieving prune can fire, on every pass.
+Operational note — **peak disk after long downtime**: pruning runs only in the first run's prune stage, *after* backfill has materialized every newly-in-retention chunk, so a downtime approaching or exceeding the retention window transiently holds up to ~2× the retention footprint (the stale window plus its replacement). A deep backfill also holds the transient `.bin` inputs for every window it is building at once, not just one (the transactions design, §7.4), and, under the hot root's `scratch/`, the spilled runs of every events index and `.bin` build in flight (about two index.packs, the events runs and their merge, and one `.bin` per chunk, `workers` chunks at once). Size volumes accordingly; a disk-full during backfill fails the run before the relieving prune can fire, on every pass.
 
 The retention floor and resume point are computed by:
 
@@ -968,14 +965,14 @@ Two terms recur below. The **retention window** runs from the retention floor up
 - **One frozen index per window, at all times** (settled or not). The commit batch promotes the new coverage and demotes the old one in a single write, so "the window's index" is always well-defined for readers — never two frozen keys, never none once the window has one.
 - **No transient artifact key survives a settled state.** Between runs, no `chunk:*` or `index:*` key is `"freezing"` or `"pruning"`. Each kind of transient has cleared: index transients by the run that observed them; per-chunk `"freezing"` keys by re-materialization (the plan stage rebuilds them, for chunks in `[floor, last complete chunk]`, from whatever source `backfillSource` picks) or by the below-floor prune once their chunk ages out; and `"pruning"` keys by the sweeps.
 - **No leftover hot DB for a fully-cold chunk** (when settled). No `hot:chunk:c` exists for a chunk `c` whose artifacts are all durable *and* whose window's index covers `c` — that chunk is served entirely from cold files, so its hot DB must be gone.
-- **No leftover `.bin` key in a finalized window** (when settled). No `chunk:c:txhash` exists for a chunk in a window whose frozen index is terminal: the terminal commit demotes the merged inputs `[lo, hi]` and the sweep removes them, chunks below the floor are cleared by retention pruning, and the prune scan's redundant-input branch catches any that a crashed widening re-froze.
+- **No leftover `.bin` key in a finalized window** (when settled). No `chunk:c:txhash` exists for a chunk in a window whose frozen index is terminal: the terminal commit demotes the inputs `[lo, hi]` and the sweep removes them, chunks below the floor are cleared by retention pruning, and the prune scan's redundant-input branch catches any that a crashed widening re-froze.
 
 Two transient states are tolerated even at a settled moment:
 
 - **A hot DB's `"transient"` bracket** around an in-flight directory operation (the boundary's `openHotDBForChunk`, startup's resume-chunk open, a discard mid-op). A crash-left bracket is finished by the next `openHotDBForChunk` or discard scan.
 - **After a recovery, when the backend tip lags, a partially-frozen chunk above the last committed ledger** may hold `"freezing"` keys while serving and settled. It sits above the last complete chunk — outside every plan range and the retention window, so no read can observe it — until the backend covers it or re-ingestion replays past it.
 
-**INV-3 (disk matches catalog).** When settled, the files and hot-DB directories on disk are exactly the set the catalog names — no more, no less. Every key maps to its expected path or paths (the events key names three files, plus the index build's scratch directory while the key is `"freezing"`), and because a key is written before its file (mark-before-write), even a partial file is reachable from its key. The hot `"transient"` bracket's tolerated shapes are the bracket's own: a key over a partly-created directory, or a key whose directory is already gone. So the match holds whether a key is in a final state or in one of the transients INV-2 tolerates. No orphan files, no dangling keys, no duplicates: a file that no catalog key names is a real bug, not mid-run debris.
+**INV-3 (disk matches catalog).** When settled, the files and hot-DB directories on disk are exactly the set the catalog names — no more, no less. Every key maps to its expected path or paths (the events key names three files, and the events and txhash keys each also name their build's scratch directory while the key is `"freezing"`), and because a key is written before its file (mark-before-write), even a partial file is reachable from its key. The hot `"transient"` bracket's tolerated shapes are the bracket's own: a key over a partly-created directory, or a key whose directory is already gone. So the match holds whether a key is in a final state or in one of the transients INV-2 tolerates. No orphan files, no dangling keys, no duplicates: a file that no catalog key names is a real bug, not mid-run debris.
 
 **INV-4 (retention bound).** When settled, no file or catalog key maps to a ledger range strictly below the effective retention floor — with one exception: a frozen index key whose window straddles the floor keeps the `lo` it was built with, so its coverage `[lo, hi]` reaches below the floor. That below-floor portion is never served ([reader contract](#reader-contract) rule 2 returns not-found), and the key and its `.idx` are swept once the whole window falls below the floor.
 
@@ -1067,6 +1064,6 @@ Every durable byte the daemon writes belongs to a storage format, and the policy
 
 ## Related documents
 
-- The transactions design ([gettransaction-full-history-design.md](./gettransaction-full-history-design.md)) — the tx-by-hash subsystem end to end: the hot `txhash` CF, the `.bin`/`.idx` formats, the rolling window index rebuild — its streamhash merge internals and safety argument — the `getTransaction` read path, and the capacity numbers. Canonical for the streamhash `.bin`/`.idx` formats, the index merge internals, and the index-key coverage semantics this doc summarizes.
+- The transactions design ([gettransaction-full-history-design.md](./gettransaction-full-history-design.md)) — the tx-by-hash subsystem end to end: the hot `txhash` CF, the `.bin`/`.idx` formats, the rolling window index rebuild — its streamhash build internals and safety argument — the `getTransaction` read path, and the capacity numbers. Canonical for the streamhash `.bin`/`.idx` formats, the index build internals, and the index-key coverage semantics this doc summarizes.
 - The events design ([getevents-full-history-design.md](./getevents-full-history-design.md), PR #635) — the cold-segment file formats and the hot events CF schema referenced by the data model.
 - The reader / query-routing design — how reads dispatch between hot DBs and frozen files for in-retention queries.
