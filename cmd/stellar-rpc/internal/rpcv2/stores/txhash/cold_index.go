@@ -4,21 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 
 	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
-const (
-	// defaultBuildWorkers is the build's worker count unless the caller
-	// passes WithWorkers. More workers build faster but slow the ingest
-	// running beside the build.
-	defaultBuildWorkers = 8
-	// coldIndexBytesPerSync starts writeback of the index every 1 MB as it is
-	// built, so its dirty pages do not hold up the hot DB's WAL fsyncs.
-	coldIndexBytesPerSync = 1 << 20
-)
+// coldIndexBytesPerSync starts writeback of the index every 1 MB as it is
+// built, so its dirty pages do not hold up the hot DB's WAL fsyncs.
+const coldIndexBytesPerSync = 1 << 20
+
+// DefaultBuildWorkers is BuildColdIndex's worker count unless the caller
+// passes WithWorkers: one worker per core on a machine with SMT, which leaves
+// the other half of the CPUs to the build's readers and writer and to the
+// rest of the daemon.
+func DefaultBuildWorkers() int { return max(runtime.GOMAXPROCS(0)/2, 1) }
 
 type ColdBinInput struct {
 	Path  string
@@ -30,8 +31,8 @@ type ColdBinInput struct {
 // its chunk's under meta.Secret with its payloads counted from meta.MinLedger,
 // the window's first ledger. meta.MaxLedger is the last ledger covered.
 // Each key's ledger was checked against its chunk when the .bin was written.
-// Caller opts can set WithWorkers and WithBytesPerSync but not the cold
-// format. The build honors ctx and removes the partial output on error.
+// Caller opts can set WithWorkers, WithBytesPerSync and WithYield but not the
+// cold format. The build honors ctx and removes the partial output on error.
 func BuildColdIndex(
 	ctx context.Context,
 	inputs []ColdBinInput,
@@ -62,7 +63,7 @@ func BuildColdIndex(
 	// payload size is the .bin files'.
 	buildOpts := make([]streamhash.BuildOption, 0, len(opts)+4)
 	buildOpts = append(buildOpts,
-		streamhash.WithWorkers(defaultBuildWorkers), streamhash.WithBytesPerSync(coldIndexBytesPerSync))
+		streamhash.WithWorkers(DefaultBuildWorkers()), streamhash.WithBytesPerSync(coldIndexBytesPerSync))
 	buildOpts = append(buildOpts, opts...)
 	buildOpts = append(buildOpts,
 		streamhash.WithFingerprint(ColdFingerprintSize), streamhash.WithMetadata(EncodeColdMetadata(meta)))
