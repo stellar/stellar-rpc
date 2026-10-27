@@ -49,13 +49,7 @@ func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.ledger_entry_an
 	if !ok {
 		panic("invalid handle type: expected snapshotSourceHandle")
 	}
-	ledgerKeyXDR := GoXDR(cLedgerKey)
-	var ledgerKey xdr.LedgerKey
-	if err := xdr.SafeUnmarshal(ledgerKeyXDR, &ledgerKey); err != nil {
-		h.logger.WithError(err).Error("SnapshotSourceGet(): SafeUnmarshal() failed")
-		return C.ledger_entry_and_ttl_t{}
-	}
-	entries, _, err := h.ledgerEntryGetter.GetLedgerEntries(h.ctx, []xdr.LedgerKey{ledgerKey})
+	entries, _, err := h.ledgerEntryGetter.GetLedgerEntries(h.ctx, []xdr.LedgerKeyView{GoXDR(cLedgerKey)})
 	if err != nil {
 		// a canceled request is not a fault
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -70,18 +64,10 @@ func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.ledger_entry_an
 	if len(entries) == 0 {
 		return C.ledger_entry_and_ttl_t{}
 	}
-	out, err := entries[0].Entry.MarshalBinary()
-	if err != nil {
-		h.logger.WithError(err).Error("SnapshotSourceGet(): MarshalBinary() failed")
-		return C.ledger_entry_and_ttl_t{}
-	}
 
 	result := C.ledger_entry_and_ttl_t{
-		entry: C.xdr_t{
-			xdr: (*C.uchar)(C.CBytes(out)),
-			len: C.size_t(len(out)),
-		},
-		ttl: -1, // missing TTL
+		entry: CXDR(entries[0].Entry),
+		ttl:   -1, // missing TTL
 	}
 	if entries[0].LiveUntilLedgerSeq != nil {
 		result.ttl = C.int64_t(*entries[0].LiveUntilLedgerSeq)
@@ -100,9 +86,9 @@ func FreeGoLedgerEntryAndTTL(leTTL C.ledger_entry_and_ttl_t) {
 
 type Parameters struct {
 	Logger            *log.Entry
-	SourceAccount     xdr.AccountId
-	OpBody            xdr.OperationBody
-	Footprint         xdr.LedgerFootprint
+	SourceAccount     xdr.AccountIdView
+	OpBody            xdr.OperationBodyView
+	Footprint         xdr.LedgerFootprintView
 	NetworkPassphrase string
 	LedgerEntryGetter ledgerentries.LedgerEntryGetter
 	LedgerSeq         uint32
@@ -165,13 +151,17 @@ func GoXDRDiffVector(xdrDiffVector C.xdr_diff_vector_t) []XDRDiff {
 }
 
 func GetPreflight(ctx context.Context, params Parameters) (Preflight, error) {
-	switch params.OpBody.Type {
+	opType, err := params.OpBody.Type()
+	if err != nil {
+		return Preflight{}, err
+	}
+	switch opType {
 	case xdr.OperationTypeInvokeHostFunction:
 		return getInvokeHostFunctionPreflight(ctx, params)
 	case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
 		return getFootprintTTLPreflight(ctx, params)
 	default:
-		return Preflight{}, fmt.Errorf("unsupported operation type: %s", params.OpBody.Type.String())
+		return Preflight{}, fmt.Errorf("unsupported operation type: %s", opType.String())
 	}
 }
 
@@ -191,17 +181,9 @@ func freeLedgerInfo(ledgerInfo C.ledger_info_t) {
 }
 
 func getFootprintTTLPreflight(ctx context.Context, params Parameters) (Preflight, error) {
-	opBodyXDR, err := params.OpBody.MarshalBinary()
-	if err != nil {
-		return Preflight{}, err
-	}
-	opBodyCXDR := CXDR(opBodyXDR)
+	opBodyCXDR := CXDR(params.OpBody)
 	defer FreeGoXDR(opBodyCXDR)
-	footprintXDR, err := params.Footprint.MarshalBinary()
-	if err != nil {
-		return Preflight{}, fmt.Errorf("cannot marshal footprint: %w", err)
-	}
-	footprintCXDR := CXDR(footprintXDR)
+	footprintCXDR := CXDR(params.Footprint)
 	defer FreeGoXDR(footprintCXDR)
 	ssh := snapshotSourceHandle{
 		ledgerEntryGetter: params.LedgerEntryGetter,
@@ -225,17 +207,15 @@ func getFootprintTTLPreflight(ctx context.Context, params Parameters) (Preflight
 }
 
 func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Preflight, error) {
-	invokeHostFunctionXDR, err := params.OpBody.MustInvokeHostFunctionOp().MarshalBinary()
+	invokeHostFunctionXDR, err := xdr.Try(func() []byte {
+		return params.OpBody.MustInvokeHostFunctionOp().MustRaw()
+	})
 	if err != nil {
 		return Preflight{}, err
 	}
 	invokeHostFunctionCXDR := CXDR(invokeHostFunctionXDR)
 	defer FreeGoXDR(invokeHostFunctionCXDR)
-	sourceAccountXDR, err := params.SourceAccount.MarshalBinary()
-	if err != nil {
-		return Preflight{}, err
-	}
-	sourceAccountCXDR := CXDR(sourceAccountXDR)
+	sourceAccountCXDR := CXDR(params.SourceAccount)
 	defer FreeGoXDR(sourceAccountCXDR)
 	ssh := snapshotSourceHandle{
 		ledgerEntryGetter: params.LedgerEntryGetter,

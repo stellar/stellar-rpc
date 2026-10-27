@@ -135,7 +135,11 @@ func legacySegmentMatches(s *protocol.SegmentFilter, segment xdr.ScVal) bool {
 	case s.Wildcard != nil && (*s.Wildcard == protocol.WildCardExactOne || *s.Wildcard == protocol.WildCardZeroOrMore):
 		return true
 	case s.ScVal != nil:
-		return s.ScVal.Equals(segment)
+		var want xdr.ScVal
+		if err := xdr.SafeUnmarshal(s.ScVal, &want); err != nil {
+			panic(err)
+		}
+		return want.Equals(segment)
 	default:
 		panic("invalid segmentFilter")
 	}
@@ -280,11 +284,6 @@ func legacyGetEvents(ctx context.Context, h eventsRPCHandler, ledgerReader store
 	// The filter validation stays for error parity; the prefilters it builds are
 	// production's alone, since the reference reads ledgers, not the events table.
 	if _, err := combineContractIDs(request.Filters); err != nil {
-		return protocol.GetEventsResponse{}, &jrpc2.Error{
-			Code: jrpc2.InvalidParams, Message: err.Error(),
-		}
-	}
-	if _, err := combineTopics(request.Filters); err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InvalidParams, Message: err.Error(),
 		}
@@ -612,7 +611,13 @@ func eventsFilterCases() []eventsFilterCase {
 	addrA, seven, big := diffAddress(eventsContractA), diffU32(7), diffI128(1, 2)
 	blob, list := diffBytes(0xde, 0xad), diffVec(transfer, seven)
 
-	seg := func(v xdr.ScVal) protocol.SegmentFilter { return protocol.SegmentFilter{ScVal: &v} }
+	seg := func(v xdr.ScVal) protocol.SegmentFilter {
+		raw, err := v.MarshalBinary()
+		if err != nil {
+			panic(err)
+		}
+		return protocol.SegmentFilter{ScVal: raw}
+	}
 	wild := func(w string) protocol.SegmentFilter { return protocol.SegmentFilter{Wildcard: &w} }
 	star, dstar := wild(protocol.WildCardExactOne), wild(protocol.WildCardZeroOrMore)
 	topics := func(tfs ...protocol.TopicFilter) []protocol.EventFilter {

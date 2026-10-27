@@ -238,11 +238,7 @@ func expandV1Filter(f *protocol.EventFilter) ([]event.Filter, bool, error) {
 	if len(f.Topics) > 0 {
 		shapes = make([]topicShape, 0, len(f.Topics))
 		for _, tf := range f.Topics {
-			shape, err := topicShapeOf(tf)
-			if err != nil {
-				return nil, false, err
-			}
-			shapes = append(shapes, shape)
+			shapes = append(shapes, topicShapeOf(tf))
 		}
 	}
 
@@ -271,7 +267,7 @@ type topicShape struct {
 	count  event.TopicCountFilter
 }
 
-func topicShapeOf(tf protocol.TopicFilter) (topicShape, error) {
+func topicShapeOf(tf protocol.TopicFilter) topicShape {
 	segs := tf
 	shape := topicShape{count: event.TopicCountFilter{Count: len(tf), Exact: true}}
 	if n := len(tf); n > 0 && tf[n-1].Wildcard != nil && *tf[n-1].Wildcard == protocol.WildCardZeroOrMore {
@@ -280,19 +276,11 @@ func topicShapeOf(tf protocol.TopicFilter) (topicShape, error) {
 		shape.count = event.TopicCountFilter{Count: len(segs)}
 	}
 	for i, s := range segs {
-		// "*" is any value, and the position still exists via the count.
-		// A segment with neither value nor wildcard is skipped the way the
-		// shared handler skips it, rather than dereferenced.
-		if s.Wildcard != nil || s.ScVal == nil {
-			continue
-		}
-		raw, err := s.ScVal.MarshalBinary()
-		if err != nil {
-			return topicShape{}, fmt.Errorf("failed to marshal segment: %w", err)
-		}
-		shape.topics[i] = raw
+		// "*" has no value, so it matches any topic; the count still
+		// requires the position.
+		shape.topics[i] = s.ScVal
 	}
-	return shape, nil
+	return shape
 }
 
 func isMatchAll(f *event.Filter) bool {

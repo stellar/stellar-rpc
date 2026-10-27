@@ -3,6 +3,7 @@ package methods
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"strconv"
 	"testing"
@@ -277,18 +278,22 @@ func TestGetEvents(t *testing.T) {
 			maxLimit:     10000,
 			defaultLimit: 100,
 		}
-		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
-			StartLedger: 1,
-			Filters: []protocol.EventFilter{
-				{Topics: []protocol.TopicFilter{
-					[]protocol.SegmentFilter{
-						{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
-						{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
-					},
-				}},
-			},
-		})
+		// Through JSON-RPC, so the topic segments go through param decoding.
+		response, err := NewHandler(handler.getEvents)(ctx, jsonRPCRequest(t, protocol.GetEventsMethodName,
+			protocol.GetEventsRequest{
+				StartLedger: 1,
+				Filters: []protocol.EventFilter{
+					{Topics: []protocol.TopicFilter{
+						[]protocol.SegmentFilter{
+							{ScVal: scValXDR(t, xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter})},
+							{ScVal: scValXDR(t, xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number})},
+						},
+					}},
+				},
+			}))
 		require.NoError(t, err)
+		results, ok := response.(protocol.GetEventsResponse)
+		require.True(t, ok)
 
 		id := protocol.Cursor{Ledger: 1, Tx: 5, Op: 0, Event: 0}.String()
 		require.NoError(t, err)
@@ -334,8 +339,8 @@ func TestGetEvents(t *testing.T) {
 			Filters: []protocol.EventFilter{
 				{Topics: []protocol.TopicFilter{
 					[]protocol.SegmentFilter{
-						{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
-						{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+						{ScVal: scValXDR(t, xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter})},
+						{ScVal: scValXDR(t, xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number})},
 					},
 				}},
 			},
@@ -440,8 +445,8 @@ func TestGetEvents(t *testing.T) {
 				{
 					Topics: []protocol.TopicFilter{
 						[]protocol.SegmentFilter{
-							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
-							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+							{ScVal: scValXDR(t, xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter})},
+							{ScVal: scValXDR(t, xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number})},
 						},
 					},
 				},
@@ -467,8 +472,8 @@ func TestGetEvents(t *testing.T) {
 				{
 					Topics: []protocol.TopicFilter{
 						[]protocol.SegmentFilter{
-							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
-							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+							{ScVal: scValXDR(t, xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter})},
+							{ScVal: scValXDR(t, xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number})},
 						},
 					},
 				},
@@ -527,8 +532,8 @@ func TestGetEvents(t *testing.T) {
 				{
 					Topics: []protocol.TopicFilter{
 						[]protocol.SegmentFilter{
-							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
-							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+							{ScVal: scValXDR(t, xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter})},
+							{ScVal: scValXDR(t, xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number})},
 							{Wildcard: &wildCardZeroOrMore},
 						},
 					},
@@ -646,8 +651,8 @@ func TestGetEvents(t *testing.T) {
 					ContractIDs: []string{strkey.MustEncode(strkey.VersionByteContract, contractID[:])},
 					Topics: []protocol.TopicFilter{
 						[]protocol.SegmentFilter{
-							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter}},
-							{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number}},
+							{ScVal: scValXDR(t, xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counter})},
+							{ScVal: scValXDR(t, xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &number})},
 						},
 					},
 				},
@@ -1061,8 +1066,8 @@ func BenchmarkGetEventsTopicFilters(b *testing.B) {
 			ContractIDs: []string{contractFilters[i]},
 			Topics: []protocol.TopicFilter{
 				{
-					{ScVal: &counterScVal},
-					{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &amount}},
+					{ScVal: scValXDR(b, counterScVal)},
+					{ScVal: scValXDR(b, xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &amount})},
 				},
 			},
 		}
@@ -1129,7 +1134,7 @@ func BenchmarkGetEvents(b *testing.B) {
 			{
 				Topics: []protocol.TopicFilter{
 					[]protocol.SegmentFilter{
-						{ScVal: &xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counters[1]}},
+						{ScVal: scValXDR(b, xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &counters[1]})},
 					},
 				},
 			},
@@ -1149,6 +1154,20 @@ func BenchmarkGetEvents(b *testing.B) {
 	nsPerOp := totalNs.Nanoseconds() / int64(b.N)
 	msPerOp := float64(nsPerOp) / 1e6
 	log.Infof("Benchmark Results: %v ms/op ", msPerOp)
+}
+
+func TestGetEventsRejectsHugeDeclaredCountsCheaply(t *testing.T) {
+	topic := []string{base64.StdEncoding.EncodeToString(nestedScMaps())}
+	request := jsonRPCRequest(t, protocol.GetEventsMethodName, map[string]any{
+		"startLedger": 1,
+		"filters":     []map[string]any{{"topics": [][]string{topic}}},
+	})
+	handler := NewGetEventsHandler(quietLogger(), nil, 100, 10)
+
+	requireCheapRejection(t, func() {
+		_, err := handler(t.Context(), request)
+		require.ErrorContains(t, err, "invalid parameters")
+	})
 }
 
 func TestCombineContractIDs(t *testing.T) {
@@ -1302,7 +1321,7 @@ func TestGetEventsContractIDFilterDoesNotStarveOtherFilters(t *testing.T) {
 		Filters: []protocol.EventFilter{
 			{ContractIDs: []string{idA}},
 			{Topics: []protocol.TopicFilter{
-				{protocol.SegmentFilter{ScVal: &transferVal}},
+				{protocol.SegmentFilter{ScVal: scValXDR(t, transferVal)}},
 			}},
 		},
 	})
@@ -1445,6 +1464,13 @@ func transactionMetaWithEvents(events ...xdr.ContractEvent) xdr.TransactionMeta 
 			},
 		},
 	}
+}
+
+func scValXDR(tb testing.TB, v xdr.ScVal) xdr.ScValView {
+	tb.Helper()
+	raw, err := v.MarshalBinary()
+	require.NoError(tb, err)
+	return raw
 }
 
 func contractEvent(contractID xdr.ContractId, topic []xdr.ScVal, body xdr.ScVal) xdr.ContractEvent {

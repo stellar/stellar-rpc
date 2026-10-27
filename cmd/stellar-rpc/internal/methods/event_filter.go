@@ -47,34 +47,23 @@ func compileFilters(in []protocol.EventFilter) (eventFilters, error) {
 			c.contractIDs = append(c.contractIDs, raw)
 		}
 		for _, tf := range f.Topics {
-			t, err := compileTopicFilter(tf)
-			if err != nil {
-				return nil, err
-			}
-			c.topics = append(c.topics, t)
+			c.topics = append(c.topics, compileTopicFilter(tf))
 		}
 		out = append(out, c)
 	}
 	return out, nil
 }
 
-func compileTopicFilter(tf protocol.TopicFilter) (topicFilter, error) {
+func compileTopicFilter(tf protocol.TopicFilter) topicFilter {
 	var t topicFilter
 	if n := len(tf); n > 0 && tf[n-1].Wildcard != nil && *tf[n-1].Wildcard == protocol.WildCardZeroOrMore {
 		tf, t.atLeast = tf[:n-1], true
 	}
 	t.values = make([][]byte, len(tf))
 	for i, s := range tf {
-		if s.ScVal == nil { // "*", or a segment Valid would have rejected
-			continue
-		}
-		raw, err := s.ScVal.MarshalBinary()
-		if err != nil {
-			return topicFilter{}, fmt.Errorf("failed to marshal segment: %w", err)
-		}
-		t.values[i] = raw
+		t.values[i] = s.ScVal
 	}
-	return t, nil
+	return t
 }
 
 // matchHeader reports whether some filter accepts the type and contract id. It never rejects

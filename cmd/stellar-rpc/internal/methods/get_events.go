@@ -78,12 +78,12 @@ func combineEventTypes(filters []protocol.EventFilter) []int {
 	return uniqueEventTypes
 }
 
-func combineTopics(filters []protocol.EventFilter) (store.TopicFilters, error) {
+func combineTopics(filters []protocol.EventFilter) store.TopicFilters {
 	topicFilters := make(store.TopicFilters, 0, len(filters))
 
 	for _, filter := range filters {
 		if len(filter.Topics) == 0 {
-			return nil, nil
+			return nil
 		}
 
 		// Each topic is an OR...
@@ -94,26 +94,22 @@ func combineTopics(filters []protocol.EventFilter) (store.TopicFilters, error) {
 				if segmentFilter.Wildcard != nil || segmentFilter.ScVal == nil {
 					continue // skip wildcards but keep position of segment
 				}
-				encodedTopic, err := segmentFilter.ScVal.MarshalBinary()
-				if err != nil {
-					return nil, fmt.Errorf("failed to marshal segment: %w", err)
-				}
 				conditions = append(conditions, store.TopicCondition{
 					Column: i + 1, // columns start with `topic1`
-					Value:  encodedTopic,
+					Value:  segmentFilter.ScVal,
 				})
 			}
 
 			// This means a topic full of wildcards, making it dominate any
 			// other filter.
 			if len(conditions) == 0 {
-				return nil, nil
+				return nil
 			}
 			topicFilters = append(topicFilters, conditions)
 		}
 	}
 
-	return topicFilters, nil
+	return topicFilters
 }
 
 // TODO: remove this linter exclusions
@@ -187,13 +183,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		}
 	}
 
-	topics, err := combineTopics(request.Filters)
-	if err != nil {
-		return protocol.GetEventsResponse{}, &jrpc2.Error{
-			Code: jrpc2.InvalidParams, Message: err.Error(),
-		}
-	}
-
+	topics := combineTopics(request.Filters)
 	eventTypes := combineEventTypes(request.Filters)
 
 	filters, err := compileFilters(request.Filters)

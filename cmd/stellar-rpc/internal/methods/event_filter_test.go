@@ -18,7 +18,7 @@ import (
 func TestEventFilters(t *testing.T) {
 	sym := func(s string) xdr.ScVal { return xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: (*xdr.ScSymbol)(&s)} }
 	raw := func(v xdr.ScVal) []byte { b, err := v.MarshalBinary(); require.NoError(t, err); return b }
-	seg := func(s string) protocol.SegmentFilter { v := sym(s); return protocol.SegmentFilter{ScVal: &v} }
+	seg := func(s string) protocol.SegmentFilter { return protocol.SegmentFilter{ScVal: raw(sym(s))} }
 	wild := func(w string) protocol.SegmentFilter { return protocol.SegmentFilter{Wildcard: &w} }
 	cidA, cidB := bytes.Repeat([]byte{0xAA}, 32), bytes.Repeat([]byte{0xBB}, 32)
 	strkeyA := strkey.MustEncode(strkey.VersionByteContract, cidA)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path"
@@ -155,21 +156,21 @@ type inMemoryLedgerEntryGetter struct {
 
 func (m inMemoryLedgerEntryGetter) GetLedgerEntries(
 	_ context.Context,
-	keys []xdr.LedgerKey,
+	keys []xdr.LedgerKeyView,
 ) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
 	result := make([]ledgerentries.LedgerKeyAndEntry, 0, len(keys))
 	for _, key := range keys {
-		serializedKey, err := key.MarshalBinaryBase64()
-		if err != nil {
-			return nil, 0, err
-		}
-		entry, ok := m.entries[serializedKey]
+		entry, ok := m.entries[base64.StdEncoding.EncodeToString(key)]
 		if !ok {
 			continue
 		}
+		entryXDR, err := entry.MarshalBinary()
+		if err != nil {
+			return nil, 0, err
+		}
 		toAppend := ledgerentries.LedgerKeyAndEntry{
 			Key:   key,
-			Entry: entry,
+			Entry: entryXDR,
 		}
 		if entry.Data.Type == xdr.LedgerEntryTypeContractData || entry.Data.Type == xdr.LedgerEntryTypeContractCode {
 			// Make sure it doesn't ttl
@@ -220,32 +221,13 @@ var supportedProtocolVersions = []uint32{29, 30}
 func getPreflightParameters(t testing.TB, protocolVersion uint32) Parameters {
 	ledgerEntryGetter, err := newInMemoryLedgerEntryGetter(mockLedgerEntries, latestSimulateTransactionLedgerSeq)
 	require.NoError(t, err)
-	argSymbol := xdr.ScSymbol("world")
+	sourceAccount, err := xdr.MustAddress("GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H").MarshalBinary()
+	require.NoError(t, err)
 	params := Parameters{
-		EnableDebug:   true,
-		Logger:        log.New(),
-		SourceAccount: xdr.MustAddress("GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H"),
-		OpBody: xdr.OperationBody{
-			Type: xdr.OperationTypeInvokeHostFunction,
-			InvokeHostFunctionOp: &xdr.InvokeHostFunctionOp{
-				HostFunction: xdr.HostFunction{
-					Type: xdr.HostFunctionTypeHostFunctionTypeInvokeContract,
-					InvokeContract: &xdr.InvokeContractArgs{
-						ContractAddress: xdr.ScAddress{
-							Type:       xdr.ScAddressTypeScAddressTypeContract,
-							ContractId: &mockContractID,
-						},
-						FunctionName: "hello",
-						Args: []xdr.ScVal{
-							{
-								Type: xdr.ScValTypeScvSymbol,
-								Sym:  &argSymbol,
-							},
-						},
-					},
-				},
-			},
-		},
+		EnableDebug:       true,
+		Logger:            log.New(),
+		SourceAccount:     sourceAccount,
+		OpBody:            invokeContractOpBody(t, "hello"),
 		NetworkPassphrase: "foo",
 		LedgerEntryGetter: ledgerEntryGetter,
 		BucketListSize:    200,
@@ -254,6 +236,34 @@ func getPreflightParameters(t testing.TB, protocolVersion uint32) Parameters {
 		AuthMode:          protocol.AuthModeRecord,
 	}
 	return params
+}
+
+// invokeContractOpBody returns the XDR of an operation calling function on the mock contract.
+func invokeContractOpBody(t testing.TB, function xdr.ScSymbol) xdr.OperationBodyView {
+	argSymbol := xdr.ScSymbol("world")
+	opBody, err := xdr.OperationBody{
+		Type: xdr.OperationTypeInvokeHostFunction,
+		InvokeHostFunctionOp: &xdr.InvokeHostFunctionOp{
+			HostFunction: xdr.HostFunction{
+				Type: xdr.HostFunctionTypeHostFunctionTypeInvokeContract,
+				InvokeContract: &xdr.InvokeContractArgs{
+					ContractAddress: xdr.ScAddress{
+						Type:       xdr.ScAddressTypeScAddressTypeContract,
+						ContractId: &mockContractID,
+					},
+					FunctionName: function,
+					Args: []xdr.ScVal{
+						{
+							Type: xdr.ScValTypeScvSymbol,
+							Sym:  &argSymbol,
+						},
+					},
+				},
+			},
+		},
+	}.MarshalBinary()
+	require.NoError(t, err)
+	return opBody
 }
 
 func TestGetLedgerInfoUsesProvidedLedgerTime(t *testing.T) {
@@ -291,7 +301,7 @@ func TestGetPreflightDebug(t *testing.T) {
 		t.Run(fmt.Sprintf("protocol %d", protocolVersion), func(t *testing.T) {
 			params := getPreflightParameters(t, protocolVersion)
 			// Cause an error: non-existent function
-			params.OpBody.InvokeHostFunctionOp.HostFunction.InvokeContract.FunctionName = "bar"
+			params.OpBody = invokeContractOpBody(t, "bar")
 
 			resultWithDebug, err := GetPreflight(t.Context(), params)
 			require.NoError(t, err)
@@ -335,4 +345,26 @@ func TestGetPreflightUseUpgradedAuthOnPrevProtocol(t *testing.T) {
 	result, err := GetPreflight(t.Context(), params)
 	require.NoError(t, err)
 	require.Empty(t, result.Error)
+}
+
+func TestGetPreflightExtendFootprintTTL(t *testing.T) {
+	key, err := mockLedgerEntriesWithoutTTLs[1].LedgerKey()
+	require.NoError(t, err)
+	footprint, err := xdr.LedgerFootprint{ReadOnly: []xdr.LedgerKey{key}}.MarshalBinary()
+	require.NoError(t, err)
+	opBody, err := xdr.OperationBody{
+		Type:                 xdr.OperationTypeExtendFootprintTtl,
+		ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 2000},
+	}.MarshalBinary()
+	require.NoError(t, err)
+
+	for _, protocolVersion := range supportedProtocolVersions {
+		params := getPreflightParameters(t, protocolVersion)
+		params.OpBody = opBody
+		params.Footprint = footprint
+		result, err := GetPreflight(t.Context(), params)
+		require.NoError(t, err)
+		require.Empty(t, result.Error)
+		require.NotEmpty(t, result.TransactionData)
+	}
 }

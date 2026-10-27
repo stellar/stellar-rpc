@@ -2,6 +2,7 @@ package methods
 
 import (
 	"context"
+	"encoding"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,7 +14,10 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/gxdr"
+	"github.com/stellar/go-stellar-sdk/ingest"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/randxdr"
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
@@ -151,6 +155,81 @@ func TestLedgerEntryChange(t *testing.T) {
 	require.Equal(t, protocol.LedgerEntryChange{}, change)
 }
 
+// TestReadSimulationInput checks the envelope parts read from the XDR against
+// the same parts of the decoded envelope.
+func TestReadSimulationInput(t *testing.T) {
+	marshal := func(v encoding.BinaryMarshaler) []byte {
+		b, err := v.MarshalBinary()
+		require.NoError(t, err)
+		return b
+	}
+	gen := randxdr.NewGenerator()
+	envelopeTypes := map[xdr.EnvelopeType]bool{}
+	for range 1000 {
+		shape := &gxdr.TransactionEnvelope{}
+		gen.Next(shape, randxdr.LedgerCloseMetaPresets)
+		var envelope xdr.TransactionEnvelope
+		require.NoError(t, gxdr.Convert(shape, &envelope))
+		envelopeTypes[envelope.Type] = true
+
+		in, err := readSimulationInput(base64.StdEncoding.EncodeToString(marshal(envelope)))
+		require.NoError(t, err)
+
+		ops := envelope.Operations()
+		require.Len(t, ops, in.opCount)
+		require.Equal(t, envelope.Memo().Type, in.memoType)
+		var footprint []byte
+		if data, ok := (&ingest.LedgerTransaction{Envelope: envelope}).GetSorobanData(); ok {
+			footprint = marshal(data.Resources.Footprint)
+		}
+		require.Equal(t, footprint, []byte(in.footprint))
+		if len(ops) == 0 {
+			continue
+		}
+		op := ops[0]
+		require.Equal(t, marshal(op.Body), []byte(in.opBody))
+		require.Equal(t, op.Body.Type, in.opType)
+		require.Equal(t, op.Body.Type == xdr.OperationTypeInvokeHostFunction &&
+			len(op.Body.MustInvokeHostFunctionOp().Auth) > 0, in.hasAuth)
+		source := envelope.SourceAccount()
+		if op.SourceAccount != nil {
+			source = *op.SourceAccount
+		}
+		require.Equal(t, marshal(source.ToAccountId()), []byte(in.source))
+	}
+	require.Len(t, envelopeTypes, 3)
+}
+
+func TestReadSimulationInputLargeArgument(t *testing.T) {
+	envelope := invokeHostFunctionEnvelope(t)
+	vec := make(xdr.ScVec, 6000)
+	for i := range vec {
+		u := xdr.Uint32(i)
+		vec[i] = xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &u}
+	}
+	args := &vec
+	envelope.V1.Tx.Operations[0].Body.InvokeHostFunctionOp.HostFunction.InvokeContract.Args = []xdr.ScVal{
+		{Type: xdr.ScValTypeScvVec, Vec: &args},
+	}
+	envelopeB64, err := xdr.MarshalBase64(envelope)
+	require.NoError(t, err)
+
+	_, err = readSimulationInput(envelopeB64)
+	require.NoError(t, err)
+}
+
+func TestSimulateTransactionRejectsHugeDeclaredCountsCheaply(t *testing.T) {
+	request := jsonRPCRequest(t, protocol.SimulateTransactionMethodName,
+		protocol.SimulateTransactionRequest{Transaction: hugeCountEnvelope(t)})
+	handler := NewSimulateTransactionHandler(quietLogger(), &MockLedgerReader{}, nil, panicPreflightGetter{})
+
+	requireCheapRejection(t, func() {
+		resp, err := handler(t.Context(), request)
+		require.NoError(t, err)
+		require.Equal(t, protocol.SimulateTransactionResponse{Error: "Could not unmarshal transaction"}, resp)
+	})
+}
+
 type panicPreflightGetter struct{}
 
 func (panicPreflightGetter) GetPreflight(
@@ -179,7 +258,7 @@ func (g *recordingPreflightGetter) GetPreflight(
 func TestSimulateTransactionFeeBumpMissingSorobanData(t *testing.T) {
 	logger := log.New()
 	ledgerReader := &MockLedgerReader{}
-	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{}, xdr.DecodeOptions{})
+	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{})
 
 	txEnvelope := feeBumpExtendFootprintMissingSorobanData(t)
 	txB64, err := xdr.MarshalBase64(txEnvelope)
@@ -215,7 +294,7 @@ func TestSimulateTransactionPassesLedgerTimeFromLatestLedgerMetaToPreflight(t *t
 			MinFee: 123,
 		},
 	}
-	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, getter, xdr.DecodeOptions{})
+	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, getter)
 
 	ledgerReader.
 		On("GetLatestLedgerSequence", mock.Anything).
@@ -256,7 +335,7 @@ func TestSimulateTransactionPassesLedgerTimeFromLatestLedgerMetaToPreflight(t *t
 func TestSimulateTransactionReturnsErrorWhenLatestLedgerMetaFails(t *testing.T) {
 	logger := log.New()
 	ledgerReader := &MockLedgerReader{}
-	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{}, xdr.DecodeOptions{})
+	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{})
 
 	ledgerReader.
 		On("GetLatestLedgerSequence", mock.Anything).
@@ -300,7 +379,7 @@ func TestSimulateTransactionReturnsErrorWhenLatestLedgerMetaFails(t *testing.T) 
 func TestSimulateTransactionReturnsErrorWhenLatestLedgerMetaNotFound(t *testing.T) {
 	logger := log.New()
 	ledgerReader := &MockLedgerReader{}
-	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{}, xdr.DecodeOptions{})
+	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{})
 
 	ledgerReader.
 		On("GetLatestLedgerSequence", mock.Anything).
@@ -347,7 +426,7 @@ func TestSimulateTransactionPassesFieldsFromV2LedgerMetaToPreflight(t *testing.T
 	getter := &recordingPreflightGetter{
 		result: preflight.Preflight{MinFee: 123},
 	}
-	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, getter, xdr.DecodeOptions{})
+	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, getter)
 
 	const (
 		ledgerSeq       = uint32(99)
@@ -421,7 +500,7 @@ func TestSimulateTransactionPassesFieldsFromV2LedgerMetaToPreflight(t *testing.T
 func TestSimulateTransactionReturnsErrorForUnknownLedgerMetaVersion(t *testing.T) {
 	logger := log.New()
 	ledgerReader := &MockLedgerReader{}
-	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{}, xdr.DecodeOptions{})
+	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, panicPreflightGetter{})
 
 	// V0 is encodable but predates the versions the handler reads, so it fails the version check.
 	unknownVersionMeta := xdr.LedgerCloseMeta{V: 0, V0: &xdr.LedgerCloseMetaV0{}}
@@ -474,7 +553,7 @@ func TestSimulateTransactionCloseTimeIsAnchoredToLatestLedgerSequence(t *testing
 	getter := &recordingPreflightGetter{
 		result: preflight.Preflight{MinFee: 1},
 	}
-	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, getter, xdr.DecodeOptions{})
+	handler := NewSimulateTransactionHandler(logger, ledgerReader, nil, getter)
 
 	// Use a fixed ledger snapshot: sequence 77 with close time T77.
 	const (
@@ -661,7 +740,7 @@ func TestSimulateTransactionThreadsUseUpgradedAuth(t *testing.T) {
 			ledgerReader.On("GetLedger", mock.Anything, uint32(2)).Return(closeMeta, true, nil)
 
 			getter := &capturingPreflightGetter{}
-			handler := NewSimulateTransactionHandler(log.New(), ledgerReader, nil, getter, xdr.DecodeOptions{})
+			handler := NewSimulateTransactionHandler(log.New(), ledgerReader, nil, getter)
 
 			requestJSON := fmt.Sprintf(`{
 "jsonrpc": "2.0",

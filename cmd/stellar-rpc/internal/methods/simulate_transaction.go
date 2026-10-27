@@ -60,32 +60,20 @@ func LedgerEntryChangeFromXDRDiff(
 
 	result := protocol.LedgerEntryChange{Type: changeType}
 
-	// We need to unmarshal the ledger entry for both b64 and json cases
-	// because we need the inner ledger key.
-	var entry xdr.LedgerEntry
-	if err := xdr.SafeUnmarshal(entryXDR, &entry); err != nil {
-		return protocol.LedgerEntryChange{}, err
-	}
-
-	key, err := entry.LedgerKey()
+	keyXDR, err := xdr.LedgerEntryView(entryXDR).LedgerKey()
 	if err != nil {
 		return protocol.LedgerEntryChange{}, err
 	}
 
 	switch format {
 	case protocol.FormatJSON:
-		err = AddLedgerEntryChangeJSON(&result, diff, key, budget)
+		err = AddLedgerEntryChangeJSON(&result, diff, keyXDR, budget)
 		if err != nil {
 			return protocol.LedgerEntryChange{}, err
 		}
 
 	default:
-		keyB64, err := xdr.MarshalBase64(key)
-		if err != nil {
-			return protocol.LedgerEntryChange{}, err
-		}
-
-		result.KeyXDR = keyB64
+		result.KeyXDR = base64.StdEncoding.EncodeToString(keyXDR)
 
 		if beforePresent {
 			before := base64.StdEncoding.EncodeToString(diff.Before)
@@ -102,13 +90,13 @@ func LedgerEntryChangeFromXDRDiff(
 }
 
 func AddLedgerEntryChangeJSON(
-	l *protocol.LedgerEntryChange, diff preflight.XDRDiff, key xdr.LedgerKey, budget *xdr2json.Budget,
+	l *protocol.LedgerEntryChange, diff preflight.XDRDiff, keyXDR []byte, budget *xdr2json.Budget,
 ) error {
 	var err error
 	beforePresent := len(diff.Before) > 0
 	afterPresent := len(diff.After) > 0
 
-	l.KeyJSON, err = budget.ConvertInterface(key)
+	l.KeyJSON, err = budget.ConvertBytes(xdr.LedgerKey{}, keyXDR)
 	if err != nil {
 		return err
 	}
@@ -261,41 +249,51 @@ func formatResponse(preflight preflight.Preflight,
 	return simResp, nil
 }
 
-func sorobanDataFromEnvelope(txEnvelope xdr.TransactionEnvelope) (*xdr.SorobanTransactionData, bool) {
-	switch txEnvelope.Type {
-	case xdr.EnvelopeTypeEnvelopeTypeTx:
-		if txEnvelope.V1 == nil {
-			return nil, false
-		}
-		return sorobanDataFromTx(txEnvelope.V1.Tx)
-	case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
-		if txEnvelope.FeeBump == nil {
-			return nil, false
-		}
-		inner := txEnvelope.FeeBump.Tx.InnerTx
-		if inner.Type != xdr.EnvelopeTypeEnvelopeTypeTx || inner.V1 == nil {
-			return nil, false
-		}
-		return sorobanDataFromTx(inner.V1.Tx)
-	default:
-		return nil, false
-	}
+// simulationInput is what simulation reads from a transaction envelope. For a
+// fee bump it comes from the inner transaction.
+type simulationInput struct {
+	opCount   int
+	memoType  xdr.MemoType
+	opBody    xdr.OperationBodyView // of the first operation
+	opType    xdr.OperationType
+	hasAuth   bool                    // the operation invokes a host function with auth entries
+	source    xdr.AccountIdView       // the operation's source account, or else the transaction's
+	footprint xdr.LedgerFootprintView // nil without SorobanTransactionData
 }
 
-func sorobanDataFromTx(tx xdr.Transaction) (*xdr.SorobanTransactionData, bool) {
-	if tx.Ext.V != 1 || tx.Ext.SorobanData == nil {
-		return nil, false
+func readSimulationInput(envelopeB64 string) (simulationInput, error) {
+	envelope, err := xdr.ViewFromBase64[xdr.TransactionEnvelopeView](envelopeB64)
+	if err != nil {
+		return simulationInput{}, err
 	}
-	return tx.Ext.SorobanData, true
+	var in simulationInput
+	err = xdr.TryVoid(func() {
+		tx := envelope.MustTransaction()
+		ops := tx.MustOperations().MustAll()
+		in.memoType = tx.MustMemo().MustType()
+		in.source = tx.MustSourceAccount().MustToAccountId()
+		if ext := tx.MustExt(); ext.MustV() == 1 {
+			in.footprint = ext.MustSorobanData().MustResources().MustFootprint().MustRaw()
+		}
+		if in.opCount = len(ops); in.opCount == 0 {
+			return
+		}
+		in.opBody = ops[0].MustBody().MustRaw()
+		in.opType = in.opBody.MustType()
+		if in.opType == xdr.OperationTypeInvokeHostFunction {
+			in.hasAuth = in.opBody.MustInvokeHostFunctionOp().MustAuth().MustCount() > 0
+		}
+		if source, ok := ops[0].MustSourceAccount().MustUnwrap(); ok {
+			in.source = source.MustToAccountId()
+		}
+	})
+	return in, err
 }
 
 // NewSimulateTransactionHandler returns a JSON rpc handler to run preflight simulations
-//
-//nolint:cyclop,funlen
 func NewSimulateTransactionHandler(logger *log.Entry,
 	ledgerReader store.LedgerReader,
 	coreClient host.FastCoreClient, getter PreflightGetter,
-	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {
 	var preflightInfos latestMemo[latestLedgerPreflightInfo]
 	return NewHandler(func(ctx context.Context, request protocol.SimulateTransactionRequest,
@@ -303,9 +301,7 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 		if err := protocol.IsValidFormat(request.Format); err != nil {
 			return protocol.SimulateTransactionResponse{Error: err.Error()}
 		}
-		var txEnvelope xdr.TransactionEnvelope
-
-		err := xdr.SafeUnmarshalBase64WithOptions(request.Transaction, &txEnvelope, decodeOptions)
+		in, err := readSimulationInput(request.Transaction)
 		if err != nil {
 			logger.WithError(err).WithField("request", request).
 				Info("could not unmarshal simulate transaction envelope")
@@ -313,46 +309,35 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 				Error: "Could not unmarshal transaction",
 			}
 		}
-		if len(txEnvelope.Operations()) != 1 {
+		if in.opCount != 1 {
 			return protocol.SimulateTransactionResponse{
 				Error: "Transaction contains more than one operation",
 			}
 		}
 		// Validate that transaction does not contain a memo
-		if txEnvelope.Memo().Type != xdr.MemoTypeMemoNone {
+		if in.memoType != xdr.MemoTypeMemoNone {
 			return protocol.SimulateTransactionResponse{
 				Error: "Transaction contains a memo. Soroban transactions do not support memos.",
 			}
 		}
-		op := txEnvelope.Operations()[0]
 
-		if err := validateAuthMode(op.Body, &request.AuthMode); err != nil {
+		if err := validateAuthMode(in.opType, in.hasAuth, &request.AuthMode); err != nil {
 			return protocol.SimulateTransactionResponse{Error: err.Error()}
 		}
 
-		var sourceAccount xdr.AccountId
-		if opSourceAccount := op.SourceAccount; opSourceAccount != nil {
-			sourceAccount = opSourceAccount.ToAccountId()
-		} else {
-			sourceAccount = txEnvelope.SourceAccount().ToAccountId()
-		}
-
-		footprint := xdr.LedgerFootprint{}
-		switch op.Body.Type {
+		switch in.opType {
 		case xdr.OperationTypeInvokeHostFunction: // no-op
 		case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
-			sorobanData, ok := sorobanDataFromEnvelope(txEnvelope)
-			if !ok {
+			if in.footprint == nil {
 				return protocol.SimulateTransactionResponse{
 					Error: "To perform a SimulateTransaction for ExtendFootprintTtl or RestoreFootprint operations," +
 						" SorobanTransactionData must be provided",
 				}
 			}
-			footprint = sorobanData.Resources.Footprint
 
 		default:
 			return protocol.SimulateTransactionResponse{
-				Error: "Transaction contains unsupported operation type: " + op.Body.Type.String(),
+				Error: "Transaction contains unsupported operation type: " + in.opType.String(),
 			}
 		}
 
@@ -381,9 +366,9 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 
 		params := preflight.GetterParameters{
 			BucketListSize:    ledgerInfo.bucketListSize,
-			SourceAccount:     sourceAccount,
-			OperationBody:     op.Body,
-			Footprint:         footprint,
+			SourceAccount:     in.source,
+			OperationBody:     in.opBody,
+			Footprint:         in.footprint,
 			ResourceConfig:    resourceConfig,
 			AuthMode:          request.AuthMode,
 			ProtocolVersion:   ledgerInfo.protocolVersion,
@@ -411,11 +396,11 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 	})
 }
 
-// Ensures the given auth mode is valid for the given operation body. Auth mode
+// Ensures the given auth mode is valid for the given operation. Auth mode
 // is passed by reference so that if it's omitted, it will be set to the
-// appropriate value for the given operation body (namely, enforcement if auth
+// appropriate value for the given operation (namely, enforcement if auth
 // is present, recording otherwise).
-func validateAuthMode(opBody xdr.OperationBody, authModeRef *string) error {
+func validateAuthMode(opType xdr.OperationType, hasAuth bool, authModeRef *string) error {
 	if authModeRef == nil {
 		return errors.New("invalid auth mode")
 	}
@@ -436,10 +421,8 @@ func validateAuthMode(opBody xdr.OperationBody, authModeRef *string) error {
 		)
 	}
 
-	switch opBody.Type {
+	switch opType {
 	case xdr.OperationTypeInvokeHostFunction:
-		hasAuth := len(opBody.MustInvokeHostFunctionOp().Auth) > 0
-
 		if authMode == "" {
 			// Interpret the best course of action based on the payload:
 			//  - default is enforcement with auth payload, recording without
@@ -466,7 +449,7 @@ func validateAuthMode(opBody xdr.OperationBody, authModeRef *string) error {
 		}
 
 	default:
-		return fmt.Errorf("transaction contains unsupported operation type: %s", opBody.Type.String())
+		return fmt.Errorf("transaction contains unsupported operation type: %s", opType.String())
 	}
 
 	return nil

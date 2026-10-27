@@ -147,7 +147,7 @@ type metricsLedgerEntryGetterWrapper struct {
 }
 
 func (m *metricsLedgerEntryGetterWrapper) GetLedgerEntries(ctx context.Context,
-	keys []xdr.LedgerKey,
+	keys []xdr.LedgerKeyView,
 ) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
 	startTime := time.Now()
 	entries, seq, err := m.LedgerEntryGetter.GetLedgerEntries(ctx, keys)
@@ -159,9 +159,9 @@ func (m *metricsLedgerEntryGetterWrapper) GetLedgerEntries(ctx context.Context,
 
 type GetterParameters struct {
 	BucketListSize    uint64
-	SourceAccount     xdr.AccountId
-	OperationBody     xdr.OperationBody
-	Footprint         xdr.LedgerFootprint
+	SourceAccount     xdr.AccountIdView
+	OperationBody     xdr.OperationBodyView
+	Footprint         xdr.LedgerFootprintView
 	ResourceConfig    protocol.ResourceConfig
 	AuthMode          string
 	UseUpgradedAuth   bool

@@ -27,7 +27,6 @@ func NewSendTransactionHandler(
 	logger *log.Entry,
 	ledgerReader store.LedgerReader,
 	passphrase string,
-	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {
 	submitter := daemon.CoreClient()
 	return NewHandler(func(ctx context.Context, request protocol.SendTransactionRequest,
@@ -39,9 +38,7 @@ func NewSendTransactionHandler(
 			}
 		}
 
-		var envelope xdr.TransactionEnvelope
-
-		err := xdr.SafeUnmarshalBase64WithOptions(request.Transaction, &envelope, decodeOptions)
+		envelope, err := xdr.ViewFromBase64[xdr.TransactionEnvelopeView](request.Transaction)
 		if err != nil {
 			return protocol.SendTransactionResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,
@@ -49,8 +46,7 @@ func NewSendTransactionHandler(
 			}
 		}
 
-		var hash [32]byte
-		hash, err = network.HashTransactionInEnvelope(envelope, passphrase)
+		hash, err := hashTransaction(envelope, passphrase)
 		if err != nil {
 			return protocol.SendTransactionResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,
@@ -181,4 +177,13 @@ func NewSendTransactionHandler(
 			}
 		}
 	})
+}
+
+// hashTransaction returns the hash of the transaction in envelope.
+func hashTransaction(envelope xdr.TransactionEnvelopeView, passphrase string) ([32]byte, error) {
+	hasher, err := network.NewTransactionViewHasher(passphrase)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return hasher.Hash(envelope)
 }

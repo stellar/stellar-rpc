@@ -2,6 +2,7 @@ package ledgerentries
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 
 	coreProto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
@@ -12,13 +13,13 @@ import (
 )
 
 type LedgerKeyAndEntry struct {
-	Key                xdr.LedgerKey
-	Entry              xdr.LedgerEntry
+	Key                xdr.LedgerKeyView
+	Entry              xdr.LedgerEntryView
 	LiveUntilLedgerSeq *uint32 // optional live-until ledger seq, when applicable.
 }
 
 type LedgerEntryGetter interface {
-	GetLedgerEntries(ctx context.Context, keys []xdr.LedgerKey) ([]LedgerKeyAndEntry, uint32, error)
+	GetLedgerEntries(ctx context.Context, keys []xdr.LedgerKeyView) ([]LedgerKeyAndEntry, uint32, error)
 }
 
 // NewLedgerEntryGetter creates a LedgerEntryGetter which obtains the latest known value of the given ledger entries
@@ -50,7 +51,7 @@ type coreLedgerEntryGetter struct {
 
 func (c coreLedgerEntryGetter) GetLedgerEntries(
 	ctx context.Context,
-	keys []xdr.LedgerKey,
+	keys []xdr.LedgerKeyView,
 ) ([]LedgerKeyAndEntry, uint32, error) {
 	atLedger := c.atLedger
 	if atLedger == 0 {
@@ -74,8 +75,7 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 			continue
 		}
 
-		var xdrEntry xdr.LedgerEntry
-		err := xdr.SafeUnmarshalBase64(entry.Entry, &xdrEntry)
+		entryXDR, err := base64.StdEncoding.DecodeString(entry.Entry)
 		if err != nil {
 			return nil, 0, fmt.Errorf("could not decode ledger entry: %w", err)
 		}
@@ -84,7 +84,7 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 		// returned in order.
 		newEntry := LedgerKeyAndEntry{
 			Key:   keys[i],
-			Entry: xdrEntry,
+			Entry: entryXDR,
 		}
 		if entry.LiveUntilLedgerSeq != 0 || entry.State == coreProto.LedgerEntryStateArchived {
 			// Core doesn't provide the specific TTL in which an entry was archived.

@@ -2,6 +2,7 @@ package methods
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"sort"
 
@@ -27,15 +28,12 @@ func NewGetLedgerEntriesHandler(
 	logger *log.Entry,
 	coreClient host.FastCoreClient,
 	latestLedgerReader store.LedgerReader,
-	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {
 	getter := ledgerentries.NewLedgerEntryGetter(coreClient, latestLedgerReader)
-	return newGetLedgerEntriesHandlerFromGetter(logger, getter, decodeOptions)
+	return newGetLedgerEntriesHandlerFromGetter(logger, getter)
 }
 
-func newGetLedgerEntriesHandlerFromGetter(
-	logger *log.Entry, getter ledgerentries.LedgerEntryGetter, decodeOptions xdr.DecodeOptions,
-) jrpc2.Handler {
+func newGetLedgerEntriesHandlerFromGetter(logger *log.Entry, getter ledgerentries.LedgerEntryGetter) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.GetLedgerEntriesRequest,
 	) (protocol.GetLedgerEntriesResponse, error) {
 		if err := protocol.IsValidFormat(request.Format); err != nil {
@@ -51,11 +49,9 @@ func newGetLedgerEntriesHandlerFromGetter(
 				Message: fmt.Sprintf("key count (%d) exceeds maximum supported (%d)", len(request.Keys), getLedgerEntriesMaxKeys),
 			}
 		}
-		var ledgerKeys []xdr.LedgerKey
+		var ledgerKeys []xdr.LedgerKeyView
 		for i, requestKey := range request.Keys {
-			var ledgerKey xdr.LedgerKey
-
-			err := xdr.SafeUnmarshalBase64WithOptions(requestKey, &ledgerKey, decodeOptions)
+			ledgerKey, err := xdr.ViewFromBase64[xdr.LedgerKeyView](requestKey)
 			if err != nil {
 				logger.WithError(err).WithField("request", request).
 					Infof("could not unmarshal requestKey %s at index %d from getLedgerEntries request", requestKey, i)
@@ -64,7 +60,7 @@ func newGetLedgerEntriesHandlerFromGetter(
 					Message: fmt.Sprintf("cannot unmarshal key value %s at index %d", requestKey, i),
 				}
 			}
-			if ledgerKey.Type == xdr.LedgerEntryTypeTtl {
+			if ledgerKey.MustType() == xdr.LedgerEntryTypeTtl {
 				logger.WithField("request", request).
 					Infof("could not provide ledger ttl entry %s at index %d from getLedgerEntries request", requestKey, i)
 				return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
@@ -84,7 +80,7 @@ func newGetLedgerEntriesHandlerFromGetter(
 				Message: err.Error(),
 			}
 		}
-		err = sortKeysAndEntriesAccordingToRequest(request.Keys, ledgerKeysAndEntries)
+		err = sortKeysAndEntriesAccordingToRequest(ledgerKeys, ledgerKeysAndEntries)
 		if err != nil {
 			return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InternalError,
@@ -130,22 +126,20 @@ func (k keyEntriesAndOrdering) Swap(i, j int) {
 	k.keyEntries[i], k.keyEntries[j] = k.keyEntries[j], k.keyEntries[i]
 }
 
-func sortKeysAndEntriesAccordingToRequest(b64RequestKeys []string, keyEntries []ledgerentries.LedgerKeyAndEntry) error {
+func sortKeysAndEntriesAccordingToRequest(
+	requestKeys []xdr.LedgerKeyView, keyEntries []ledgerentries.LedgerKeyAndEntry,
+) error {
 	// Create a map for the keys so that we can quickly query their order
-	requestKeyToOrder := make(map[string]int, len(b64RequestKeys))
-	for i, key := range b64RequestKeys {
-		requestKeyToOrder[key] = i
+	requestKeyToOrder := make(map[string]int, len(requestKeys))
+	for i, key := range requestKeys {
+		requestKeyToOrder[string(key)] = i
 	}
 	// Obtain the expected ordering using the request keys
 	ordering := make([]int, len(keyEntries))
 	for i, keyEntry := range keyEntries {
-		b64Key, err := xdr.MarshalBase64(keyEntry.Key)
-		if err != nil {
-			return err
-		}
-		order, ok := requestKeyToOrder[b64Key]
+		order, ok := requestKeyToOrder[string(keyEntry.Key)]
 		if !ok {
-			return fmt.Errorf("mismatching key in result: %s", b64Key)
+			return fmt.Errorf("mismatching key in result: %s", base64.StdEncoding.EncodeToString(keyEntry.Key))
 		}
 		ordering[i] = order
 	}
@@ -161,17 +155,27 @@ func ledgerKeyEntryToResult(keyEntry ledgerentries.LedgerKeyAndEntry,
 	format string,
 ) (protocol.LedgerEntryResult, error) {
 	result := protocol.LedgerEntryResult{}
+	var dataXDR, extXDR []byte
+	err := xdr.TryVoid(func() {
+		result.LastModifiedLedger = keyEntry.Entry.MustLastModifiedLedgerSeq().MustValue()
+		dataXDR = keyEntry.Entry.MustData().MustRaw()
+		extXDR = keyEntry.Entry.MustExt().MustRaw()
+	})
+	if err != nil {
+		return protocol.LedgerEntryResult{}, fmt.Errorf("could not read ledger entry: %w", err)
+	}
+
 	switch format {
 	case protocol.FormatJSON:
-		keyJs, err := xdr2json.ConvertInterface(keyEntry.Key)
+		keyJs, err := xdr2json.ConvertBytes(xdr.LedgerKey{}, keyEntry.Key)
 		if err != nil {
 			return protocol.LedgerEntryResult{}, err
 		}
-		entryJs, err := xdr2json.ConvertInterface(keyEntry.Entry.Data)
+		entryJs, err := xdr2json.ConvertBytes(xdr.LedgerEntryData{}, dataXDR)
 		if err != nil {
 			return protocol.LedgerEntryResult{}, err
 		}
-		extJs, err := xdr2json.ConvertInterface(keyEntry.Entry.Ext)
+		extJs, err := xdr2json.ConvertBytes(xdr.LedgerEntryExt{}, extXDR)
 		if err != nil {
 			return protocol.LedgerEntryResult{}, err
 		}
@@ -181,29 +185,11 @@ func ledgerKeyEntryToResult(keyEntry ledgerentries.LedgerKeyAndEntry,
 		result.ExtensionJSON = extJs
 
 	default:
-		keyXDR, err := xdr.MarshalBase64(keyEntry.Key)
-		if err != nil {
-			return protocol.LedgerEntryResult{}, fmt.Errorf("could not serialize ledger key %v: %w", keyEntry.Key, err)
-		}
-
-		entryXDR, err := xdr.MarshalBase64(keyEntry.Entry.Data)
-		if err != nil {
-			err = fmt.Errorf("could not serialize ledger entry %v: %w", keyEntry.Entry, err)
-			return protocol.LedgerEntryResult{}, err
-		}
-
-		extXDR, err := xdr.MarshalBase64(keyEntry.Entry.Ext)
-		if err != nil {
-			err = fmt.Errorf("could not serialize ledger entry extension %v: %w", keyEntry.Entry.Ext, err)
-			return protocol.LedgerEntryResult{}, err
-		}
-
-		result.KeyXDR = keyXDR
-		result.DataXDR = entryXDR
-		result.ExtensionXDR = extXDR
+		result.KeyXDR = base64.StdEncoding.EncodeToString(keyEntry.Key)
+		result.DataXDR = base64.StdEncoding.EncodeToString(dataXDR)
+		result.ExtensionXDR = base64.StdEncoding.EncodeToString(extXDR)
 	}
 
-	result.LastModifiedLedger = uint32(keyEntry.Entry.LastModifiedLedgerSeq)
 	result.LiveUntilLedgerSeq = keyEntry.LiveUntilLedgerSeq
 	return result, nil
 }

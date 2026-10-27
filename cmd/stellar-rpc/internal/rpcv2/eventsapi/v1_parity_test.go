@@ -304,8 +304,8 @@ func TestGetEventsV1Parity(t *testing.T) {
 	contractA := testContractStrkey(t, 0xAA)
 	contractB := testContractStrkey(t, 0xBB)
 	seg := func(sym string) protocol.SegmentFilter {
-		v, _ := symbolScVal(t, sym)
-		return protocol.SegmentFilter{ScVal: &v}
+		_, raw := symbolScVal(t, sym)
+		return protocol.SegmentFilter{ScVal: raw}
 	}
 	wild := func(w string) protocol.SegmentFilter {
 		return protocol.SegmentFilter{Wildcard: &w}
