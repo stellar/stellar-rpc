@@ -69,9 +69,11 @@ func ingestConfigFor(s catalog.ArtifactSet, chunkID chunk.ID, cfg ProcessConfig)
 	if c.Txhash || c.Events {
 		catalogSecret := cfg.Catalog.Secret()
 		if c.Txhash {
-			indexID := uint32(cfg.Catalog.TxHashIndexLayout().TxHashIndexID(chunkID))
-			sec := txhash.ColdIndexSecret(catalogSecret[:], indexID)
+			txLayout := cfg.Catalog.TxHashIndexLayout()
+			indexID := txLayout.TxHashIndexID(chunkID)
+			sec := txhash.ColdIndexSecret(catalogSecret[:], uint32(indexID))
 			c.TxhashSecret = sec[:]
+			c.TxhashPayloadBase = txLayout.FirstChunk(indexID).FirstLedger()
 		}
 		if c.Events {
 			sec := event.ColdIndexSecret(catalogSecret[:], chunkID)
