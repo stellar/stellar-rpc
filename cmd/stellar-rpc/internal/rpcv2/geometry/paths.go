@@ -152,10 +152,18 @@ func (l Layout) EventsPaths(c chunk.ID) []string {
 // before the kind is frozen. A crashed build leaves them, and they are not
 // in ArtifactPaths, so the sweep removes them with the key.
 func (l Layout) ScratchPaths(c chunk.ID, kind Kind) []string {
+	if kind == KindTxHash {
+		return []string{l.TxHashRunsDir(c)}
+	}
 	if kind != KindEvents {
 		return nil
 	}
 	return []string{filepath.Join(l.scratchDir(), event.IndexRunsDirName(c))}
+}
+
+// TxHashRunsDir is where a build of chunk c's .bin spills its sorted runs.
+func (l Layout) TxHashRunsDir(c chunk.ID) string {
+	return filepath.Join(l.scratchDir(), txhash.RunsDirName(c))
 }
 
 // TxHashBinPath is a chunk's raw txhash run. Leaf owned by txhash.ColdBinName.

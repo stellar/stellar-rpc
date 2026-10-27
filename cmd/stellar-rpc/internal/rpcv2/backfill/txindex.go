@@ -46,7 +46,7 @@ func (cfg BuildConfig) validate() error {
 
 // buildTxhashIndex rebuilds window w's index at [lo, hi] from scratch (rule 3 /
 // gettransaction §7.2) via the one-write protocol: skip if already frozen; require
-// every .bin frozen; merge into the .idx and fsync; commit. It never deletes a
+// every .bin frozen; build the .idx from them and fsync; commit. It never deletes a
 // file — that's the sweeps' job. A crash before the commit leaves "freezing"
 // debris; after, the demoted keys become "pruning" sweep work.
 func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chunk.ID, cfg BuildConfig) error {

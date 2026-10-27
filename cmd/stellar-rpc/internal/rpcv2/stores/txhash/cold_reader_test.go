@@ -1,6 +1,7 @@
 package txhash
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
@@ -57,6 +59,44 @@ func TestColdReader_LedgerAccessors(t *testing.T) {
 	require.NoError(t, r.Close())
 	assert.Equal(t, fixtureMinLedger(), r.MinLedger())
 	assert.Equal(t, fixtureMaxLedger(), r.MaxLedger())
+}
+
+// The payloads count from the window's first ledger however far the retention
+// floor has dropped the window's chunks, so the .bin files the window keeps
+// build its index at every floor, and the reader resolves each key to its
+// ledger at every one.
+func TestColdReader_AcrossAMovedRetentionFloor(t *testing.T) {
+	dir := t.TempDir()
+	entries := makeFixtureEntries(300)
+	writeFixtureBins(t, dir, entries)
+	for c := fixtureWindowChunk; c < fixtureFirstChunk; c++ {
+		writeColdBin(t, filepath.Join(dir, ColdBinName(c)), fixtureBin(c), nil)
+	}
+	last := fixtureFirstChunk + fixtureSpreadChunks - 1
+
+	for _, floor := range []chunk.ID{fixtureWindowChunk, fixtureFirstChunk, fixtureFirstChunk + 3} {
+		t.Run(floor.String(), func(t *testing.T) {
+			var inputs []string
+			for c := floor; c <= last; c++ {
+				inputs = append(inputs, filepath.Join(dir, ColdBinName(c)))
+			}
+			idxPath := filepath.Join(dir, floor.String()+".idx")
+			require.NoError(t, BuildColdIndex(context.Background(), inputs, idxPath,
+				fixtureMinLedger(), last.LastLedger()))
+			r, err := OpenColdReader(idxPath)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = r.Close() })
+
+			assert.Equal(t, fixtureMinLedger(), r.MinLedger())
+			for _, e := range entries {
+				if e.seq >= floor.FirstLedger() {
+					got, err := r.Get(e.hash)
+					require.NoError(t, err)
+					require.Equal(t, e.seq, got)
+				}
+			}
+		})
+	}
 }
 
 func TestColdReader_GetAfterCloseReturnsClosed(t *testing.T) {
