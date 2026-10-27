@@ -256,12 +256,13 @@ func WriteColdTxIndexFile(
 	}
 	slices.SortFunc(cold, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
 	bin := filepath.Join(t.TempDir(), txhash.ColdBinName(cov.Lo))
-	require.NoError(t, txhash.WriteColdBin(bin, secret, cold))
+	base := cat.TxHashIndexLayout().FirstChunk(cov.Index).FirstLedger()
+	require.NoError(t, txhash.WriteColdBin(bin, secret, cov.Lo, base, cold))
 
 	idxPath := cat.Layout().TxHashIndexFilePath(cov)
 	require.NoError(t, os.MkdirAll(filepath.Dir(idxPath), 0o755))
 	require.NoError(t, txhash.BuildColdIndex(
-		context.Background(), []string{bin}, idxPath, cov.Lo.FirstLedger(), cov.Hi.LastLedger()))
+		context.Background(), []string{bin}, idxPath, base, cov.Hi.LastLedger()))
 }
 
 // EventLCMBytes returns the marshaled bytes of a single-transaction
@@ -361,7 +362,8 @@ func FeeTxLCMBytes(t *testing.T, seq uint32, feeCharged int64) []byte {
 }
 
 // ReadColdBin reads back a cold txhash .bin file written by
-// txhash.WriteColdBin, verifying the header count against the file size.
+// txhash.WriteColdBin, verifying the header count against the file size. Each
+// entry's Seq is its stored payload, the ledger minus the writer's base.
 // Test-side mirror of the on-disk contract (production consumes .bin files
 // via the index builder's streaming scan, never a full read-back).
 func ReadColdBin(t *testing.T, path string) []txhash.ColdEntry {
@@ -370,15 +372,16 @@ func ReadColdBin(t *testing.T, path string) []txhash.ColdEntry {
 	require.NoError(t, err)
 	defer f.Close()
 
-	// Prelude (magic "SBIN", version, 3 reserved) + uint64-LE count + secret.
+	// Prelude (magic, version, payload size, reserved) + uint64-LE count, then
+	// the metadata, padded to 4096 bytes.
 	const preludeSize = 8
-	const headerSize = preludeSize + 8 + stores.SecretLen
-	entrySize := txhash.ColdKeySize + 4
+	const headerSize = 4096
+	entrySize := txhash.ColdKeySize + txhash.ColdPayloadSize
 
 	var header [headerSize]byte
 	_, err = io.ReadFull(f, header[:])
 	require.NoError(t, err)
-	require.Equal(t, []byte("SBIN"), header[:4], "cold .bin magic")
+	require.Equal(t, []byte("FSTS"), header[:4], "cold .bin magic")
 	require.Equal(t, byte(1), header[4], "cold .bin version")
 	count := binary.LittleEndian.Uint64(header[preludeSize : preludeSize+8])
 
@@ -398,7 +401,7 @@ func ReadColdBin(t *testing.T, path string) []txhash.ColdEntry {
 		_, err = io.ReadFull(f, buf)
 		require.NoError(t, err)
 		copy(entries[i].Key[:], buf[:txhash.ColdKeySize])
-		entries[i].Seq = binary.LittleEndian.Uint32(buf[txhash.ColdKeySize:])
+		entries[i].Seq = uint32(buf[16]) | uint32(buf[17])<<8 | uint32(buf[18])<<16
 	}
 	return entries
 }
