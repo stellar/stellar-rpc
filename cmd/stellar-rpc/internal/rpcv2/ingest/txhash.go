@@ -31,6 +31,7 @@ type txhashCold struct {
 	binPath string
 	chunkID chunk.ID
 	secret  [stores.SecretLen]byte
+	base    uint32
 	entries []txhash.ColdEntry
 	metrics coldMetrics
 }
@@ -42,7 +43,7 @@ type txhashCold struct {
 // secret is the chunk's per-index secret — the same one the index build derives
 // (txhash.ColdIndexSecret) — that the stored keys are blinded with.
 func newTxhashCold(
-	binPath string, chunkID chunk.ID, sink MetricSink, secret [stores.SecretLen]byte,
+	binPath string, chunkID chunk.ID, sink MetricSink, secret [stores.SecretLen]byte, base uint32,
 ) (*txhashCold, error) {
 	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(binPath), err)
@@ -57,6 +58,7 @@ func newTxhashCold(
 		metrics: newColdMetrics(sink, dataTypeTxhash),
 	}
 	t.secret = secret
+	t.base = base
 	return t, nil
 }
 
@@ -98,7 +100,7 @@ func (t *txhashCold) finalize(_ context.Context) error {
 	slices.SortFunc(t.entries, func(a, b txhash.ColdEntry) int {
 		return bytes.Compare(a.Key[:], b.Key[:])
 	})
-	err := txhash.WriteColdBin(t.binPath, t.secret, t.entries)
+	err := txhash.WriteColdBin(t.binPath, t.secret, t.chunkID, t.base, t.entries)
 	if err == nil {
 		t.metrics.sink.IngestStage(dataTypeTxhash, stageFinalize, time.Since(start), len(t.entries))
 	}

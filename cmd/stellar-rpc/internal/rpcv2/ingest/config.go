@@ -21,6 +21,9 @@ type Config struct {
 	// keys — the caller derives it (txhash.ColdIndexSecret) so ingest keys match
 	// the index build. Required when Txhash is set — no unkeyed fallback.
 	TxhashSecret []byte
+	// TxhashPayloadBase is the first ledger of the chunk's tx-hash index
+	// window, which the .bin's payloads count from.
+	TxhashPayloadBase uint32
 
 	// EventsSecret is the resolved per-chunk secret that keys the events cold
 	// index's routing — the caller derives it (event.ColdIndexSecret) so the

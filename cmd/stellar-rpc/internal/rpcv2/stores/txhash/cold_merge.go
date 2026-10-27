@@ -546,8 +546,8 @@ func (m *merger) buildMergeTree(inputs []string, numLeaves, bufBytes int) (<-cha
 }
 
 // feedMergedKeys drains the merged stream into SortedBuilder.AddKey, storing
-// each seq as its offset from minLedger and rejecting any seq outside
-// [minLedger, maxLedger]. On a consumer-side error it cancels the pipeline
+// each entry's payload (its seq's offset from minLedger) as it is and
+// rejecting any seq past maxLedger. On a consumer-side error it cancels the pipeline
 // and drains so producers unwind. Returns the key count.
 func feedMergedKeys(
 	builder *streamhash.SortedBuilder,
@@ -561,14 +561,12 @@ func feedMergedKeys(
 		data := batch.data[:batch.count*coldBinEntrySize]
 		for off := 0; off < len(data); off += coldBinEntrySize {
 			entry := data[off : off+coldBinEntrySize]
-			seq := binary.LittleEndian.Uint32(entry[ColdKeySize:])
-			if seq < minLedger || seq > maxLedger {
+			p := uint32(entry[ColdKeySize]) | uint32(entry[ColdKeySize+1])<<8 | uint32(entry[ColdKeySize+2])<<16
+			if p > maxLedger-minLedger {
 				return drainAndFail(finalCh, m, added,
-					fmt.Errorf("txhash: entry seq %d outside index coverage [%d, %d]", seq, minLedger, maxLedger))
+					fmt.Errorf("txhash: entry seq %d outside index coverage [%d, %d]", minLedger+p, minLedger, maxLedger))
 			}
-			// payload fits ColdPayloadSize: BuildColdIndex checked
-			// maxLedger-minLedger <= coldPayloadMax, and seq is in range.
-			if err := builder.AddKey(entry[:ColdKeySize], uint64(seq-minLedger)); err != nil {
+			if err := builder.AddKey(entry[:ColdKeySize], uint64(p)); err != nil {
 				return drainAndFail(finalCh, m, added, fmt.Errorf("txhash: add key %d: %w", added, err))
 			}
 			added++

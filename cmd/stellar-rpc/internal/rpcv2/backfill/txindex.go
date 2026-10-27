@@ -95,7 +95,7 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 		return fmt.Errorf("buildTxhashIndex mkdir %s: %w", indexDir, mkErr)
 	}
 	if berr := txhash.BuildColdIndex(
-		ctx, inputs, idxPath, lo.FirstLedger(), hi.LastLedger(),
+		ctx, inputs, idxPath, cat.TxHashIndexLayout().FirstChunk(w).FirstLedger(), hi.LastLedger(),
 	); berr != nil {
 		return fmt.Errorf("buildTxhashIndex build window %s coverage [%s,%s]: %w", w, lo, hi, berr)
 	}
