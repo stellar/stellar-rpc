@@ -202,16 +202,10 @@ func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.B
 // and returns them positionally aligned with the input slice. See
 // Reader.FetchEvents for the sorted-input precondition.
 //
-// Implementation: validates eventIDs are sorted ascending with no
-// duplicates (returns wrapped ErrUnsortedEventIDs otherwise — same
-// shape as the cold side), encodes them to BE-uint32 keys, then
-// calls rocksdb.Store.BatchMultiGet once per matchBatchSize keys.
-// RocksDB pins every block a call touches until it returns, so the
-// slices bound what one request pins in the block cache. Event rows
-// never change once written, so the slices need no shared snapshot.
-// Each call crosses CGO once and enables async_io, so the kernel can
-// overlap SST page reads on EBS and other high-latency storage. ctx
-// is checked before each call; a call in flight is not cancellable.
+// It calls BatchMultiGet once per matchBatchSize ids: RocksDB pins every
+// block a call touches until the call returns, so the slices bound what
+// one request pins in the block cache. Rows never change once written, so
+// the slices need no shared snapshot. ctx is checked before each call.
 //
 // A missing row is an error: every caller passes ids that name
 // stored events (see Reader.FetchEvents), implying RocksDB has

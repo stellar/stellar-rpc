@@ -106,16 +106,9 @@ func (f *Filter) valueTermKeys() []TermKey {
 	return keys
 }
 
-// termPlans returns the index terms a candidate must carry, one
-// conjunction per plan. A filter yields one plan, its value terms, unless
-// it constrains the topic count, when it yields one plan per bucket, a
-// single one for an exact count: A and (b or c) is (A and b) or (A and
-// c), and the union across plans keeps the or. A constrained topic
-// position already implies an "at least" count at or below it, since a
-// topic term is only indexed for events carrying that position. Skipping
-// the buckets there keeps the common ["a", "**"] shape from fanning out
-// over chunk-sized bucket bitmaps; the post-filter enforces the count
-// either way.
+// termPlans returns the filter's plans, each an AND of terms. A topic-count
+// range becomes one plan per bucket, unless a constrained topic position
+// already implies the count; the post-filter enforces the count either way.
 func (f *Filter) termPlans() [][]TermKey {
 	values := f.valueTermKeys()
 	var buckets []TermKey
@@ -219,14 +212,11 @@ type Match struct {
 	Ordinal uint32
 }
 
-// termPlan is one of a filter's termPlans, as slots in the batched term
-// lookup's result.
+// termPlan is a plan's terms as slots in the LookupKeys result.
 type termPlan []int
 
-// batchSizes resolves the first and following internal batch sizes from the
-// caller's hint. The hint is a page size the handler has already validated,
-// so it is honored in full and a page arrives in one fetch. Both sizes are
-// clamped positive: a zero step would stall the stream.
+// batchSizes returns the first and later fetch sizes. A positive hint is a
+// validated page size, so it is honored in full.
 func batchSizes(hint int) (int, int) {
 	rest := max(1, matchBatchSize)
 	first := rest
@@ -319,14 +309,9 @@ func validateMatchCall(ctx context.Context, r Reader, filters []Filter, window I
 	return nil
 }
 
-// planIndexTerms maps every filter's plans to slots in the single batched
-// lookup that follows; it runs before any index I/O. A plan that repeats
-// an earlier one is dropped: plans only pick candidates, and the
-// post-filter still runs every filter.
-//
-// matchAll reports that some filter, or the empty slice, constrains
-// nothing, so the caller streams the window directly rather than
-// intersecting nothing and returning empty.
+// planIndexTerms returns every filter's plans, without repeats, as slots
+// into the unique keys. matchAll reports that some filter, or the empty
+// slice, constrains nothing.
 func planIndexTerms(filters []Filter) ([]termPlan, []TermKey, bool) {
 	if len(filters) == 0 {
 		return nil, nil, true

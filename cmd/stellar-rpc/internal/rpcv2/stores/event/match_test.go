@@ -1749,10 +1749,8 @@ func TestCountDistinctTerms(t *testing.T) {
 	}), "topic-count buckets are not value terms and are not counted")
 }
 
-// TestTermPlansAtMostSevenTerms pins that no filter shape yields a plan of
-// more than seven terms (the contract id, the event type, every topic and one
-// topic-count bucket), so with the slab FastAnd never gets more than eight
-// inputs.
+// TestTermPlansAtMostSevenTerms pins that, with the slab, FastAnd never gets
+// more than the eight inputs the pinned roaring checks before it allocates.
 func TestTermPlansAtMostSevenTerms(t *testing.T) {
 	const widest = 1 + 1 + protocol.MaxTopicCount + 1
 	system := xdr.ContractEventTypeSystem
@@ -1789,9 +1787,6 @@ func TestTermPlansAtMostSevenTerms(t *testing.T) {
 	require.Equal(t, widest, most, "fixture: no filter shape reached the widest plan")
 }
 
-// The first-batch hint contract: a positive hint sizes the first fetch in
-// full, since every caller passes a validated page size, and later batches
-// use the default.
 func TestBatchSizes(t *testing.T) {
 	first, rest := batchSizes(0)
 	require.Equal(t, matchBatchSize, first)
