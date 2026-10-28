@@ -29,9 +29,7 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 )
 
-// slabShift is the slab width as a power of two; 1<<16 is one roaring
-// container. A var so tests can shrink it. It never changes what a stream
-// yields.
+// slabShift is log2 of the slab width, one roaring container. Tests shrink it.
 //
 //nolint:gochecknoglobals // test seam; production never writes it
 var slabShift uint = 16
@@ -73,12 +71,10 @@ func resolveSlabPlans(plans []termPlan, sources []*roaring.Bitmap) []slabPlan {
 	return out
 }
 
-// eval returns p's matches inside slab, the bitmap of one slab's ids, as a
-// fresh bitmap the caller owns, or nil when there are none. The slab and
-// the plan's terms go to roaring in one FastAnd call, the shape in which the
-// pinned roaring counts before it allocates, so an empty intersection
-// allocates only its result. ops is the caller's buffer for the call's
-// arguments, with room for the slab and every term.
+// eval returns p's matches inside slab as a fresh bitmap, or nil. One
+// FastAnd over the slab and every term is the shape in which the pinned
+// roaring allocates only the result when the intersection is empty. ops is
+// scratch for FastAnd's arguments.
 func (p slabPlan) eval(slab *roaring.Bitmap, ops []*roaring.Bitmap) *roaring.Bitmap {
 	ops = append(append(ops[:0], slab), p...)
 	res := roaring.FastAnd(ops...)
@@ -109,9 +105,6 @@ func (p slabPlan) eval(slab *roaring.Bitmap, ops []*roaring.Bitmap) *roaring.Bit
 // "outside this slab" test covers it.
 const boundRetired = int64(-1)
 
-// nextBound is the plan's bound: the largest of its terms' first ids at or
-// above pos, or boundRetired as soon as one term holds none, which proves
-// the plan is done.
 func (p slabPlan) nextBound(pos uint32) int64 {
 	bound := int64(pos)
 	for _, bm := range p {
@@ -124,8 +117,6 @@ func (p slabPlan) nextBound(pos uint32) int64 {
 	return bound
 }
 
-// prevBound is nextBound descending: the smallest of the terms' last ids at
-// or below pos.
 func (p slabPlan) prevBound(pos uint32) int64 {
 	bound := int64(pos)
 	for _, bm := range p {
@@ -145,25 +136,18 @@ type slabStepper struct {
 	window IDRange
 	desc   bool
 
-	// ops is eval's argument buffer, sized once for the widest plan.
 	ops []*roaring.Bitmap
 
-	// bounds holds, per plan, the id its next candidate is proved to lie at
-	// or past (at or before, descending), or boundRetired once it has none
-	// left. A bound is monotone in the walk direction, so one proved earlier
-	// still holds at every position up to it: it is re-proved only once the
-	// cursor reaches it, and a plan whose bound lies past the current slab
-	// is not evaluated there. A held bound can be weaker than a fresh one,
-	// which costs an evaluated slab, never a match. Bounds start at the
-	// cursor so the first step proves them all.
+	// bounds holds each plan's bound, or boundRetired. The term bitmaps
+	// never change, so a bound holds until the cursor reaches it and is
+	// re-proved only then.
 	bounds []int64
 
-	// cursor is the next unevaluated boundary: the inclusive low bound
-	// ascending, the exclusive high bound descending.
+	// cursor is the next unevaluated position: inclusive ascending,
+	// exclusive descending.
 	cursor uint32
 	done   bool
 
-	// cur is the current slab's result, held only for its iterator.
 	cur *roaring.Bitmap
 	asc roaring.ManyIntIterable
 	rev roaring.IntIterable
@@ -221,8 +205,7 @@ func (s *slabStepper) seekAsc(pos uint32) (uint32, bool) {
 	return uint32(best), true
 }
 
-// seekDesc is seekAsc mirrored: the largest of the plans' bounds at or below
-// hi-1, returned as the exclusive high bound the walk resumes at.
+// seekDesc is seekAsc mirrored, returning an exclusive high bound.
 func (s *slabStepper) seekDesc(hi uint32) (uint32, bool) {
 	pos := hi - 1
 	var best int64
@@ -247,18 +230,15 @@ func (s *slabStepper) seekDesc(hi uint32) (uint32, bool) {
 	return uint32(best) + 1, true
 }
 
-// nextBounds returns the next slab's [lo, hi), clipped to the window, in the
-// walk's direction. The cursor first moves to the proved bound, so the slab
-// returned holds the next possible candidate and is entered at that candidate
-// rather than at its base.
+// nextBounds returns the next slab to evaluate as [lo, hi), clipped to the
+// window and starting at the next possible candidate.
 func (s *slabStepper) nextBounds() (uint32, uint32, bool) {
 	if s.done {
 		return 0, 0, false
 	}
 	if s.desc {
-		// hi > window.Start here, because an empty window never reaches the
-		// stepper and the walk stops at window.Start, so seekDesc's hi-1
-		// cannot underflow.
+		// The cursor stays above window.Start until done, so seekDesc's
+		// hi-1 cannot underflow.
 		hi, ok := s.seekDesc(s.cursor)
 		if !ok {
 			s.done = true
@@ -290,11 +270,9 @@ func (s *slabStepper) nextBounds() (uint32, uint32, bool) {
 	return lo, hi, true
 }
 
-// evalSlab unions the per-plan results for [lo, hi), or returns nil when
-// the slab holds nothing. A plan whose bound lies outside the slab is
-// skipped, since the bound already proves it matches nothing here. The
-// results are this call's own bitmaps, so the union runs in place into the
-// first of them.
+// evalSlab returns the union of the plans' matches in [lo, hi), or nil. A
+// plan whose bound lies outside the slab cannot match in it and is skipped.
+// FastAnd's results are fresh, so the union runs in place.
 func (s *slabStepper) evalSlab(lo, hi uint32) *roaring.Bitmap {
 	var acc *roaring.Bitmap
 	slab := roaring.New()
@@ -315,8 +293,7 @@ func (s *slabStepper) evalSlab(lo, hi uint32) *roaring.Bitmap {
 	return acc
 }
 
-// ensureSlab advances to the next slab that holds a match, reporting false
-// once the window is exhausted.
+// ensureSlab loads the next slab holding a match, or reports false.
 func (s *slabStepper) ensureSlab() bool {
 	for s.cur == nil {
 		lo, hi, ok := s.nextBounds()
@@ -341,9 +318,8 @@ func (s *slabStepper) dropSlab() {
 	s.cur, s.asc, s.rev = nil, nil, nil
 }
 
-// appendUpTo appends at most n ids in emission order to dst, evaluating slabs
-// as it fills, and returns the extended slice. A result shorter than n means
-// the query is exhausted.
+// appendUpTo fills dst up to n ids in emission order. A shorter result means
+// the walk is done.
 func (s *slabStepper) appendUpTo(dst []uint32, n int) []uint32 {
 	for len(dst) < n {
 		if !s.ensureSlab() {
@@ -358,8 +334,7 @@ func (s *slabStepper) appendUpTo(dst []uint32, n int) []uint32 {
 			}
 			continue
 		}
-		// NextMany fills the tail in bulk and returns short only at the end
-		// of the bitmap, so a short fill is this slab's last id.
+		// NextMany returns short only at the end of the slab's result.
 		want := n - len(dst)
 		base := len(dst)
 		dst = slices.Grow(dst, want)[:base+want]

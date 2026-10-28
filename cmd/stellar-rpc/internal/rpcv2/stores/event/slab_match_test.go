@@ -39,9 +39,8 @@ func drainMatches(tb testing.TB, seq iter.Seq2[Match, error], limit int) []Match
 
 // ───────────────────────── the answer without the index ─────────────────────
 
-// matchingEvents is the corpus's whole answer to filters, computed by running
-// the post-filter over every ordinal rather than by asking the index. An
-// empty filter slice selects everything.
+// matchingEvents answers filters without the index: postFilter over every
+// ordinal.
 func matchingEvents(tb testing.TB, c *diffCorpus, filters []Filter) []Match {
 	tb.Helper()
 	ids := make([]uint32, len(c.raw))
@@ -62,9 +61,8 @@ func matchingEvents(tb testing.TB, c *diffCorpus, filters []Filter) []Match {
 	return out
 }
 
-// expectedStream clips the whole-corpus answer to one query: the window, the
-// direction, and the page the consumer stops on. all is ascending by ordinal,
-// so the window is a slice of it.
+// expectedStream clips the whole-corpus answer to one query's window,
+// direction and page.
 func expectedStream(all []Match, w IDRange, desc bool, limit int) []Match {
 	byOrdinal := func(m Match, id uint32) int { return cmp.Compare(m.Ordinal, id) }
 	lo, _ := slices.BinarySearchFunc(all, w.Start, byOrdinal)
@@ -85,7 +83,6 @@ func expectedStream(all []Match, w IDRange, desc bool, limit int) []Match {
 	return out
 }
 
-// queryCase is one (filters, window, direction, limit) query.
 type queryCase struct {
 	name    string
 	filters []Filter
@@ -94,8 +91,6 @@ type queryCase struct {
 	limit   int
 }
 
-// requireStream drives one case through Matches and requires the stream the
-// corpus says it must be.
 func requireStream(tb testing.TB, r Reader, all []Match, c queryCase) []Match {
 	tb.Helper()
 	got := drainMatches(tb,
@@ -107,8 +102,7 @@ func requireStream(tb testing.TB, r Reader, all []Match, c queryCase) []Match {
 
 // ───────────────────────── the shaped corpus ─────────────────────────
 
-// slabShape is one distinct event in the shaped corpus; ids map to shapes by
-// rule, so the corpus costs a few dozen XDR marshals.
+// slabShape is one distinct event in the shaped corpus.
 type slabShape struct {
 	contract int
 	topic0   int
@@ -116,8 +110,6 @@ type slabShape struct {
 	evType   int
 }
 
-// shapedFixture is the shaped corpus plus the vocabulary its filters are
-// written against.
 type shapedFixture struct {
 	corpus *diffCorpus
 	vocab  *diffVocab
@@ -128,15 +120,10 @@ type shapedFixture struct {
 	rareTopic    []uint32
 }
 
-// shapeFor is the corpus's id to event rule:
-//
-//   - contracts 0 and 1 split the corpus in half: two dense terms;
-//   - contract 2 is carried by a handful of ids: a sparse term;
-//   - topic 0 tracks the id's parity except on the thin-overlap ids, so
-//     contract 0 AND the odd topic is two chunk-sized terms meeting on a few;
-//   - a second topic appears on a handful of ids, so the topic-count buckets
-//     are one dense and one sparse;
-//   - the system event type stays sparse.
+// shapeFor maps an id to its event. Contracts 0 and 1 split the corpus and
+// contract 2 holds the rare ids. Topic 0 follows parity except on the thin
+// ids, so contract 0 AND the odd topic meet only there. A second topic marks
+// the rare-topic ids, and the system type is sparse.
 func (f *shapedFixture) shapeFor(id uint32) slabShape {
 	sh := slabShape{topic1: -1}
 	switch {
@@ -161,18 +148,15 @@ func (f *shapedFixture) shapeFor(id uint32) slabShape {
 	return sh
 }
 
-// shapedCorpusSize spans slab 0 whole and part of slab 1, so every window
-// bound below is a real slab-relative position rather than a synthetic one.
+// shapedCorpusSize spans slab 0 and part of slab 1.
 const shapedCorpusSize uint32 = 70_000
 
-// newShapedFixture builds the shaped corpus.
 func newShapedFixture(tb testing.TB) *shapedFixture {
 	tb.Helper()
 	const n = shapedCorpusSize
 	v := newDiffVocab(tb)
 	f := &shapedFixture{vocab: v}
-	// Thin-overlap ids: even, spread across the window, and deliberately
-	// sitting on both sides of a slab boundary.
+	// Thin-overlap ids: even, on both sides of the slab boundary.
 	for _, id := range []uint32{4, 30_000, 65_534, 65_536, 65_538, n - 2} {
 		if id < n {
 			f.thin = append(f.thin, id)
@@ -261,9 +245,7 @@ func (f *shapedFixture) filterMixedGroups() []Filter {
 }
 
 func (f *shapedFixture) filterMixedOrGroup() []Filter {
-	// One group that ORs a dense bucket with a sparse one: the topic-count
-	// family, where "one topic" is the whole corpus and "two topics" is the
-	// handful of ids carrying the second topic.
+	// At least one topic: a dense bucket ORed with a sparse one.
 	return []Filter{{TopicCount: TopicCountFilter{Count: 1}}}
 }
 
@@ -287,9 +269,7 @@ func (f *shapedFixture) filterAbsentPlusPresent() []Filter {
 	}
 }
 
-// Both positions of an absent group are named: an engine that stopped
-// resolving at the first miss but kept the filter would only get the trailing
-// shape wrong.
+// The absent term trails here and leads in filterAbsentGroupLeading.
 func (f *shapedFixture) filterAbsentGroupTrailing() []Filter {
 	// topicRaw[4] is in the vocabulary but no corpus event carries it.
 	return []Filter{{
@@ -327,9 +307,8 @@ func (f *shapedFixture) filterUnion() []Filter {
 	}
 }
 
-// filterDeepAND names every constrainable field, so the AND runs five groups
-// deep and meets on the handful of ids carrying a second topic. Exact keeps
-// the count group in the plan.
+// filterDeepAND constrains every field. Exact keeps the count bucket in the
+// plan, so it ANDs five terms.
 func (f *shapedFixture) filterDeepAND() []Filter {
 	evType := xdr.ContractEventTypeContract
 	return []Filter{{
@@ -343,8 +322,7 @@ func (f *shapedFixture) filterDeepAND() []Filter {
 	}}
 }
 
-// filterWideUnion unions eight filters, mixing dense, sparse, absent and
-// multi-group ones, so the union drops a filter and dedups shared ids.
+// filterWideUnion ORs eight filters of every kind, an absent one included.
 func (f *shapedFixture) filterWideUnion() []Filter {
 	sysType := xdr.ContractEventTypeSystem
 	return []Filter{
@@ -362,7 +340,6 @@ func (f *shapedFixture) filterWideUnion() []Filter {
 	}
 }
 
-// namedShape is one query shape with the name its failures report under.
 type namedShape struct {
 	name    string
 	filters []Filter
@@ -422,8 +399,7 @@ func TestMatches_ShapedMatrix(t *testing.T) {
 		{"tail", IDRange{shapedCorpusSize - 5, shapedCorpusSize}},
 	}
 
-	// One page and a single item: both a page ending mid-slab and one ending
-	// on a slab's last id, at every window bound.
+	// A single item and a page, at every window bound.
 	limits := []int{1, 1000}
 
 	for _, sh := range f.namedShapes() {
@@ -537,8 +513,7 @@ func TestMatches_RandomizedAgainstPostFilter(t *testing.T) {
 	defer func(s uint) { slabShift = s }(slabShift)
 
 	r := diffReader{corpus}
-	// Every width must yield the same stream: 1, 2 and 4 put many slab seams
-	// inside the corpus, 8 leaves one, and 16 is the production width.
+	// Narrow widths put many slab seams in the corpus; 16 is production.
 	for _, shift := range []uint{1, 2, 4, 8, 16} {
 		slabShift = shift
 		rng := rand.New(rand.NewSource(int64(20260909 + shift)))
@@ -598,10 +573,8 @@ func (r fetchTracer) FetchEvents(ctx context.Context, ids []uint32) ([]Payload, 
 
 var _ Reader = fetchTracer{}
 
-// TestMatches_FetchesOnlyTrueCandidates pins that the ordinals the engine
-// fetches are exactly the query's matches in emission order, and that a
-// consumer stopping after a page fetched only the batches it spans. Match-all
-// shapes stream FetchRange and never reach the index.
+// TestMatches_FetchesOnlyTrueCandidates pins that the engine fetches only the
+// query's matches, in emission order, and only as many as the page needs.
 func TestMatches_FetchesOnlyTrueCandidates(t *testing.T) {
 	f := newShapedFixture(t)
 
@@ -654,9 +627,7 @@ func TestMatches_FetchesOnlyTrueCandidates(t *testing.T) {
 	}
 }
 
-// traceFetches drives one query and returns the ordinals it fetched in
-// emission order; a descending batch is fetched flipped, so it is flipped
-// back.
+// traceFetches returns the ordinals one query fetched, in emission order.
 func traceFetches(
 	t *testing.T, f *shapedFixture, filters []Filter, w IDRange, desc bool, limit int,
 ) []uint32 {
@@ -675,8 +646,7 @@ func traceFetches(
 	return out
 }
 
-// pageFloor is how many candidates a query must have fetched to have served
-// its page: the page itself, or the whole answer when it is shorter.
+// pageFloor is the fewest candidates that serve a page.
 func pageFloor(limit, answer int) int {
 	if limit <= 0 {
 		return answer
@@ -803,10 +773,8 @@ func TestSlabStepperSkipsCandidateFreeSlabs(t *testing.T) {
 	assert.Empty(t, walk([]termPlan{{3}}, true))
 }
 
-// TestMatches_RareTermsSpanSlabs is the oracle gate on the skip: the shapes
-// a rare term dominates run at slab widths that put hundreds of empty slabs
-// between consecutive ids. The windows start and end between rare ids, so
-// the first and last slab are clipped by the window rather than a candidate.
+// TestMatches_RareTermsSpanSlabs checks the skip against the oracle at slab
+// widths that leave hundreds of empty slabs between rare ids.
 func TestMatches_RareTermsSpanSlabs(t *testing.T) {
 	f := newShapedFixture(t)
 	r := diffReader{f.corpus}
