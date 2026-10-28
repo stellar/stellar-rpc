@@ -8,7 +8,7 @@ on:
   workflow_call:
     inputs:
       rpc_git_ref:
-        description: 'Git ref (branch, tag, or SHA) of stellar/stellar-rpc to run tests on. Required when running from separate repo, branch tip otherwise.'
+        description: 'Git ref (branch, tag, or SHA) of the repo that holds this workflow to run tests on. Required when running from separate repo, branch tip otherwise.'
         required: false
         type: string
       protocol_version:
@@ -51,8 +51,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # Because this is a callable workflow, we need to explicitly specify the repo, since otherwise
-          # it will check out the caller's repo.
-          repository: stellar/stellar-rpc
+          # it will check out the caller's repo. This is the repo that holds this workflow, so
+          # stellar-rpc's internal repo tests its own commits.
+          repository: ${{ job.workflow_repository }}
           # For pull requests, build and test the PR head not a merge of the PR with the destination.
           ref: ${{ env.RPC_GIT_REF || github.event.pull_request.head.sha || github.ref }}
           # We need to full history for git-restore-mtime to know what modification dates to use.

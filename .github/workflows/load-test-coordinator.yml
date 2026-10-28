@@ -40,6 +40,8 @@ permissions:
 jobs:
   plan:
     name: Resolve release context
+    # The legs assume an AWS role that trusts only this repo, so the internal repo can't load test.
+    if: github.repository == 'stellar/stellar-rpc'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -147,7 +149,7 @@ jobs:
   report:
     name: Aggregate + report
     needs: [plan, load-test, backfill, blaster]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.repository == 'stellar/stellar-rpc' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
