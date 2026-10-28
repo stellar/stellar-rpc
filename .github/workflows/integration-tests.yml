@@ -31,6 +31,10 @@ on:
         description: 'Git ref (branch, tag, or SHA) of stellar/stellar-core to build from source. Mutually exclusive with core_deb_version/core_docker_img.'
         required: false
         type: string
+    secrets:
+      INTERNAL_GO_MODULES_APP_PRIVATE_KEY:
+        description: 'Private key of the GitHub App that can read stellar/go-stellar-sdk-internal, passed only by the internal repo. Other callers leave it out.'
+        required: false
 
 jobs:
   integration:
@@ -61,6 +65,9 @@ jobs:
           fetch-depth: "0"
 
       - uses: ./.github/actions/setup-go
+        with:
+          internal-go-modules-app-id: ${{ vars.INTERNAL_GO_MODULES_APP_ID }}
+          internal-go-modules-private-key: ${{ secrets.INTERNAL_GO_MODULES_APP_PRIVATE_KEY }}
 
       # --- Build stellar-core from source when core_git_ref is provided ---
       - name: Build Stellar Core from source

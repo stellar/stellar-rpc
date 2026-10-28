@@ -32,6 +32,9 @@ jobs:
           # Otherwise, the Go test cache will fail (due to the modification time of fixtures changing).
           fetch-depth: "0"
       - uses: ./.github/actions/setup-go
+        with:
+          internal-go-modules-app-id: ${{ vars.INTERNAL_GO_MODULES_APP_ID }}
+          internal-go-modules-private-key: ${{ secrets.INTERNAL_GO_MODULES_APP_PRIVATE_KEY }}
       - run: rustup update
       - uses: stellar/actions/rust-cache@main
       - run: make build-libs
@@ -65,6 +68,8 @@ jobs:
       - uses: ./.github/actions/setup-go
         with:
           go-arch: ${{ matrix.go_arch }}
+          internal-go-modules-app-id: ${{ vars.INTERNAL_GO_MODULES_APP_ID }}
+          internal-go-modules-private-key: ${{ secrets.INTERNAL_GO_MODULES_APP_PRIVATE_KEY }}
 
       - run: |
           rustup target add ${{ matrix.rust_target }}
@@ -100,6 +105,8 @@ jobs:
       # Every leg runs stellar-core 30.0.0; the P29 legs check it at protocol 29.
       core_deb_version: '30.0.0-3642.0e49751aa.noble'
       core_docker_img: 'stellar/stellar-core:30.0.0-3642.0e49751aa.noble'
+    secrets:
+      INTERNAL_GO_MODULES_APP_PRIVATE_KEY: ${{ secrets.INTERNAL_GO_MODULES_APP_PRIVATE_KEY }}
 
   # integration-p25-src:
   #   name: Integration tests (p25, core from source)

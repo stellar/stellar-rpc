@@ -26,6 +26,9 @@ jobs:
           fetch-depth: 0 # required for new-from-rev option in .golangci.yml
 
       - uses: ./.github/actions/setup-go
+        with:
+          internal-go-modules-app-id: ${{ vars.INTERNAL_GO_MODULES_APP_ID }}
+          internal-go-modules-private-key: ${{ secrets.INTERNAL_GO_MODULES_APP_PRIVATE_KEY }}
       - uses: stellar/actions/rust-cache@main
       - name: Build libpreflight
         run: |

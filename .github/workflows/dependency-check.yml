@@ -22,6 +22,9 @@ jobs:
       - run: rustup update
       - uses: stellar/actions/rust-cache@main
       - uses: ./.github/actions/setup-go
+        with:
+          internal-go-modules-app-id: ${{ vars.INTERNAL_GO_MODULES_APP_ID }}
+          internal-go-modules-private-key: ${{ secrets.INTERNAL_GO_MODULES_APP_PRIVATE_KEY }}
       - run: scripts/check-dependencies.bash
 
   validate-rust-git-rev-deps:
