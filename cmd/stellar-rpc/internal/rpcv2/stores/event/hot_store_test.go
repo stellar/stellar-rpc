@@ -305,11 +305,8 @@ func TestHotStore_FetchEventsLargeBatch(t *testing.T) {
 	}
 }
 
-// TestHotStore_FetchEventsHonorsContext pins that a pre-canceled
-// context is observed before the first Get fires — FetchEvents
-// returns context.Canceled, not a partial slice. The serial Get loop
-// checks ctx.Err() at the top of every iteration; with a non-empty
-// input the very first iteration tickles the check.
+// TestHotStore_FetchEventsHonorsContext pins that a canceled context
+// stops FetchEvents before its first BatchMultiGet.
 func TestHotStore_FetchEventsHonorsContext(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)

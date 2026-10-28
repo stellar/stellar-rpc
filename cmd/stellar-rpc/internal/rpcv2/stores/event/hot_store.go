@@ -211,8 +211,7 @@ func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.B
 // never change once written, so the slices need no shared snapshot.
 // Each call crosses CGO once and enables async_io, so the kernel can
 // overlap SST page reads on EBS and other high-latency storage. ctx
-// is honored at the top of the call; the underlying CGO calls are
-// not cancellable mid-flight.
+// is checked before each call; a call in flight is not cancellable.
 //
 // A missing row is an error: every caller passes ids that name
 // stored events (see Reader.FetchEvents), implying RocksDB has
@@ -223,9 +222,6 @@ func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.B
 func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payload, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, stores.ErrStoreClosed
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
 	}
 	if len(eventIDs) == 0 {
 		return nil, nil
@@ -241,6 +237,9 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payloa
 	step := max(1, matchBatchSize)
 	values := make([][]byte, 0, len(keys))
 	for lo := 0; lo < len(keys); lo += step {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		batch, err := h.chunkStore.BatchMultiGet(DataCF, keys[lo:min(lo+step, len(keys))])
 		if err != nil {
 			return nil, fmt.Errorf("events: batch fetch from chunk %s: %w", h.chunkID, err)
