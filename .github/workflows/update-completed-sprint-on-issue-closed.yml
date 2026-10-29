@@ -8,8 +8,6 @@ on:
 
 jobs:
   update-completed-sprint:
-    # The internal repo doesn't have the project app's secrets.
-    if: github.repository == 'stellar/stellar-rpc'
     runs-on: ubuntu-latest
     steps:
       - name: Generate token
