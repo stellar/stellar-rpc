@@ -906,3 +906,13 @@ func TestDeferredCloseOps_CountsOnlyDeferredCloses(t *testing.T) {
 	assert.Equal(t, before, DeferredCloseOps(),
 		"ops cut off by a teardown close are routine and must not count")
 }
+
+func TestStore_StatisticsDumpedOnCloseWhenAsked(t *testing.T) {
+	t.Setenv(statsEnv, "1")
+	path := t.TempDir()
+	s, err := New(Config{Path: path, Logger: silentLogger()})
+	require.NoError(t, err)
+	require.NoError(t, s.Put("", []byte("k"), []byte("v")))
+	require.NoError(t, s.Close())
+	require.FileExists(t, filepath.Join(path, "STATISTICS.txt"))
+}

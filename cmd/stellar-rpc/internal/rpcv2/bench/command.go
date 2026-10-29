@@ -19,6 +19,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // NewCommand returns the `bench` root command for benchmarking ingestion and reads.
@@ -32,14 +33,15 @@ func NewCommand() *cobra.Command {
 }
 
 // newIngestCommand returns the `bench ingest` command tree: `cold` benchmarks
-// the daemon's backfill (backfill.RunBackfill), `hot` benchmarks the daemon's
-// live ingestion loop.
+// the daemon's backfill (backfill.RunBackfill), `hot` the daemon's live
+// ingestion loop, `freeze` the freeze of a complete hot chunk, and `txindex`
+// the build of a tx-hash window index.
 func newIngestCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ingest",
 		Short: "Benchmark ingestion",
 	}
-	cmd.AddCommand(newColdCommand(), newHotCommand())
+	cmd.AddCommand(newColdCommand(), newHotCommand(), newFreezeCommand(), newTxindexCommand())
 	return cmd
 }
 
@@ -276,6 +278,8 @@ func newHotCommand() *cobra.Command {
 		numLedgers    uint32
 		hotDir        string
 		closeInterval time.Duration
+		trace         bool
+		txindex       hotTxindexOptions
 		prof          profileFlags
 	)
 	opts := func() hotOptions {
@@ -286,6 +290,8 @@ func newHotCommand() *cobra.Command {
 			NumLedgers:    numLedgers,
 			HotRoot:       hotDir,
 			CloseInterval: closeInterval,
+			Trace:         trace,
+			Txindex:       txindex,
 		}
 	}
 	cmd := newBenchCommand("hot",
@@ -312,7 +318,72 @@ func newHotCommand() *cobra.Command {
 	fs.DurationVar(&closeInterval, "close-interval", 0,
 		"assumed time between ledger closes; >0 paces ingestion to that steady-state cadence "+
 			"and reports pace_lag (0 = ingest back-to-back, catch-up throughput)")
+	fs.BoolVar(&trace, "trace", false, "also write "+traceFile+": one row per ingested ledger with every phase's duration")
+	fs.StringVar(&txindex.BinDir, "txindex-bin-dir", "",
+		"dir of a window's <chunkID:08d>.bin files; when set, the run rebuilds the window's index from them "+
+			"back to back beside the ingest loop and writes "+txindexFile)
+	fs.IntVar(&txindex.NumBins, "txindex-bins", 0, "cap on the .bin files the builds take, in chunk order (0 = all)")
+	fs.IntVar(&txindex.Workers, "txindex-workers", txhash.DefaultBuildWorkers(), "workers of each index build")
+	fs.BoolVar(&txindex.Yield, "txindex-yield", true,
+		"the index builds wait before each block while the ingest loop holds its gate, as the daemon's do")
+	fs.StringVar(&txindex.IndexOut, "txindex-out", "",
+		".idx output path, overwritten by each build (required with --txindex-bin-dir)")
 	markRequired(cmd, "start-chunk", "hot-dir")
+	return cmd
+}
+
+func newFreezeCommand() *cobra.Command {
+	var (
+		hotDir     string
+		chunkID    uint32
+		coldOutDir string
+		prof       profileFlags
+	)
+	opts := func() freezeOptions {
+		return freezeOptions{HotRoot: hotDir, Chunk: chunk.ID(chunkID), ColdRoot: coldOutDir}
+	}
+	cmd := newBenchCommand("freeze",
+		"Benchmark the freeze: the daemon's backfill freezing a complete hot chunk",
+		&prof,
+		func(outDir string) error {
+			o := opts()
+			o.OutDir = outDir
+			return o.validate()
+		},
+		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
+			o := opts()
+			o.OutDir = env.OutDir
+			return runFreeze(ctx, logger, o)
+		})
+	fs := cmd.Flags()
+	fs.StringVar(&hotDir, "hot-dir", "",
+		"dataset root bench ingest hot left the chunk complete in (required); its hot DB is read, not changed")
+	fs.Uint32Var(&chunkID, "chunk", 0, "chunk ID to freeze (required)")
+	fs.StringVar(&coldOutDir, "cold-out-dir", "",
+		"dataset root for the run's catalog and the cold artifacts (required); must be missing or empty")
+	markRequired(cmd, "hot-dir", "chunk", "cold-out-dir")
+	return cmd
+}
+
+func newTxindexCommand() *cobra.Command {
+	var (
+		opts txindexOptions
+		prof profileFlags
+	)
+	cmd := newBenchCommand("txindex",
+		"Benchmark the tx-hash window index build over consecutive chunks' .bin files",
+		&prof,
+		func(string) error { return opts.validate() },
+		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
+			o := opts
+			o.OutDir = env.OutDir
+			return runTxindex(ctx, logger, o)
+		})
+	fs := cmd.Flags()
+	fs.StringVar(&opts.BinDir, "bin-dir", "", "dir of the window's <chunkID:08d>.bin files (required)")
+	fs.IntVar(&opts.NumBins, "num-bins", 0, "cap on the .bin files taken, in chunk order (0 = all)")
+	fs.StringVar(&opts.IndexOut, "index-out", "", ".idx output path (required); overwritten")
+	markRequired(cmd, "bin-dir", "index-out")
 	return cmd
 }
 
