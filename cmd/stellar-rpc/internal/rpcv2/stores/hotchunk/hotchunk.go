@@ -1,13 +1,13 @@
 // Package hotchunk implements decision (a): the per-chunk hot tier is ONE
-// RocksDB holding the union of every hot data type's CFs (ledger + 3 events + 1
+// RocksDB holding the union of every hot data type's CFs (ledger + 3 events + 2
 // txhash), and each ledger commits as ONE atomic synced WriteBatch
 // across ALL of them — so a ledger is fully present or fully absent, with a
 // SINGLE per-chunk last-committed ledger (max committed seq, from the ledgers CF's last key)
 // and no per-store frontiers / min-of-three. The three typed facades
 // (ledger/txhash/the event store HotStore) are composed over the shared store via
 // NewWithStore; their write paths queue Puts into the one shared batch. A
-// read-only open composes a ledgers-only view without the events facade (see
-// OpenReadOnly).
+// read-only open composes a ledgers-only view without the events and txhash
+// facades (see OpenReadOnly).
 package hotchunk
 
 import (
@@ -34,7 +34,7 @@ import (
 
 // DB is one chunk's hot tier: a single multi-CF rocksdb.Store plus the typed
 // facades composed over it — all three on a read-write open; a read-only open
-// leaves events nil (see OpenReadOnly). It owns the store (Close closes it
+// leaves events and txhash nil (see OpenReadOnly). It owns the store (Close closes it
 // once); the facades wrap it without owning it.
 //
 // Concurrency: ingestion is single-writer; IngestLedger is not safe to call
@@ -50,7 +50,7 @@ type DB struct {
 }
 
 // ColumnFamilies is the full CF list for the shared per-chunk DB (ledger + 3
-// events + 1 txhash), assembled from each facade's CFNames() — one idiom, so
+// events + 2 txhash), assembled from each facade's CFNames() — one idiom, so
 // callers (including tests) never hand-stitch the union. Names are non-colliding
 // across the facades.
 func ColumnFamilies() []string {
@@ -98,13 +98,19 @@ func config(path string, logger *supportlog.Entry, readOnly, mustExist bool) roc
 	}
 }
 
+// SecretSource is what the events and tx-hash indexes derive the chunk's
+// cold index secrets from; *catalog.Catalog is the served one.
+type SecretSource interface {
+	Secret() [32]byte
+	TxHashIndexLayout() geometry.TxHashIndexLayout
+}
+
 // Open opens (or creates) the chunk's shared multi-CF hot DB read-WRITE
 // (ingestion's handle for a NEW chunk) and composes the three facades over it. On
 // any facade-construction failure the shared store is closed before returning.
-// catalogSecret is the catalog's secret, from which the events index derives the
-// chunk's cold index secret; every opener takes it.
-func Open(path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, catalogSecret, logger, false, false)
+// Every opener takes the chunk's SecretSource.
+func Open(path string, chunkID chunk.ID, secrets SecretSource, logger *supportlog.Entry) (*DB, error) {
+	return open(path, chunkID, secrets, logger, false, false)
 }
 
 // OpenExisting opens an EXISTING hot DB read-WRITE with create-if-missing OFF —
@@ -112,8 +118,8 @@ func Open(path string, chunkID chunk.ID, catalogSecret [32]byte, logger *support
 // A missing or gutted DB fails the open instead of silently fabricating a fresh
 // empty one (the "never auto-heal" rule); the caller treats that failure as an
 // ordinary run-failing error.
-func OpenExisting(path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, catalogSecret, logger, false, true)
+func OpenExisting(path string, chunkID chunk.ID, secrets SecretSource, logger *supportlog.Entry) (*DB, error) {
+	return open(path, chunkID, secrets, logger, false, true)
 }
 
 // OpenReadOnly opens an EXISTING hot DB read-only — the freeze source's view AND
@@ -123,35 +129,35 @@ func OpenExisting(path string, chunkID chunk.ID, catalogSecret [32]byte, logger 
 // refinement DEPENDS on that replay to read a correct MaxCommittedSeq. (An
 // unsynced tail is exactly what a crash loses, and is not recovered.)
 //
-// A read-only open is a LEDGERS-ONLY view: it composes the ledger + txhash facades
-// but SKIPS the events facade, because both read-only callers (freeze re-derives the
-// cold artifacts from raw LCMs via Source(); the startup refiner reads only
-// MaxCommittedSeq()) touch the ledgers CF alone and never the events index/offsets.
-// Composing the events facade would run the event store's unconditional warmup —
-// indexing the unsealed events again plus the offsets rebuild — discarded unread at
-// Close (#834). The skip is enforced structurally: a read-only DB has no events
-// facade, so Events() panics and IngestLedger errors rather than serving a cold,
-// unwarmed surface.
-func OpenReadOnly(path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, catalogSecret, logger, true, false)
+// A read-only open is a LEDGERS-ONLY view: it composes the ledger facade but SKIPS
+// the events and txhash facades, because both read-only callers (freeze re-derives
+// the cold artifacts from raw LCMs via Source(); the startup refiner reads only
+// MaxCommittedSeq()) touch the ledgers CF alone and never the indexes. Composing
+// those facades would run their unconditional warmups — indexing the unsealed
+// events again plus the offsets rebuild, and replaying the unsealed txhash rows —
+// discarded unread at Close (#834). The skip is enforced structurally: a read-only
+// DB has neither facade, so Events() and Txhash() panic and IngestLedger errors
+// rather than serving a cold, unwarmed surface.
+func OpenReadOnly(path string, chunkID chunk.ID, secrets SecretSource, logger *supportlog.Entry) (*DB, error) {
+	return open(path, chunkID, secrets, logger, true, false)
 }
 
 // OpenReadyWrite opens a "ready" chunk's hot DB read-WRITE — ingestion's handle
 // for a resumed chunk (OpenExisting underneath). openReady enforces the ready-open
 // rule.
 func OpenReadyWrite(
-	state geometry.HotState, path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry,
+	state geometry.HotState, path string, chunkID chunk.ID, secrets SecretSource, logger *supportlog.Entry,
 ) (*DB, error) {
-	return openReady(state, path, chunkID, catalogSecret, logger, false)
+	return openReady(state, path, chunkID, secrets, logger, false)
 }
 
 // OpenReadyView opens a "ready" chunk's hot DB read-only — the freeze source's
 // and the last-committed refiner's view (OpenReadOnly underneath). openReady
 // enforces the ready-open rule.
 func OpenReadyView(
-	state geometry.HotState, path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry,
+	state geometry.HotState, path string, chunkID chunk.ID, secrets SecretSource, logger *supportlog.Entry,
 ) (*DB, error) {
-	return openReady(state, path, chunkID, catalogSecret, logger, true)
+	return openReady(state, path, chunkID, secrets, logger, true)
 }
 
 // openReady is the single enforcement site for the "ready key ⇒ must-exist,
@@ -162,7 +168,7 @@ func OpenReadyView(
 // the open — never auto-healed into a fresh empty one — wrapped in the uniform
 // won't-open error so every ready-open site reports it identically.
 func openReady(
-	state geometry.HotState, path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry,
+	state geometry.HotState, path string, chunkID chunk.ID, secrets SecretSource, logger *supportlog.Entry,
 	readOnly bool,
 ) (*DB, error) {
 	if state != geometry.HotReady {
@@ -173,7 +179,7 @@ func openReady(
 	if readOnly {
 		openFn = OpenReadOnly
 	}
-	db, err := openFn(path, chunkID, catalogSecret, logger)
+	db, err := openFn(path, chunkID, secrets, logger)
 	if err != nil {
 		return nil, fmt.Errorf("chunk %s is %q but its hot DB won't open: %w", chunkID, geometry.HotReady, err)
 	}
@@ -181,7 +187,7 @@ func openReady(
 }
 
 func open(
-	path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry, readOnly, mustExist bool,
+	path string, chunkID chunk.ID, secrets SecretSource, logger *supportlog.Entry, readOnly, mustExist bool,
 ) (*DB, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
@@ -198,15 +204,23 @@ func open(
 		store:   store,
 		chunkID: chunkID,
 		ledger:  ledger.NewWithStore(store),
-		txhash:  txhash.NewWithStore(store),
 	}
 	// A read-only open is a ledgers-only freeze/probe view (see OpenReadOnly): it
-	// never reads events, so skip composing the events facade and its unconditional
-	// warmup scan. Read-WRITE opens (ingestion) MUST warm — the write path assigns
-	// event IDs off the warmed offsets — so they always compose it.
+	// never reads the indexes, so skip composing their facades and their
+	// unconditional warmup scans. Read-WRITE opens (ingestion) MUST warm — the
+	// write path assigns event IDs off the warmed offsets and extends the txhash
+	// window — so they always compose both.
 	if readOnly {
 		return db, nil
 	}
+	catalogSecret := secrets.Secret()
+	indexID := uint32(secrets.TxHashIndexLayout().TxHashIndexID(chunkID))
+	tx, err := txhash.Open(store, chunkID, txhash.ColdIndexSecret(catalogSecret[:], indexID))
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("compose txhash facade for chunk %s: %w", chunkID, err)
+	}
+	db.txhash = tx
 	es, err := event.NewWithStore(store, chunkID, catalogSecret)
 	if err != nil {
 		_ = store.Close()
@@ -225,8 +239,13 @@ func (d *DB) Ledgers() *ledger.HotStore { return d.ledger }
 
 // Txhash returns the txhash read/write facade over the shared store. The write
 // side feeds the ingestion loop; the read side probes it via
-// query.ReadView.HotTxHashIndexes.
-func (d *DB) Txhash() *txhash.HotStore { return d.txhash }
+// query.ReadView.HotTxHashIndexes. Panics on a read-only DB, as Events does.
+func (d *DB) Txhash() *txhash.HotStore {
+	if d.txhash == nil {
+		panic(fmt.Sprintf("hotchunk: Txhash() on read-only chunk %s: no txhash facade (ledgers-only view)", d.chunkID))
+	}
+	return d.txhash
+}
 
 // Events returns the events read/write facade over the shared store. Writes feed
 // ingestion; the read side serves hot events through it (query.ReadView.Events).
@@ -274,7 +293,7 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 // unrepresentable — no string label to mistype and no map lookup to nil-panic in a
 // sink. The phases partition the per-ledger wall-clock:
 //   - PhaseExtract: the product reads over the caller's shared
-//     ExtractLedgerTxParts walk (txhash-entry build, events extraction, event
+//     ExtractLedgerTxParts walk (txhash row build, events extraction, event
 //     shaping — all pre-batch, so every decode failure lands here by
 //     construction); HotService.Ingest folds the walk's own duration into this
 //     phase, keeping it "the walk + product reads";
@@ -282,10 +301,10 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 //   - PhaseCommit: the RocksDB batch write (WAL append + fsync + memtable) = the
 //     whole Batch call minus the three queue steps — the fsync wait pprof can't see.
 //   - PhaseApply: the post-commit index/offsets apply (appending the ledger's
-//     postings in memory, and at a slab boundary waiting for the previous
-//     slab's seal). It runs only after the batch is durable. It fails only
-//     when the events index could not seal a slab; the ledger is committed,
-//     and the next open indexes it again.
+//     txhash row and event postings in memory, and at a window or slab
+//     boundary waiting for the previous seal). It runs only after the batch
+//     is durable. It fails only when an index could not seal; the ledger is
+//     committed, and the next open indexes it again.
 type Phase uint8
 
 const (
@@ -342,8 +361,8 @@ type LedgerReport struct {
 
 // IngestLedger commits ONE ledger as a SINGLE atomic synced WriteBatch across all
 // hot CFs (decision (a)): queue ledgers, txhash, and events rows into one
-// BatchWriter, commit once, and only then apply the events in-memory index/offsets
-// update.
+// BatchWriter, commit once, and only then apply the txhash window and events
+// index/offsets updates in memory.
 //
 // txParts is the caller's ExtractLedgerTxParts output for lcmView. The walk
 // lives one level up (HotService.Ingest) because its output feeds BOTH this
@@ -372,7 +391,7 @@ func (d *DB) IngestLedger(
 	// error rejects the ledger without a half-built batch.
 	//
 	// The caller's ONE TxProcessing walk (txParts) feeds BOTH hot data types:
-	// every product is a plain read over that slice — txhash builds entries
+	// every product is a plain read over that slice — txhash builds its row
 	// from each element's Hash/InnerHash, and PayloadsFromLedgerEvents pulls
 	// the contract events off the already-located meta views and shapes them.
 	// One walk instead of one per product halves per-ledger extraction, and
@@ -386,12 +405,11 @@ func (d *DB) IngestLedger(
 	// RunBackfill's "reported even on failure"), so the error is never emitted with
 	// a zero-duration sample.
 	extractStart := time.Now()
-	txEntries := make([]txhash.Entry, 0, len(txParts))
-	for i := range txParts {
-		txEntries = append(txEntries, txhash.Entry{Hash: txParts[i].Hash, LedgerSeq: seq})
-		if txParts[i].FeeBump {
-			txEntries = append(txEntries, txhash.Entry{Hash: txParts[i].InnerHash, LedgerSeq: seq})
-		}
+	txRow, txKeys, err := d.txhash.EncodeRow(txParts)
+	if err != nil {
+		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
+		rep.Failed = PhaseExtract
+		return rep, fmt.Errorf("txhash row seq %d: %w", seq, err)
 	}
 
 	closedAt, err := lcmView.LedgerCloseTime()
@@ -410,13 +428,13 @@ func (d *DB) IngestLedger(
 	}
 	rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
 
-	// The events facade validates + marshals inside the batch callback (so a
-	// rejected ledger never leaves committed rows) and returns the post-commit
-	// apply hook. Under decision (a) resume is always MaxCommittedSeq+1, so seq is
-	// never a duplicate — the hook is always non-nil on success. Each facade's queue
+	// The txhash and events facades queue inside the batch callback (so a
+	// rejected ledger never leaves committed rows) and return their post-commit
+	// apply hooks. Under decision (a) resume is always MaxCommittedSeq+1, so seq is
+	// never a duplicate — the hooks are always non-nil on success. Each facade's queue
 	// step is timed individually; Commit (below) is the whole Batch minus those —
 	// the RocksDB write (WAL append + fsync + memtable).
-	var applyEvents func() error
+	var applyTxhash, applyEvents func() error
 	// A batch error not attributed to a specific queue step below is the commit
 	// itself (the RocksDB write); a queue-step error narrows Failed to its phase.
 	failed := PhaseCommit
@@ -431,9 +449,7 @@ func (d *DB) IngestLedger(
 		rep.Phases[PhaseLedgers].Dur = time.Since(ls)
 
 		ts := time.Now()
-		if len(txEntries) > 0 {
-			d.txhash.AddEntriesToBatch(b, txEntries)
-		}
+		applyTxhash = d.txhash.AddRowToBatch(b, seq, txRow)
 		rep.Phases[PhaseTxhash].Dur = time.Since(ts)
 
 		es := time.Now()
@@ -462,13 +478,16 @@ func (d *DB) IngestLedger(
 
 	// The batch is durable: the write phases now carry what landed.
 	rep.Phases[PhaseLedgers].Items = 1
-	rep.Phases[PhaseTxhash].Items = len(txEntries)
+	rep.Phases[PhaseTxhash].Items = txKeys
 	rep.Phases[PhaseEvents].Items = len(payloads)
 
-	// Now and only now apply the events index/offsets update. PhaseApply times
-	// this post-commit work, which otherwise lands in no phase.
+	// Now and only now apply the txhash window and events index/offsets updates.
+	// PhaseApply times this post-commit work, which otherwise lands in no phase.
 	applyStart := time.Now()
-	err = applyEvents()
+	err = applyTxhash()
+	if err == nil {
+		err = applyEvents()
+	}
 	rep.Phases[PhaseApply].Dur = time.Since(applyStart)
 	if err != nil {
 		rep.Failed = PhaseApply

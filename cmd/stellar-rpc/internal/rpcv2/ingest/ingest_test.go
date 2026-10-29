@@ -27,6 +27,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
@@ -77,8 +78,15 @@ func testEventsSecret() [stores.SecretLen]byte { return event.ColdIndexSecret(te
 // testEventsSecretBytes is testEventsSecret as a slice, for ingest.Config.EventsSecret.
 func testEventsSecretBytes() []byte { s := testEventsSecret(); return s[:] }
 
-// testCatalogSecret is testTxhashKey as the catalog secret hot DBs open with.
-var testCatalogSecret = [32]byte(testTxhashKey)
+// testHotSecrets is the secret source hot DBs open with: testTxhashKey is
+// the catalog secret.
+type testHotSecrets struct{}
+
+func (testHotSecrets) Secret() [32]byte { return [32]byte(testTxhashKey) }
+
+func (testHotSecrets) TxHashIndexLayout() geometry.TxHashIndexLayout {
+	return geometry.NewLayout("").TxHashIndex()
+}
 
 // ───────────────────────── test metric sink ─────────────────────────
 
@@ -1264,7 +1272,7 @@ func hotTestLogger() *supportlog.Entry {
 // TestHotService_FeedsFeeWindowsAfterCommit: a successfully committed ledger's
 // fee observations land in the injected windows.
 func TestHotService_FeedsFeeWindowsAfterCommit(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testHotSecrets{}, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1286,7 +1294,7 @@ func TestHotService_FeedsFeeWindowsAfterCommit(t *testing.T) {
 // next-expected seq) contributes nothing to the windows, so its retry cannot
 // double-count.
 func TestHotService_RejectedLedgerFeedsNoFees(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testHotSecrets{}, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1313,7 +1321,7 @@ func TestHotService_RejectedLedgerFeedsNoFees(t *testing.T) {
 // the ledger is durably committed, the windows stay unfed, and the loop's
 // caller sees the error (tip-only trusted input, mirroring extract failures).
 func TestHotService_FeeClassificationErrorFailsCommittedLedger(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testHotSecrets{}, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1337,7 +1345,7 @@ func TestHotService_FeeClassificationErrorFailsCommittedLedger(t *testing.T) {
 // once, the write phases carry per-type volume (extract/commit/apply carry none),
 // and no phase carries an error.
 func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testHotSecrets{}, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1364,7 +1372,7 @@ func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
 // the error on PhaseApply.
 func TestHotService_EmitsEveryPhaseOnFailedApply(t *testing.T) {
 	dir := t.TempDir()
-	db, err := hotchunk.Open(dir, chunk.ID(0), testCatalogSecret, hotTestLogger())
+	db, err := hotchunk.Open(dir, chunk.ID(0), testHotSecrets{}, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	// A file where the events index wants its load directory makes every
@@ -1405,7 +1413,7 @@ func TestHotService_EmitsEveryPhaseOnFailedApply(t *testing.T) {
 // DB) surfaces the error on the commit phase — by construction, not by a
 // separately-maintained label — and emits no items on the failure path.
 func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testHotSecrets{}, hotTestLogger())
 	require.NoError(t, err)
 	require.NoError(t, db.Close()) // closed => the batch commit fails
 
@@ -1429,7 +1437,7 @@ func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
 // failure lands by construction — and emits ONLY that phase (no batch was opened, so
 // no later phase ran).
 func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testHotSecrets{}, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1453,7 +1461,7 @@ func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
 // Failed's zero value, a NON-zero Failed is the discriminator that proves the phase was
 // actually assigned rather than defaulted.
 func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testHotSecrets{}, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1480,7 +1488,7 @@ func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
 // that completed earlier phases carry theirs too. Uses the same out-of-order failure as
 // above, whose failed phase is the events queue.
 func TestHotService_FailedPhaseCarriesPartialDuration(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testHotSecrets{}, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
