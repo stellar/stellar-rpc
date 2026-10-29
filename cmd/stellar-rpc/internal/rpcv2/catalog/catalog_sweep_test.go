@@ -3,6 +3,7 @@ package catalog
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -89,6 +90,7 @@ func TestSweepIndexKey(t *testing.T) {
 	cov, err := cat.MarkTxHashIndexFreezing(5, 5100, 5349)
 	require.NoError(t, err)
 	idxPath := cat.layout.TxHashIndexFilePath(cov)
+	require.True(t, strings.HasPrefix(idxPath, cat.layout.HotRoot()), "a window still filling lives with the hot tier")
 	writeArtifact(t, idxPath)
 	require.NoError(t, cat.CommitTxHashIndex(cov))
 

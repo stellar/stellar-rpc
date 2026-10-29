@@ -30,7 +30,7 @@ func openDatasetCatalog(layout geometry.Layout, logger *supportlog.Entry) (*cata
 	if err != nil {
 		return nil, err
 	}
-	cat, err := catalog.Open(layout.CatalogPath(), layout, txLayout, logger)
+	cat, err := catalog.Open(layout.CatalogPath(), layout.WithTxHashIndex(txLayout), logger)
 	if err != nil {
 		return nil, fmt.Errorf("open dataset catalog %s: %w", layout.CatalogPath(), err)
 	}

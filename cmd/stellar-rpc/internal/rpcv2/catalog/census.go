@@ -96,8 +96,8 @@ func (c *Catalog) censusArtifactEntry(key, value string) (string, bool) {
 		// The builder only ever covers chunks of the key's own index, so a
 		// cross-window coverage is something no binary wrote. Left accepted,
 		// a corrupt frozen one would suppress legitimate index rebuilds.
-		if c.txhashIndex.TxHashIndexID(cov.Lo) != cov.Index ||
-			c.txhashIndex.TxHashIndexID(cov.Hi) != cov.Index {
+		if c.TxHashIndexLayout().TxHashIndexID(cov.Lo) != cov.Index ||
+			c.TxHashIndexLayout().TxHashIndexID(cov.Hi) != cov.Index {
 			return "index coverage endpoints outside the key's own index", false
 		}
 		if !geometry.IsKnownState(geometry.State(value)) {
