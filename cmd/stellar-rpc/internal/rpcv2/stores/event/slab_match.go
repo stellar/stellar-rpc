@@ -16,11 +16,11 @@ package event
 // The term bitmaps come from the Reader.LookupKeys call this stage was looked
 // up by and are held for its walk. They answer for the stage's ids and no
 // others, which is why the stepper's window is the stage: the bounds proved
-// from them die with it. They are read-only and may be snapshots shared with
-// other readers. FastAnd reads its arguments and returns fresh containers,
-// which roaring_contract_test.go pins against the pinned roaring version; the
-// only bitmaps this file mutates are the ones it builds for a slab and the
-// results FastAnd hands back. Each lookup being a point-in-time image, ids
+// from them die with it. They are read-only. FastAnd reads its arguments and
+// returns fresh containers, which roaring_contract_test.go pins against the
+// pinned roaring version; the only bitmaps this file mutates are the ones it
+// builds for a slab and the results FastAnd hands back. Each lookup being a
+// point-in-time image, ids
 // ingested during the walk are invisible to it, as IDRange's
 // snapshot-isolation contract already requires.
 

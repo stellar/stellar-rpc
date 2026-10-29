@@ -156,8 +156,12 @@ const maxTermsPerEvent = 3 + protocol.MaxTopicCount
 // UnmarshalBinary: its type, its topic count, its contract ID when it
 // has one, and its topics 0..MaxTopicCount-1.
 func TermsForBytes(eventBytes []byte) ([]TermKey, error) {
+	return AppendTermsForBytes(make([]TermKey, 0, maxTermsPerEvent), eventBytes)
+}
+
+// AppendTermsForBytes appends TermsForBytes(eventBytes) to keys.
+func AppendTermsForBytes(keys []TermKey, eventBytes []byte) ([]TermKey, error) {
 	ev := xdr.ContractEventView(eventBytes)
-	keys := make([]TermKey, 0, maxTermsPerEvent)
 
 	typeView, err := ev.Type()
 	if err != nil {

@@ -179,8 +179,8 @@ func newShapedFixture(tb testing.TB) *shapedFixture {
 	raws := make(map[slabShape][]byte)
 	keys := make(map[slabShape][]TermKey)
 	c := &diffCorpus{
-		raw:    make([][]byte, n),
-		mirror: NewConcurrentBitmapsFromBitmaps(NewBitmaps()),
+		raw:   make([][]byte, n),
+		index: NewBitmaps(),
 	}
 	idsByKey := make(map[TermKey][]uint32)
 	for id := range n {
@@ -198,7 +198,7 @@ func newShapedFixture(tb testing.TB) *shapedFixture {
 		}
 	}
 	for k, ids := range idsByKey {
-		c.mirror.AddTo(k, ids...)
+		c.index.AddTo(k, ids...)
 	}
 	f.corpus = c
 	return f
@@ -461,8 +461,6 @@ func TestMatches_ShapedFixtureIsWhatItClaims(t *testing.T) {
 	require.Len(t, drainMatches(t,
 		Matches(ctx, r, f.filterSparseOnly(), window, false, 0), 0), len(f.rareContract),
 		"sparse term must hold exactly the rare ids")
-	require.Less(t, len(f.rareContract), promotionThreshold,
-		"the sparse term must stay under the promotion threshold")
 	require.Len(t, drainMatches(t,
 		Matches(ctx, r, f.filterThinOverlap(), window, false, 0), 0), len(f.thin),
 		"the thin overlap must be exactly the constructed ids")
@@ -943,8 +941,8 @@ func TestMatches_UnderCoveringLookupIsAnError(t *testing.T) {
 // The rewriting follows the covered range rather than the window, since that
 // is what the walk is entitled to read; a reader that covers more than it was
 // asked (the cold index, which reads whole parts) keeps its extra ids. The
-// bitmaps the wrapped reader hands back may be shared with other readers (hot
-// dense snapshots are), so each is cloned before it is rewritten.
+// bitmaps the wrapped reader hands back may be shared with other readers (a
+// test double's are), so each is cloned before it is rewritten.
 type windowFuzzReader struct {
 	Reader
 
