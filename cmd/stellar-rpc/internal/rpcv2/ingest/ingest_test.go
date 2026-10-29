@@ -35,9 +35,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
-// termWindow is the lookup window these tests hand event.Reader.LookupKeys:
-// it answers only for the ids inside the window it is given, and every
-// assertion below is on a term's whole postings.
+// termWindow asks a lookup for every id: the assertions are on whole terms.
 var termWindow = event.IDRange{End: math.MaxUint32}
 
 // testPassphrase is a network passphrase literal used only by the test fixtures
