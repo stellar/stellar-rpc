@@ -99,15 +99,18 @@ The cold tier has two kinds of file: a per-chunk sorted run (`.bin`) and the per
 
 The `.bin` lives at `txhash/raw/{bucket:05d}/{chunk:08d}.bin`, with catalog key `chunk:{chunk:08d}:txhash`. It is produced once, when the chunk is frozen: as the chunk's ledgers are read, each transaction's `(hash, seq)` is collected, and at the end they are **sorted in memory** (~3M entries ≈ 60 MB for a dense chunk — negligible) and written out.
 
-**Format** (the streamhash merge format):
+**Format** (streamhash's sorted-file format):
 
 ```
-uint32 LE        magic ("SBIN" in on-disk byte order)
-uint8            version (1)
-3 bytes          reserved (zero)
+uint32 LE        magic 0x53545346 ("STSF")
+uint16 LE        version (1)
+uint8            payload size (3)
+uint8            reserved (zero)
 uint64 LE        entry count
-16 bytes         index secret the keys were blinded with
-entry × count    20 bytes each: [key: 16][seq: 4 LE]
+uint32 LE        metadata length (21)
+21 bytes         metadata: version (1), chunk ID (uint32 LE), index secret the keys were blinded with
+zero padding     to 4096 bytes
+entry × count    19 bytes each: [key: 16][seq minus the window's first ledger: 3 LE]
 ```
 
 - `key` is the **secret-blinded first 16 bytes of the transaction hash** (blinded with the index secret recorded in the header, so the deferred build always adopts the secret its inputs were keyed with). The index uses only these 16 bytes to place and find a transaction; what happens when two hashes share a 16-byte prefix is in §8.2.
@@ -121,7 +124,7 @@ A `.bin` is kept while it is still a rebuild input — every rebuild re-merges t
 
 The `.idx` lives at `txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx`, tracked by the catalog key `index:{window:08d}:{lo:08d}:{hi:08d}`. There is one minimal-perfect-hash file per **coverage** — a coverage being the chunk range `[lo, hi]` the file actually hashes. Streamhash's `SortedBuilder` builds it from the k-way merge of `.bin[lo..hi]`. The index carries two per-entry fields:
 
-- **Payload (3 bytes): the answer the hash maps to — a ledger seq.** It is stored as an offset from the coverage's first ledger (`MinLedger = chunkFirstLedger(lo)`) rather than as a full seq, to save bytes. A window spans 10,000,000 ledgers, so the largest offset (`10_000_000 - 1`) fits in a 24-bit field. Streamhash writes the payload width into the index file's header; the coverage's ledger range `[MinLedger, MaxLedger]`, which streamhash does not model itself, rides in the file's user-metadata slot behind a leading version byte, as two 4-byte little-endian values followed by the 16-byte routing secret. All of it is read back when the index is opened, so there is no separate sidecar file.
+- **Payload (3 bytes): the answer the hash maps to — a ledger seq.** It is stored as an offset from the window's first ledger (`MinLedger`), written so by the `.bin` producer, rather than as a full seq, to save bytes. A window spans 10,000,000 ledgers, so the largest offset (`10_000_000 - 1`) fits in a 24-bit field. Streamhash writes the payload width into the index file's header; `[MinLedger, MaxLedger]` (the window's first ledger and the coverage's last), which streamhash does not model itself, rides in the file's user-metadata slot behind a leading version byte, as two 4-byte little-endian values followed by the 16-byte routing secret. All of it is read back when the index is opened, so there is no separate sidecar file.
 - **Fingerprint (1 byte, fixed by the format): screens out wrong hashes** before the expensive fetch-and-verify. One byte rejects ~255/256 of foreign hashes per window probe (§8.2), costing one byte per transaction.
 
 All-in, the index costs ≈4.2 bytes per transaction (MPHF structure + payload + fingerprint) — ≈12.5 GB for a dense full window, versus the ≈60 GB of `.bin` runs it consumes.
