@@ -25,6 +25,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/writeback"
 )
 
 // coldRoutingDomain is the DeriveIndexSecret domain for events cold indexes
@@ -78,7 +79,7 @@ func NewColdIndexBuilder(
 		dir:          dirs.Index,
 		secret:       secret,
 		bytesPerSync: bytesPerSync,
-		runs:         coldRuns{dir: filepath.Join(dirs.Scratch, IndexRunsDirName(chunkID))},
+		runs:         coldRuns{dir: filepath.Join(dirs.Scratch, IndexRunsDirName(chunkID)), bytesPerSync: bytesPerSync},
 		live:         newHotSlab(0),
 	}
 }
@@ -142,7 +143,7 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 		slabs = b.maxID>>indexSlabShift + 1
 	}
 	termsPath := filepath.Join(b.runs.dir, "terms")
-	terms, err := writeTerms(termsPath, b.runs.merge(), slabs)
+	terms, err := writeTerms(termsPath, b.runs.merge(), slabs, b.bytesPerSync)
 	if err != nil {
 		return fmt.Errorf("events: merge index runs: %w", err)
 	}
@@ -280,7 +281,7 @@ const (
 
 // writeTerms writes terms to path, each as key || uvarint(len) || its tagged
 // index.pack entries, and returns how many it wrote.
-func writeTerms(path string, terms iter.Seq2[runTerm, error], slabs uint32) (_ uint64, err error) {
+func writeTerms(path string, terms iter.Seq2[runTerm, error], slabs uint32, bytesPerSync int) (_ uint64, err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return 0, err
 	}
@@ -293,7 +294,7 @@ func writeTerms(path string, terms iter.Seq2[runTerm, error], slabs uint32) (_ u
 			err = cerr
 		}
 	}()
-	w := bufio.NewWriterSize(f, 1<<20)
+	w := bufio.NewWriterSize(writeback.NewWriter(f, bytesPerSync), 1<<20)
 	var (
 		enc termEncoder
 		n   uint64

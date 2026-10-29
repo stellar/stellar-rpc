@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/writeback"
 )
 
 // coldRuns are a chunk's postings spilled one slab at a time. Run i holds
@@ -19,9 +21,10 @@ import (
 // key || uvarint(len) || serialized bitmap. Merging the runs yields every
 // term once, in key order, with its bitmap from each run holding it.
 type coldRuns struct {
-	dir   string
-	paths []string
-	slabs []uint32 // each run's slab
+	dir          string
+	bytesPerSync int // writeback cadence of the run files
+	paths        []string
+	slabs        []uint32 // each run's slab
 }
 
 // spill writes slab's terms, in key order with their serialized bitmaps, as
@@ -37,7 +40,7 @@ func (r *coldRuns) spill(slab uint32, terms iter.Seq2[TermKey, []byte]) (int, er
 	if err != nil {
 		return 0, err
 	}
-	n, err := writeRun(f, terms)
+	n, err := writeRun(f, terms, r.bytesPerSync)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -49,8 +52,8 @@ func (r *coldRuns) spill(slab uint32, terms iter.Seq2[TermKey, []byte]) (int, er
 	return n, nil
 }
 
-func writeRun(f *os.File, terms iter.Seq2[TermKey, []byte]) (int, error) {
-	w := bufio.NewWriterSize(f, 1<<16)
+func writeRun(f *os.File, terms iter.Seq2[TermKey, []byte], bytesPerSync int) (int, error) {
+	w := bufio.NewWriterSize(writeback.NewWriter(f, bytesPerSync), 1<<16)
 	n := 0
 	for key, bitmap := range terms {
 		writeEntry(w, key, bitmap)
