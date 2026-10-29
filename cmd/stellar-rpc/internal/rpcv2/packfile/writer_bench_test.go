@@ -42,6 +42,7 @@ func BenchmarkWriter(b *testing.B) {
 	zstdOpts := func(conc int) WriterOptions {
 		return WriterOptions{
 			Format:           benchFmt,
+			ItemsPerRecord:   128,
 			NewRecordEncoder: newZstdBenchEncoder,
 			Concurrency:      conc,
 		}
@@ -54,7 +55,7 @@ func BenchmarkWriter(b *testing.B) {
 		{"c4_compressed", zstdOpts(4)},
 		{"c8_compressed", zstdOpts(8)},
 		// Passthrough — no caller encoder, items stored as-is.
-		{"serial_passthrough", WriterOptions{Format: benchFmt}},
+		{"serial_passthrough", WriterOptions{Format: benchFmt, ItemsPerRecord: 128}},
 	}
 
 	for _, cfg := range configs {

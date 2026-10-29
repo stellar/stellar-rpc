@@ -145,6 +145,17 @@ func TestCreateValidation(t *testing.T) {
 			WriterOptions{ItemsPerRecord: math.MaxUint32 + 1},
 			"exceeds uint32 max",
 		},
+		{
+			"negative MaxRecordBytes",
+			WriterOptions{ItemsPerRecord: 128, MaxRecordBytes: -1},
+			"MaxRecordBytes must be non-negative",
+		},
+		{"no record limit", WriterOptions{}, "no record limit"},
+		{
+			"byte limit on one item per record",
+			WriterOptions{ItemsPerRecord: 1, MaxRecordBytes: 1 << 10},
+			"no effect with ItemsPerRecord 1",
+		},
 		{"unknown RecordChecksum", WriterOptions{RecordChecksum: RecordChecksum(9)}, "unknown RecordChecksum"},
 	}
 	for i, tc := range cases {
@@ -160,14 +171,14 @@ func TestCreateValidation(t *testing.T) {
 func TestCreateFailsIfFileExists(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pack")
 
-	w, err := Create(path, WriterOptions{})
+	w, err := Create(path, WriterOptions{ItemsPerRecord: 128})
 	require.NoError(t, err)
 	require.NoError(t, w.Finish(nil))
 
-	_, err = Create(path, WriterOptions{})
+	_, err = Create(path, WriterOptions{ItemsPerRecord: 128})
 	require.Error(t, err)
 
-	w2, err := Create(path, WriterOptions{Overwrite: true})
+	w2, err := Create(path, WriterOptions{ItemsPerRecord: 128, Overwrite: true})
 	require.NoError(t, err)
 	require.NoError(t, w2.Finish(nil))
 }
@@ -176,7 +187,7 @@ func TestCreateFailsIfFileExists(t *testing.T) {
 
 func TestCloseWithoutFinishRemovesFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pack")
-	w, err := Create(path, WriterOptions{})
+	w, err := Create(path, WriterOptions{ItemsPerRecord: 128})
 	require.NoError(t, err)
 	require.NoError(t, w.AppendItem([]byte("hello")))
 
@@ -188,7 +199,7 @@ func TestCloseWithoutFinishRemovesFile(t *testing.T) {
 
 func TestFinishTwice(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pack")
-	w, err := Create(path, WriterOptions{})
+	w, err := Create(path, WriterOptions{ItemsPerRecord: 128})
 	require.NoError(t, err)
 	require.NoError(t, w.Finish(nil))
 	require.ErrorIs(t, w.Finish(nil), ErrWriterClosed)
@@ -196,7 +207,7 @@ func TestFinishTwice(t *testing.T) {
 
 func TestAppendItemAfterFinish(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pack")
-	w, err := Create(path, WriterOptions{})
+	w, err := Create(path, WriterOptions{ItemsPerRecord: 128})
 	require.NoError(t, err)
 	require.NoError(t, w.Finish(nil))
 	require.ErrorIs(t, w.AppendItem([]byte("hello")), ErrWriterClosed)
@@ -204,7 +215,7 @@ func TestAppendItemAfterFinish(t *testing.T) {
 
 func TestCloseIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pack")
-	w, err := Create(path, WriterOptions{})
+	w, err := Create(path, WriterOptions{ItemsPerRecord: 128})
 	require.NoError(t, err)
 	require.NoError(t, w.Finish(nil))
 
@@ -217,7 +228,7 @@ func TestCloseIdempotent(t *testing.T) {
 
 func TestEmptyPackfile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pack")
-	w, err := Create(path, WriterOptions{})
+	w, err := Create(path, WriterOptions{ItemsPerRecord: 128})
 	require.NoError(t, err)
 	require.NoError(t, w.Finish(nil))
 
@@ -242,20 +253,20 @@ func TestTrailerFields(t *testing.T) {
 	}{
 		{
 			name:            "passthrough",
-			opts:            WriterOptions{Format: 5},
+			opts:            WriterOptions{Format: 5, ItemsPerRecord: 128},
 			numItems:        100,
 			itemSize:        16,
 			wantFlags:       0,
-			wantItemsPerRec: defaultItemsPerRecord,
+			wantItemsPerRec: 128,
 			wantFormat:      5,
 		},
 		{
 			name:            "xor",
-			opts:            WriterOptions{Format: 1, NewRecordEncoder: newXorEncoder},
+			opts:            WriterOptions{Format: 1, ItemsPerRecord: 128, NewRecordEncoder: newXorEncoder},
 			numItems:        50,
 			itemSize:        32,
 			wantFlags:       0,
-			wantItemsPerRec: defaultItemsPerRecord,
+			wantItemsPerRec: 128,
 			wantFormat:      1,
 		},
 		{
@@ -292,7 +303,7 @@ func TestTrailerFields(t *testing.T) {
 func TestOffsetIndexDecodes(t *testing.T) {
 	const numItems = 500
 	items := mkItems(numItems, 16)
-	path := writePackfile(t, WriterOptions{Format: 1, NewRecordEncoder: newXorEncoder}, items)
+	path := writePackfile(t, WriterOptions{Format: 1, ItemsPerRecord: 128, NewRecordEncoder: newXorEncoder}, items)
 
 	tr, totalSize := readTrailer(t, path)
 
@@ -320,7 +331,7 @@ func TestAppDataPreserved(t *testing.T) {
 	appData := []byte("application-specific metadata between index and trailer")
 
 	path := filepath.Join(t.TempDir(), "pack")
-	w, err := Create(path, WriterOptions{})
+	w, err := Create(path, WriterOptions{ItemsPerRecord: 128})
 	require.NoError(t, err)
 	require.NoError(t, w.AppendItem([]byte("item")))
 	require.NoError(t, w.Finish(appData))
@@ -350,14 +361,14 @@ func TestItemsPerRecordOne(t *testing.T) {
 func TestOverwriteReplaces(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pack")
 
-	w, err := Create(path, WriterOptions{})
+	w, err := Create(path, WriterOptions{ItemsPerRecord: 128})
 	require.NoError(t, err)
 	for _, item := range mkItems(128, 4) {
 		require.NoError(t, w.AppendItem(item))
 	}
 	require.NoError(t, w.Finish(nil))
 
-	w2, err := Create(path, WriterOptions{Overwrite: true})
+	w2, err := Create(path, WriterOptions{ItemsPerRecord: 128, Overwrite: true})
 	require.NoError(t, err)
 	for _, item := range mkItems(50, 4) {
 		require.NoError(t, w2.AppendItem(item))
@@ -373,7 +384,7 @@ func TestOverwriteReplaces(t *testing.T) {
 // TestPassthroughStoresVerbatim verifies that with NewRecordEncoder == nil
 // each record's payload bytes on disk are exactly the items concatenated,
 // regardless of itemsPerRecord (the rocksdb-passthrough use case). For
-// itemsPerRecord > 1 the records are followed by a per-record FOR index;
+// itemsPerRecord != 1 the records are followed by a per-record FOR index;
 // we use the decoded offset index to extract just the payload portion.
 func TestPassthroughStoresVerbatim(t *testing.T) {
 	items := [][]byte{
@@ -498,7 +509,8 @@ func (c *closingFailEncoder) Close() error {
 func TestRecordEncoderCloseErrorSurfaces(t *testing.T) {
 	var closes atomic.Int64
 	w, err := Create(filepath.Join(t.TempDir(), "pack"), WriterOptions{
-		Format: 1,
+		Format:         1,
+		ItemsPerRecord: 128,
 		NewRecordEncoder: func() RecordEncoder {
 			return &closingFailEncoder{closes: &closes, closeErr: errors.New("boom: close fail")}
 		},
@@ -551,6 +563,7 @@ func TestConcurrentWriteErrorSurfaces(t *testing.T) {
 		t.Skip("requires /dev/full")
 	}
 	w := openDevFullWriter(t, WriterOptions{
+		ItemsPerRecord:   128,
 		Concurrency:      4,
 		NewRecordEncoder: newXorEncoder,
 	})
@@ -570,7 +583,7 @@ func TestSerialWriteErrorSurfaces(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("requires /dev/full")
 	}
-	w := openDevFullWriter(t, WriterOptions{NewRecordEncoder: newXorEncoder})
+	w := openDevFullWriter(t, WriterOptions{ItemsPerRecord: 128, NewRecordEncoder: newXorEncoder})
 	defer w.Close()
 
 	item := make([]byte, 1024)
