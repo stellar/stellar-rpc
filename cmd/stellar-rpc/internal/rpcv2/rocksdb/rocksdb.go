@@ -874,6 +874,12 @@ func applyDBTuning(opts *grocksdb.Options, t Tuning) {
 	if t.MaxTotalWalSizeMB > 0 {
 		opts.SetMaxTotalWalSize(uint64(t.MaxTotalWalSizeMB) << 20)
 	}
+	if t.BytesPerSyncMB > 0 {
+		opts.SetBytesPerSync(uint64(t.BytesPerSyncMB) << 20)
+	}
+	if t.WALBytesPerSyncMB > 0 {
+		opts.SetWALBytesPerSync(uint64(t.WALBytesPerSyncMB) << 20)
+	}
 }
 
 // applySharedTableOptions builds one BBTO per CF, referencing the
