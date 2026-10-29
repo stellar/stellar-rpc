@@ -124,7 +124,7 @@ type Reader interface {
 	// ErrUnsortedEventIDs on violation.
 	//
 	// ctx cancels in-flight I/O; the cold path checks ctx between
-	// scattered-read batches, the hot path checks between Gets.
+	// scattered-read batches, the hot path before each BatchMultiGet.
 	//
 	// A missing row is an error: every caller passes ids that name
 	// stored events (bitmap ids come from LookupKeys; the pager's

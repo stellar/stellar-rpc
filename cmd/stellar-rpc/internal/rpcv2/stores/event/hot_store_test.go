@@ -278,10 +278,10 @@ func TestHotStore_FetchEventsErrorsOnMissingID(t *testing.T) {
 // path with enough keys to defeat any per-iteration optimization
 // the wrapper might hide. The serial-Get implementation passed this
 // trivially; the batched implementation must produce the same
-// positional alignment across ~hundreds of keys.
+// positional alignment across several matchBatchSize slices.
 func TestHotStore_FetchEventsLargeBatch(t *testing.T) {
 	const chunkID = chunk.ID(0)
-	const n = 256
+	const n = 1100
 	h := openHotStoreForTest(t, chunkID)
 
 	payloads := make([]Payload, n)
@@ -305,11 +305,8 @@ func TestHotStore_FetchEventsLargeBatch(t *testing.T) {
 	}
 }
 
-// TestHotStore_FetchEventsHonorsContext pins that a pre-canceled
-// context is observed before the first Get fires — FetchEvents
-// returns context.Canceled, not a partial slice. The serial Get loop
-// checks ctx.Err() at the top of every iteration; with a non-empty
-// input the very first iteration tickles the check.
+// TestHotStore_FetchEventsHonorsContext pins that a canceled context
+// stops FetchEvents before its first BatchMultiGet.
 func TestHotStore_FetchEventsHonorsContext(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
