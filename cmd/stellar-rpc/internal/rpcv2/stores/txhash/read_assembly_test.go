@@ -163,10 +163,10 @@ func buildColdReader(t *testing.T, baseChunk chunk.ID, entries []fixtureEntry) *
 		minSeq = min(minSeq, e.seq)
 		maxSeq = max(maxSeq, e.seq)
 	}
-	inputs := writeFixtureBins(t, dir, entries)
+	inputs := writeFixtureBinsAt(t, dir, entries, testSecret(), baseChunk.FirstLedger())
 	idxPath := filepath.Join(dir, indexFileName(baseChunk))
-	require.NoError(t, BuildColdIndex(
-		context.Background(), inputs, idxPath, minSeq, maxSeq))
+	require.NoError(t, BuildColdIndex(context.Background(), inputs, idxPath,
+		chunk.IDFromLedger(minSeq).FirstLedger(), chunk.IDFromLedger(maxSeq).LastLedger()))
 	rd, err := OpenColdReader(idxPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rd.Close() })

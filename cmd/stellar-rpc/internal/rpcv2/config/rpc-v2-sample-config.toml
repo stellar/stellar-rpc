@@ -36,9 +36,11 @@ default_data_dir = "/var/stellar/rpc-v2"
 # With a local NVMe disk and a slower durable volume, put hot and txhash_raw
 # (and [ingestion] captive_core_storage_path) on the NVMe disk and keep the
 # catalog on the durable volume. The other stores can sit on the slower
-# volume. events and events_index move independently: the indexes are small
-# and read randomly, so putting events_index on fast disk speeds up filtered
-# event queries over wide ranges.
+# volume. With only slow disks, keep hot on a disk of its own: on a slow
+# shared disk, the txhash index build slows ingestion. events and
+# events_index move independently: the indexes are small and read randomly,
+# so putting events_index on fast disk speeds up filtered event queries over
+# wide ranges.
 #catalog = ""        # {default_data_dir}/catalog/rocksdb  (catalog RocksDB)
 #ledgers = ""        # {default_data_dir}/ledgers          (ledger packs)
 #events = ""         # {default_data_dir}/events/data      (event packs)
@@ -184,6 +186,8 @@ enable_debug = false
 [backfill]
 # Chunks backfilled in parallel. Default: GOMAXPROCS.
 #workers = 8
+# Workers each txhash index build uses. Default: half of GOMAXPROCS.
+#index_workers = 4
 # Retries for a failed chunk before the daemon stops; 0 means none.
 max_retries = 3
 

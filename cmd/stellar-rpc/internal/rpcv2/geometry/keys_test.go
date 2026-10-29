@@ -59,6 +59,7 @@ func TestKeyToPathBijection(t *testing.T) {
 		"/data/events/index/00005/00005350-index.hash",
 	}, l.EventsPaths(5350))
 	require.Equal(t, []string{"/data/hot/scratch/00005350-index.runs"}, l.ScratchPaths(5350, KindEvents))
+	require.Equal(t, []string{"/data/hot/scratch/00005350-txhash.runs"}, l.ScratchPaths(5350, KindTxHash))
 	require.Equal(t, event.ColdDirs{
 		Data: "/data/events/data/00005", Index: "/data/events/index/00005", Scratch: "/data/hot/scratch",
 	}, l.EventsColdDirs(5350))

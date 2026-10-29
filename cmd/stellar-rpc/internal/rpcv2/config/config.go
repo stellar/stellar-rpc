@@ -15,6 +15,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // Config is the on-disk --config-path TOML schema for the full-history daemon (design
@@ -236,6 +237,10 @@ type StorageConfig struct {
 type BackfillConfig struct {
 	// Concurrent task-slot count for bulk backfill; >= 1. Default GOMAXPROCS.
 	Workers *int `toml:"workers"`
+
+	// Worker count of each tx-hash index build; >= 1. Default half of
+	// GOMAXPROCS, at least 1.
+	IndexWorkers *int `toml:"index_workers"`
 
 	// Per-task retries before the daemon aborts; >= 0 (0 = run once). Default
 	// DefaultMaxRetries.
@@ -564,6 +569,10 @@ func (cfg Config) WithDefaults() Config {
 	if cfg.Backfill.Workers == nil {
 		v := backfill.DefaultWorkers()
 		cfg.Backfill.Workers = &v
+	}
+	if cfg.Backfill.IndexWorkers == nil {
+		v := txhash.DefaultBuildWorkers()
+		cfg.Backfill.IndexWorkers = &v
 	}
 	if cfg.Backfill.MaxRetries == nil {
 		v := DefaultMaxRetries

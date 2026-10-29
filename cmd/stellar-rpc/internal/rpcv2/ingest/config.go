@@ -21,8 +21,10 @@ type Config struct {
 	// keys — the caller derives it (txhash.ColdIndexSecret) so ingest keys match
 	// the index build. Required when Txhash is set — no unkeyed fallback.
 	TxhashSecret []byte
+
 	// TxhashPayloadBase is the first ledger of the chunk's tx-hash index
-	// window, which the .bin's payloads count from.
+	// window, which the .bin's payloads count from. Required when Txhash is
+	// set.
 	TxhashPayloadBase uint32
 
 	// EventsSecret is the resolved per-chunk secret that keys the events cold
@@ -31,8 +33,9 @@ type Config struct {
 	EventsSecret []byte
 }
 
-// validate rejects a Config with no enabled data types, or a txhash/events
-// config missing its cold-index secret.
+// validate rejects a Config with no enabled data types, a txhash/events
+// config missing its cold-index secret, or a txhash config missing its
+// payload base.
 func (c Config) validate() error {
 	if !c.Ledgers && !c.Txhash && !c.Events {
 		return errors.New("ingest: Config enables no data types (set at least one of Ledgers/Txhash/Events)")
@@ -40,6 +43,9 @@ func (c Config) validate() error {
 	if c.Txhash && len(c.TxhashSecret) != stores.SecretLen {
 		return fmt.Errorf("ingest: Txhash enabled but TxhashSecret is %d bytes, want %d (per-index secret required)",
 			len(c.TxhashSecret), stores.SecretLen)
+	}
+	if c.Txhash && c.TxhashPayloadBase == 0 {
+		return errors.New("ingest: Txhash enabled but TxhashPayloadBase is unset (the window's first ledger is required)")
 	}
 	if c.Events && len(c.EventsSecret) != stores.SecretLen {
 		return fmt.Errorf("ingest: Events enabled but EventsSecret is %d bytes, want %d (per-index secret required)",

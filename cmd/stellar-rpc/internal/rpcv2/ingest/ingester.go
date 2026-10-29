@@ -11,6 +11,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // coldChunk is one chunk's set of cold writers — one concrete field per data
@@ -57,15 +58,16 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 		cc.ledgers = w
 	}
 	if cfg.Txhash {
-		if dirs.TxhashBin == "" {
+		if dirs.TxhashBin == "" || dirs.TxhashRuns == "" {
 			return fail(errors.New("ingest: txhash enabled but its ColdDirs path is empty"))
 		}
 		if len(cfg.TxhashSecret) != stores.SecretLen {
 			return fail(errors.New("ingest: txhash cold writer requires a per-index secret"))
 		}
-		var secret [stores.SecretLen]byte
-		copy(secret[:], cfg.TxhashSecret)
-		w, err := newTxhashCold(dirs.TxhashBin, chunkID, sink, secret, cfg.TxhashPayloadBase)
+		bin := txhash.ColdBin{
+			Secret: [stores.SecretLen]byte(cfg.TxhashSecret), Base: cfg.TxhashPayloadBase, Chunk: chunkID,
+		}
+		w, err := newTxhashCold(dirs.TxhashBin, dirs.TxhashRuns, sink, bin)
 		if err != nil {
 			return fail(fmt.Errorf("open txhash cold writer: %w", err))
 		}
