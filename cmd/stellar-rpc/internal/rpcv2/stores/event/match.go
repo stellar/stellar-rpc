@@ -347,22 +347,16 @@ func Matches(
 				yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
 				return
 			}
-			// A reader that answers for less than it was asked leaves the walk
-			// nothing to advance on, and the loop would never end.
+			// Covering less than the stage would never advance the walk.
 			if covered.Start > stage.Start || covered.End < stage.End {
 				yield(Match{}, fmt.Errorf("events: query lookup covered [%d, %d) but was asked for [%d, %d)",
 					covered.Start, covered.End, stage.Start, stage.End))
 				return
 			}
-			// The stepper walks what the lookup covered and no further: the
-			// bitmaps say nothing about ids outside it. A reader that covers
-			// more than it was asked saves the next stage the ids it already
-			// read.
+			// The bitmaps answer only for the covered range.
 			walked := remaining.intersect(covered)
 			st := newSlabStepper(plans, sources, walked, descending)
-			// A plan is dropped only for a term absent from the chunk, which
-			// is chunk-wide: no later stage can revive it, so nothing past
-			// here can match either.
+			// Only a term absent from the whole chunk drops a plan.
 			if len(st.plans) == 0 {
 				return
 			}

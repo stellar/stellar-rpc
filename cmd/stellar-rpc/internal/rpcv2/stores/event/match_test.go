@@ -178,18 +178,15 @@ func eventIDRangeFor(t *testing.T, fx *queryFixture, startLedger, endLedger uint
 	return r
 }
 
+// everyID asks a lookup for every id, for assertions on whole terms.
+var everyID = IDRange{End: math.MaxUint32}
+
 // wholeChunk returns the IDRange covering everything r has
 // ingested at this moment — the test-side equivalent of the
 // snapshot the events pager pins at request entry.
 // Each test that wants "scan the whole chunk" pins its OWN snapshot
 // via this helper rather than relying on a hidden engine default,
 // keeping the snapshot-isolation contract visible at every call site.
-// everyID is the lookup window a test hands Reader.LookupKeys when it wants
-// a term's whole postings: the contract promises only the ids inside the
-// window it is given, so a test asserting on a whole bitmap must ask for
-// every id there could be.
-var everyID = IDRange{End: math.MaxUint32}
-
 func wholeChunk(t *testing.T, r Reader) IDRange {
 	t.Helper()
 	ec, err := r.EventCount()
@@ -1558,11 +1555,8 @@ func TestMatches_FirstBatchHintSizesIO(t *testing.T) {
 	assert.Equal(t, []int{2}, cr.rangeSizes)
 }
 
-// TestMatches_FirstBatchHintCarriesAcrossWindowBatches pins the hint's carry
-// over a window batch seam: the hint is the whole query's, so when the
-// leading batch yields fewer matches than it asks for, what is left of it
-// sizes the next batch's first fetch rather than the whole hint starting
-// over.
+// TestMatches_FirstBatchHintCarriesAcrossWindowBatches pins that after a stage
+// seam, the first fetch is what is left of the hint, not the whole hint.
 func TestMatches_FirstBatchHintCarriesAcrossWindowBatches(t *testing.T) {
 	f := newShapedFixture(t)
 	defer func(s uint) { slabShift = s }(slabShift)

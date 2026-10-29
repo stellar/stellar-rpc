@@ -5,10 +5,6 @@ package event
 // to put many empty slabs between consecutive ids. Every case is checked
 // against an answer computed without the index: postFilter over every
 // ordinal in the corpus, clipped to the window, the direction and the page.
-//
-// The same matrices carry the two pins the batched window rests on: that a
-// lookup's bitmaps are read only inside the window they were asked for, and
-// that the stage schedule is invisible in the stream.
 
 import (
 	"cmp"
@@ -747,34 +743,25 @@ func TestPlanIndexTermsSplitsRanges(t *testing.T) {
 
 // ───────────────────────── the skip ─────────────────────────
 
-// candidateFreeSlabCount is how many production-width slabs the fixture below
-// spans.
-const candidateFreeSlabCount = 10
-
-// candidateFreeSlabFixture is the window both slab-list pins walk: a rare
-// term in slabs 0, 3 and 9, another in slabs 1 and 6, a term holding every id
-// in the window, and a term present but empty.
-func candidateFreeSlabFixture() (IDRange, []*roaring.Bitmap) {
-	const slab = 1 << 16
-	window := IDRange{0, candidateFreeSlabCount * slab}
-	fat := roaring.New()
-	fat.AddRange(uint64(window.Start), uint64(window.End))
-	return window, []*roaring.Bitmap{
-		termBitmap(5, 3*slab+7, 9*slab+1),
-		termBitmap(slab+1, 6*slab+3),
-		fat,
-		termBitmap(),
-	}
-}
-
 // The skip is invisible in a stream, so this drives nextBounds directly and
 // requires the exact slabs the walk opens.
 func TestSlabStepperSkipsCandidateFreeSlabs(t *testing.T) {
 	defer func(s uint) { slabShift = s }(slabShift)
 	slabShift = 16
 	const slab = 1 << 16
-	const slabs = candidateFreeSlabCount
-	window, sources := candidateFreeSlabFixture()
+	const slabs = 10
+	window := IDRange{0, slabs * slab}
+
+	// A rare term in slabs 0, 3 and 9; another in slabs 1 and 6; a term
+	// holding every id in the window; and a term present but empty.
+	fat := roaring.New()
+	fat.AddRange(uint64(window.Start), uint64(window.End))
+	sources := []*roaring.Bitmap{
+		termBitmap(5, 3*slab+7, 9*slab+1),
+		termBitmap(slab+1, 6*slab+3),
+		fat,
+		termBitmap(),
+	}
 
 	walk := func(plans []termPlan, desc bool) [][2]uint32 {
 		st := newSlabStepper(plans, sources, window, desc)
@@ -874,16 +861,12 @@ func TestMatches_RareTermsSpanSlabs(t *testing.T) {
 
 // ───────────────────────── the lookup window ─────────────────────────
 
-// lookupFuzzMode is how windowFuzzReader rewrites a lookup's bitmaps outside
-// the window it was asked for.
+// lookupFuzzMode is how windowFuzzReader rewrites bitmaps outside the covered
+// range: invent and drop ids there, or clip the term to it.
 type lookupFuzzMode int
 
 const (
-	// fuzzOutside invents ids the term does not hold and drops ids it does,
-	// everywhere outside the window: what a reader is free to return.
 	fuzzOutside lookupFuzzMode = iota
-	// fuzzClip returns the window's ids and nothing else: what an index that
-	// reads only the window's containers will return.
 	fuzzClip
 )
 
@@ -894,8 +877,8 @@ func (m lookupFuzzMode) String() string {
 	return "outside"
 }
 
-// lookupCountingReader answers for the whole id space, as a reader of whole
-// terms does, and counts the lookups a query makes.
+// lookupCountingReader covers every id, as a whole-term reader does, and
+// counts lookups.
 type lookupCountingReader struct {
 	Reader
 
@@ -910,9 +893,8 @@ func (c *lookupCountingReader) LookupKeys(
 	return bms, IDRange{End: math.MaxUint32}, err
 }
 
-// TestMatches_WholeTermLookupIsOneStage pins what a covered range of the whole
-// id space buys: a second stage would ask for ids the first already answered
-// for, so there is none — and no stream moves, staging being an I/O schedule.
+// TestMatches_WholeTermLookupIsOneStage pins that a lookup covering every id
+// makes one stage, without moving the stream.
 func TestMatches_WholeTermLookupIsOneStage(t *testing.T) {
 	f := newShapedFixture(t)
 	for _, sh := range f.namedShapes() {
@@ -930,8 +912,8 @@ func TestMatches_WholeTermLookupIsOneStage(t *testing.T) {
 	}
 }
 
-// TestMatches_DeadPlanEndsTheWalk pins the return on a dropped plan: a term absent chunk-wide is absent from
-// every later stage, so none is asked for. countingReader covers only what it was asked, so the walk stages.
+// TestMatches_DeadPlanEndsTheWalk pins that a term absent from the chunk ends
+// the walk at the first stage.
 func TestMatches_DeadPlanEndsTheWalk(t *testing.T) {
 	defer func(s uint) { slabShift = s }(slabShift)
 	slabShift = 12 // stage 1's four slabs fall well short of the window
@@ -1010,11 +992,8 @@ func (r windowFuzzReader) LookupKeys(
 	return bms, covered, nil
 }
 
-// perturb runs the fuzzOutside mode: it adds ids to bm and drops ids from
-// it, always outside the covered range. That range's own edges are where a
-// wrong answer bites: an id just past it is what a NextValue asked at the
-// last id returns, and a walk that read it as the next candidate would fetch
-// it.
+// perturb adds and drops ids outside window, including right at its edges,
+// where a NextValue that leaves the range lands.
 func (r windowFuzzReader) perturb(bm *roaring.Bitmap, window IDRange) {
 	outside := func(id uint64) bool {
 		return id <= uint64(r.span) &&
@@ -1042,20 +1021,17 @@ func (r windowFuzzReader) perturb(bm *roaring.Bitmap, window IDRange) {
 	}
 }
 
-// TestMatches_IgnoresIDsOutsideTheLookupWindow is the oracle gate on
-// Reader.LookupKeys' window contract. The randomized matrix runs again with
-// each lookup's bitmaps rewritten outside the window it asked for — ids
-// invented, ids dropped, and the term clipped to the window — and must still
-// yield exactly the stream the corpus says it must. Four ids per slab puts a
-// stage seam and a batch seam every few ids, so the rewritten region lands
-// inside the window the consumer asked for, not only outside it.
+// TestMatches_IgnoresIDsOutsideTheLookupWindow reruns the randomized matrix
+// with every lookup's bitmaps rewritten outside their covered range; the
+// stream must not move. Four ids per slab puts stage and batch seams every few
+// ids, so the rewrites land inside the query's window too.
 func TestMatches_IgnoresIDsOutsideTheLookupWindow(t *testing.T) {
 	v := newDiffVocab(t)
 	const corpusSize = 300
 	corpus := newDiffCorpus(t, rand.New(rand.NewSource(20260829)), v, corpusSize)
 	defer func(s uint) { slabShift = s }(slabShift)
 	defer func(n int) { matchBatchSize = n }(matchBatchSize)
-	// A small fetch seam exercises fetch batches inside a window batch.
+	// A small fetch seam exercises fetch batches inside a stage.
 	slabShift, matchBatchSize = 2, 7
 
 	for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {

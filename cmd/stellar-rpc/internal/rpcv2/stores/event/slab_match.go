@@ -45,14 +45,9 @@ type slabPlan []*roaring.Bitmap
 
 // resolveSlabPlans resolves every plan's terms, drops the plans that name
 // a term absent from the index, since such a conjunction matches nothing,
-// and orders each survivor's terms rarest first, the order the pinned
-// roaring's FastAnd intersects them in. A present but empty term keeps its
-// plan.
-//
-// Rare is rare inside window: a lookup is free to answer outside it, and a
-// term the walk will never leave one slab of is not the rarest just because
-// it is small elsewhere. CardinalityInRange counts only the containers the
-// window spans.
+// and orders each survivor's terms rarest first inside window, the only part
+// a lookup answers for, which is the order the pinned roaring's FastAnd
+// intersects them in. A present but empty term keeps its plan.
 func resolveSlabPlans(plans []termPlan, sources []*roaring.Bitmap, window IDRange) []slabPlan {
 	// A term's cardinality is counted once, however many plans name it.
 	cards := make([]uint64, len(sources))
@@ -147,8 +142,7 @@ func (p slabPlan) prevBound(pos uint32) int64 {
 }
 
 // slabStepper walks one stage's slabs in emission order, evaluating a slab
-// only when the consumer has drained the previous one. Its window is the
-// stage, not the query's: the bitmaps it holds answer for no other ids.
+// only when the consumer has drained the previous one.
 type slabStepper struct {
 	plans  []slabPlan
 	window IDRange
@@ -381,11 +375,9 @@ func (s *slabStepper) appendUpTo(dst []uint32, n int) []uint32 {
 	return dst
 }
 
-// streamSlabs is the streaming loop for both directions over one window
-// stage: fill one batch of candidate ordinals from the stepper, fetch,
-// post-filter, yield. It returns how many matches it yielded and whether the
-// stream should continue into the next stage — a consumer that stopped, or an
-// error, ends the whole query; an exhausted stepper ends only this stage.
+// streamSlabs streams one stage: fill a batch of candidate ordinals from the
+// stepper, fetch, post-filter, yield. It returns how many matches it yielded,
+// and false once the consumer stopped or an error ended the query.
 func streamSlabs(
 	ctx context.Context, r Reader, filters []Filter, st *slabStepper,
 	descending bool, firstBatch int, yield func(Match, error) bool,

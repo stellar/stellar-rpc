@@ -36,10 +36,8 @@ func (r diffReader) Offsets() (*LedgerOffsets, error) {
 	return nil, errors.New("diffReader: Offsets is not part of the match path")
 }
 
-// The window is ignored: the corpus is in memory whole, so a term's whole
-// postings agree with the index inside any window the walk asks for. The
-// covered range reported back is the window itself, so the walk stages here
-// exactly as it does over a reader that answers only what it was asked.
+// The bitmaps are whole terms; covering only the window makes the walk stage
+// as it would over a windowed reader.
 func (r diffReader) LookupKeys(
 	_ context.Context, keys []TermKey, window IDRange,
 ) ([]*roaring.Bitmap, IDRange, error) {
