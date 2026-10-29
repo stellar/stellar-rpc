@@ -104,7 +104,7 @@ func getEventsV1(
 		// does, but a caller hanging up or running out its deadline is
 		// routine and would drown the real faults.
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			logger.WithError(err).Error("getEvents: serving the request failed")
+			withPanic(logger.WithError(err), err).Error("getEvents: serving the request failed")
 		}
 		return zero, &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: err.Error()}
 	}
