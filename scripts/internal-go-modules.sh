@@ -36,6 +36,11 @@ EOF
   )
 }
 
+usage() {
+  echo "usage: $0 github-actions | run <command>..." >&2
+  exit 2
+}
+
 case "${1:-}" in
   github-actions)
     file=$RUNNER_TEMP/internal-go-modules.gitconfig
@@ -46,6 +51,7 @@ case "${1:-}" in
     ;;
   run)
     shift
+    [ $# -gt 0 ] || usage
     if ! GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=probe.ok GIT_CONFIG_VALUE_0=1 git config probe.ok > /dev/null; then
       echo "$0 run needs git 2.31 or newer, and $(git version) is first on PATH." >&2
       exit 1
@@ -59,7 +65,6 @@ case "${1:-}" in
       "GIT_CONFIG_KEY_$n=include.path" "GIT_CONFIG_VALUE_$n=$file" "$@"
     ;;
   *)
-    echo "usage: $0 github-actions | run <command>..." >&2
-    exit 2
+    usage
     ;;
 esac
