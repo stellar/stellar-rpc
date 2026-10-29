@@ -3,6 +3,7 @@ package hotchunk
 import (
 	"bytes"
 	"context"
+	"math"
 	"testing"
 
 	"github.com/linxGnu/grocksdb"
@@ -24,6 +25,9 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
+
+// termWindow asks a lookup for every id: the assertions are on whole terms.
+var termWindow = event.IDRange{End: math.MaxUint32}
 
 const testPassphrase = "Public Global Stellar Network ; September 2015"
 
@@ -158,7 +162,7 @@ func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first+1, seqB)
 	// events CFs.
-	bms, err := db.Events().LookupKeys(context.Background(), []event.TermKey{termA})
+	bms, _, err := db.Events().LookupKeys(context.Background(), []event.TermKey{termA}, termWindow)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	assert.Equal(t, uint64(2), bms[0].GetCardinality(), "both ledgers share the event term")
@@ -198,7 +202,7 @@ func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 	_, gerr = db.Txhash().Get(hash)
 	require.ErrorIs(t, gerr, stores.ErrNotFound)
 	// events CFs — no term indexed, no event committed (clean miss = nil bitmap).
-	bms, lerr := db.Events().LookupKeys(context.Background(), []event.TermKey{term})
+	bms, _, lerr := db.Events().LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
 	require.NoError(t, lerr)
 	require.Nil(t, bms[0])
 	assert.Equal(t, uint32(0), eventCount(t, db.Events()))
@@ -378,7 +382,7 @@ func TestIngestLedger_WritesEveryHotType(t *testing.T) {
 	seq, err := db.Txhash().Get(hash)
 	require.NoError(t, err)
 	assert.Equal(t, first, seq)
-	bms, err := db.Events().LookupKeys(context.Background(), []event.TermKey{term})
+	bms, _, err := db.Events().LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	assert.Equal(t, uint64(1), bms[0].GetCardinality())
