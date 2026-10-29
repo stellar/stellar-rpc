@@ -101,7 +101,7 @@ The cold tier has two kinds of file: a per-chunk sorted run (`.bin`) and the per
 
 ### 6.1 The per-chunk sorted run: `.bin`
 
-The `.bin` lives at `txhash/raw/{bucket:05d}/{chunk:08d}.bin`, with catalog key `chunk:{chunk:08d}:txhash`. It is produced once, when the chunk is frozen: as the chunk's ledgers are read, each transaction's `(hash, seq)` is collected. Every 2²⁰ entries the build sorts what it holds and writes it as a run under the hot root's scratch directory, in the background while the next entries fill a second buffer, and the `.bin` is a merge of the runs; a chunk that never reaches 2²⁰ entries is sorted and written from memory. Either way a build holds at most about 40 MB of entries.
+The `.bin` lives at `txhash/raw/{bucket:05d}/{chunk:08d}.bin`, with catalog key `chunk:{chunk:08d}:txhash`. It is produced once, when the chunk is frozen. A chunk frozen from its hot DB gets it from the hot tier: one scan of the sealed files, which RocksDB yields in key order, merged with the rows after the last seal (§5.2), so nothing is sorted in memory. A chunk built from a ledger stream (backfill) collects each transaction's `(hash, seq)` as its ledgers are read. Every 2²⁰ entries it sorts what it holds and writes it as a run under the hot root's scratch directory, in the background while the next entries fill a second buffer, and the `.bin` is a merge of the runs; a chunk that never reaches 2²⁰ entries is sorted and written from memory. Either way a build holds at most about 40 MB of entries.
 
 **Format.** The `.bin` is a streamhash **sorted file**: a header with the record count, then one 19-byte record per entry, `[key: 16][payload: 3 LE]`. Streamhash owns that layout. The header also carries stellar-rpc's own metadata blob:
 
@@ -240,7 +240,7 @@ Transient peaks: ~2× the index size in the window dir during each rebuild (~25 
 ## 10. Performance
 
 - **Ingest, hot**: one row put per ledger, inside the ledger's existing write, after its keys are blinded and sorted; a background seal every 2²⁰ keys or 256 ledgers.
-- **Ingest, cold**: sorted runs of 2²⁰ entries merged into the `.bin`, negligible against the chunk's streaming pass; the `.bin` write is sequential.
+- **Ingest, cold**: from the hot DB, one scan of the sealed files merged with the unsealed rows; from a ledger stream, sorted runs of 2²⁰ entries merged into the `.bin`, negligible against the chunk's streaming pass. Either way the `.bin` write is sequential.
 - **Rebuild**: a full dense window builds a ~12.5 GB `.idx` from ~57 GB of sorted `.bin` files in about a minute (~200 MB/s write burst) on 8 build workers: streamhash's sorted-file build runs at about 6M keys/s per worker, up to what the disk reads. A build gets `[backfill] index_workers` workers, half of `GOMAXPROCS` by default. Mid-window rebuilds scale with `hi − lo`. Against a ~14-hour boundary cadence at mainnet rates, the rebuild is a ~0.1% duty cycle.
 - **Lookup, cold**: one MPHF probe per in-retention window — fingerprint screen, then fetch-and-verify on a hit. The hash is in at most one window, so at most one fetch confirms; fingerprint false positives (~1/256 per window, §6.2) are rejected by the full-hash verify. Probe ordering, parallelism, and the resulting latency/throughput are the query-routing design's concern (§8.1).
 - **Lookup, hot**: a binary search of each of the window's rows (at most 512), then one RocksDB point get across the sealed files' bloom filters, then the same ledger fetch.

@@ -355,9 +355,9 @@ func (h *HotStore) FetchRange(ctx context.Context, start, count uint32) iter.Seq
 }
 
 // All streams every event in this Chunk in chunk-relative eventID
-// order — the Reader full-scan. The freeze re-derives cold event
-// artifacts from raw LCMs and never calls this, so it has no
-// production caller yet: it's the intended read seam for the v2
+// order — the Reader full-scan. The freeze copies the rows from the
+// store directly (FreezeColdFromStore) and never calls this, so it has
+// no production caller yet: it's the intended read seam for the v2
 // cutover (#772), exercised by tests until then. Thin wrapper over
 // FetchRange; its yielded Payloads are likewise borrowed (valid only
 // for the step).

@@ -202,8 +202,8 @@ During ingestion the daemon maintains **one hot RocksDB per chunk** at `{storage
 
 | Column family | Holds | Serves |
 |---|---|---|
-| `ledgers` | compressed LCMs (LedgerCloseMeta), keyed by seq | `getLedger` for the live chunk; the source `processChunk` reads at freeze |
-| `txhash_rows`, `txhash` | each ledger's sorted tx-hash routing keys, keyed by seq; and the sealed windows of them, routing key → seq | `getTransaction` for the live chunk |
+| `ledgers` | compressed LCMs (LedgerCloseMeta), keyed by seq | `getLedger` for the live chunk; the freeze copies them into the cold pack |
+| `txhash_rows`, `txhash` | each ledger's sorted tx-hash routing keys, keyed by seq; and the sealed windows of them, routing key → seq | `getTransaction` for the live chunk; the freeze merges them into the `.bin` |
 | events CFs | live events (schema per the events doc) | `getEvents` for the live chunk |
 
 CFs share the instance's WAL, so each ledger commits as **one atomic WriteBatch** across the ledgers, txhash rows, events data and events offsets CFs. The events index CF and the `txhash` CF are not in the batch: a full slab or window is loaded into them as one sorted file, and what is not yet loaded is rebuilt from the events data and txhash rows CFs when the DB is opened. Per-CF options keep tuning independent (the events CFs carry their own settings). The DB is created when ingestion enters the chunk. It is discarded whole once every cold artifact derived from the chunk is durable **and** the rolling index covers the chunk. It keeps serving tx lookups across the brief freeze-to-coverage interval; freeze, rebuild, and discard all chain within one lifecycle run.
@@ -332,7 +332,7 @@ func resolve(cfg Config, rangeStart, rangeEnd ChunkID) Plan {
 
 ### The primitives
 
-`processChunk` writes a chunk's requested artifacts through the [one write protocol](#one-write-protocol), reading ledgers from `backfillSource`. Its hot-DB branch is what lets the lifecycle freeze a just-closed chunk from its own hot DB, on the same path as a cold backfill.
+`processChunk` writes a chunk's requested artifacts through the [one write protocol](#one-write-protocol), from the source `backfillSource` picks. Its hot-DB branch is what lets the lifecycle freeze a just-closed chunk from its own hot DB, on the same path as a cold backfill. A complete hot DB already holds every artifact's content in its final form, so the freeze reads no ledger stream: the pack is a copy of the compressed ledgers, the `.bin` a merge of the sealed tx-hash files and the rows after them, and the events files a copy of the events data plus the sealed index slabs, with only the events after the last slab indexed again. Every other source is a ledger stream the writers drain. Both write the same bytes.
 
 ```go
 func processChunk(cfg Config, chunk ChunkID, artifacts ArtifactSet) error {
@@ -348,12 +348,16 @@ func processChunk(cfg Config, chunk ChunkID, artifacts ArtifactSet) error {
 	}
 	batch.Commit()
 
-	w := newArtifactWriters(chunk, artifacts)
-	for seq := chunkFirstLedger(chunk); seq <= chunkLastLedger(chunk); seq++ {
-		w.Add(source.GetLedger(seq))
+	if hot, ok := source.(*HotDB); ok {
+		freezeFromHotDB(hot, chunk, artifacts) // copies and merges the hot DB's CFs
+	} else {
+		w := newArtifactWriters(chunk, artifacts)
+		for seq := chunkFirstLedger(chunk); seq <= chunkLastLedger(chunk); seq++ {
+			w.Add(source.GetLedger(seq))
+		}
+		w.Finish()
 	}
-	w.Finish()
-	w.FsyncAll() // durable before the keys flip to "frozen"
+	fsyncAll(chunk, artifacts) // durable before the keys flip to "frozen"
 
 	batch = cat.NewBatch()
 	for _, kind := range artifacts.Kinds() {
@@ -375,7 +379,7 @@ func backfillSource(cfg Config, chunk ChunkID, artifacts ArtifactSet) (LedgerSou
 			return nil, fmt.Errorf("hot DB for chunk %d is ready but won't open: %w", chunk, err)
 		}
 		if maxCommittedSeq(db) >= chunkLastLedger(chunk) {
-			return &HotLedgers{chunk: chunk, store: db}, nil
+			return &HotDB{chunk: chunk, store: db}, nil
 		}
 		db.Close() // incomplete: stale leftover — close and fall through; the discard scan owns it
 	}

@@ -30,6 +30,7 @@ package zstd
 import "C"
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -269,4 +270,30 @@ func (d *Decompressor) Decode(dst, src []byte) ([]byte, error) {
 // Allocates a context per call. Use Decompressor for hot paths.
 func Decode(dst, src []byte) ([]byte, error) {
 	return NewDecompressor().Decode(dst, src)
+}
+
+// FrameHeaderValid checks, without decompressing, that src starts a frame
+// Decompressor reads back and that carries its own integrity check: no
+// dictionary, a content checksum, and a recorded content size of at most
+// MaxUint32. A copy of compressed bytes into another store checks this, so a
+// frame the reader would reject fails the copy rather than a later read.
+func FrameHeaderValid(src []byte) error {
+	const dictIDMask, checksumFlag = 0x03, 0x04 // Frame_Header_Descriptor bits (RFC 8878)
+	if len(src) < 5 || binary.LittleEndian.Uint32(src) != C.ZSTD_MAGICNUMBER {
+		return errors.New("zstd: not a zstd frame")
+	}
+	if src[4]&dictIDMask != 0 {
+		return errors.New("zstd: frame needs a dictionary")
+	}
+	if src[4]&checksumFlag == 0 {
+		return errors.New("zstd: frame has no content checksum")
+	}
+	n := C.ZSTD_getFrameContentSize(unsafe.Pointer(&src[0]), C.size_t(len(src)))
+	if n == C.ZSTD_CONTENTSIZE_ERROR || n == C.ZSTD_CONTENTSIZE_UNKNOWN {
+		return errors.New("zstd: frame has no content size")
+	}
+	if uint64(n) > math.MaxUint32 {
+		return fmt.Errorf("zstd: frame content size %d exceeds MaxUint32", uint64(n))
+	}
+	return nil
 }
