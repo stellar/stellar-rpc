@@ -312,6 +312,41 @@ func TestGetPreflightDebug(t *testing.T) {
 	}
 }
 
+// TestGetPreflightUnsupportedProtocol checks that simulating on a protocol
+// neither bundled host supports fails with an error that names the network's
+// protocol and the supported ones, instead of the host's opaque
+// "Error(Context, InternalError)".
+func TestGetPreflightUnsupportedProtocol(t *testing.T) {
+	oldest := supportedProtocolVersions[0]
+	newest := supportedProtocolVersions[len(supportedProtocolVersions)-1]
+	supported := fmt.Sprintf("only supports protocols %d and %d", oldest, newest)
+
+	for _, protocolVersion := range []uint32{oldest - 1, newest + 1} {
+		t.Run(fmt.Sprintf("protocol %d", protocolVersion), func(t *testing.T) {
+			networkProtocol := fmt.Sprintf("the network is on protocol %d", protocolVersion)
+
+			params := getPreflightParameters(t, protocolVersion)
+			result, err := GetPreflight(t.Context(), params)
+			require.NoError(t, err)
+			require.Contains(t, result.Error, networkProtocol)
+			require.Contains(t, result.Error, supported)
+
+			params.OpBody = xdr.OperationBody{
+				Type:                 xdr.OperationTypeExtendFootprintTtl,
+				ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 100},
+			}
+			params.Footprint = xdr.LedgerFootprint{ReadOnly: []xdr.LedgerKey{{
+				Type:         xdr.LedgerEntryTypeContractCode,
+				ContractCode: &xdr.LedgerKeyContractCode{Hash: mockContractHash},
+			}}}
+			result, err = GetPreflight(t.Context(), params)
+			require.NoError(t, err)
+			require.Contains(t, result.Error, networkProtocol)
+			require.Contains(t, result.Error, supported)
+		})
+	}
+}
+
 func BenchmarkGetPreflight(b *testing.B) {
 	params := getPreflightParameters(b, supportedProtocolVersions[len(supportedProtocolVersions)-1])
 
