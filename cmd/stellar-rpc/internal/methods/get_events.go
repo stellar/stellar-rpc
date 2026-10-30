@@ -186,7 +186,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	topics := combineTopics(request.Filters)
 	eventTypes := combineEventTypes(request.Filters)
 
-	filters, err := compileFilters(request.Filters)
+	matcher, err := protocol.NewEventMatcher(request.Filters)
 	if err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InvalidParams, Message: err.Error(),
@@ -204,14 +204,13 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		if event, procErr = eventView.Event(); procErr != nil {
 			return false, procErr
 		}
-		// Fields are pulled off the view once and feed both the match and the render.
 		// Topics wait until type and contract id pass, so a rejected event never sizes them.
 		head, err := eventHeader(event)
 		if err != nil {
 			procErr = errors.Wrap(err, "could not parse event")
 			return false, procErr
 		}
-		if !filters.matchHeader(head) {
+		if !matcher.MatchesTypeAndContract(head.typ, head.cid) {
 			return true, nil
 		}
 		body, err := eventBody(head.v0)
@@ -219,7 +218,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 			procErr = errors.Wrap(err, "could not parse event")
 			return false, procErr
 		}
-		if !filters.match(head, body.topics) {
+		if !matcher.Matches(head.typ, head.cid, body.topics) {
 			return true, nil
 		}
 		info, err := eventInfo(head, body, cursor,
@@ -294,23 +293,34 @@ type eventV0 struct {
 	data   []byte
 }
 
-// eventHeader locates type, contract id and body in one pass. Fields returns views trimmed
-// to their extent, so their bytes are the raw XDR and Raw() would only re-walk them.
+// eventHeader reads type and contract id without sizing the body.
 func eventHeader(ev xdr.ContractEventView) (eventHead, error) {
-	f, err := ev.Fields()
+	var h eventHead
+	typ, err := ev.Type()
 	if err != nil {
 		return eventHead{}, err
 	}
-	var h eventHead
-	if h.typ, err = f.Type.Value(); err != nil {
+	if h.typ, err = typ.Value(); err != nil {
 		return eventHead{}, err
 	}
-	if cid, ok, err := f.ContractId.Unwrap(); err != nil {
+	opt, err := ev.ContractId()
+	if err != nil {
 		return eventHead{}, err
-	} else if ok {
-		h.cid = []byte(cid)
 	}
-	if h.v0, err = f.Body.V0(); err != nil { // fails on a non-V0 body, replacing "unknown event version"
+	cid, ok, err := opt.Unwrap()
+	if err != nil {
+		return eventHead{}, err
+	}
+	if ok {
+		if h.cid, err = cid.Raw(); err != nil {
+			return eventHead{}, err
+		}
+	}
+	body, err := ev.Body()
+	if err != nil {
+		return eventHead{}, err
+	}
+	if h.v0, err = body.V0(); err != nil { // fails on a non-V0 body, replacing "unknown event version"
 		return eventHead{}, err
 	}
 	return h, nil
