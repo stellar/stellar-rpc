@@ -58,7 +58,8 @@ case "${1:-}" in
     fi
     file=$(mktemp)
     trap 'rm -f "$file"' EXIT
-    write_gitconfig "$file" "${INTERNAL_GO_MODULES_TOKEN:-$(gh auth token)}"
+    token=${INTERNAL_GO_MODULES_TOKEN:-$(gh auth token)}
+    write_gitconfig "$file" "$token"
     nosumdb=$(go env GONOSUMDB)
     n=${GIT_CONFIG_COUNT:-0}
     env GONOSUMDB="${nosumdb:+$nosumdb,}$module" GIT_CONFIG_COUNT=$((n + 1)) \
