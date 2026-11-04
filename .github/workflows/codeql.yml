@@ -11,6 +11,8 @@ on:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
+    # Code scanning in the internal repo would need GitHub Code Security.
+    if: github.repository == 'stellar/stellar-rpc'
     # Pinned to the Build matrix image so the cgo libs build the same and share its cache.
     runs-on: ubuntu-24.04
     timeout-minutes: 360

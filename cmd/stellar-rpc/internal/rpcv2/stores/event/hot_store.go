@@ -202,15 +202,10 @@ func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.B
 // and returns them positionally aligned with the input slice. See
 // Reader.FetchEvents for the sorted-input precondition.
 //
-// Implementation: validates eventIDs are sorted ascending with no
-// duplicates (returns wrapped ErrUnsortedEventIDs otherwise — same
-// shape as the cold side), encodes them to BE-uint32 keys, then
-// calls rocksdb.Store.BatchMultiGet once with sortedInput=true.
-// The batched API crosses CGO a single time regardless of key count
-// and enables async_io so the kernel can overlap SST page reads —
-// a meaningful win on EBS / high-random-latency storage. ctx is
-// honored at the top of the call; the underlying CGO call is not
-// cancellable mid-flight.
+// It calls BatchMultiGet once per matchBatchSize ids: RocksDB pins every
+// block a call touches until the call returns, so the slices bound what
+// one request pins in the block cache. Rows never change once written, so
+// the slices need no shared snapshot. ctx is checked before each call.
 //
 // A missing row is an error: every caller passes ids that name
 // stored events (see Reader.FetchEvents), implying RocksDB has
@@ -221,9 +216,6 @@ func (h *HotStore) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.B
 func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payload, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, stores.ErrStoreClosed
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
 	}
 	if len(eventIDs) == 0 {
 		return nil, nil
@@ -236,9 +228,17 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payloa
 	for i, id := range eventIDs {
 		keys[i] = encodeDataKey(id)
 	}
-	values, err := h.chunkStore.BatchMultiGet(DataCF, keys)
-	if err != nil {
-		return nil, fmt.Errorf("events: batch fetch from chunk %s: %w", h.chunkID, err)
+	step := max(1, matchBatchSize)
+	values := make([][]byte, 0, len(keys))
+	for lo := 0; lo < len(keys); lo += step {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		batch, err := h.chunkStore.BatchMultiGet(DataCF, keys[lo:min(lo+step, len(keys))])
+		if err != nil {
+			return nil, fmt.Errorf("events: batch fetch from chunk %s: %w", h.chunkID, err)
+		}
+		values = append(values, batch...)
 	}
 	// BatchMultiGet guarantees len(values) == len(keys); the assertion
 	// keeps gosec quiet on the index reads below and surfaces any future

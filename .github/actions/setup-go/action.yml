@@ -9,6 +9,12 @@ inputs:
     description: 'Target Go architecture (used for native lib cache keys when cross-compiling)'
     required: false
     default: ''
+  internal-go-modules-app-id:
+    description: 'See ../internal-go-modules'
+    required: false
+  internal-go-modules-private-key:
+    description: 'See ../internal-go-modules'
+    required: false
 runs:
   using: "composite"
   steps:
@@ -114,6 +120,11 @@ runs:
         # You can see the cache key at https://github.com/actions/setup-go/blob/4e0b6c77c6448caafaff5eed51516cad78e7639a/src/cache-restore.ts#L34
         # There is a ticket to add prefixes for the cache, which should solve it https://github.com/actions/setup-go/issues/358
         cache: false
+
+    - uses: ./.github/actions/internal-go-modules
+      with:
+        app-id: ${{ inputs.internal-go-modules-app-id }}
+        private-key: ${{ inputs.internal-go-modules-private-key }}
 
     # Build grocksdb with clean_link for every go command in the job (build,
     # test, CodeQL autobuild, golangci-lint). Mirrors the Makefile.
