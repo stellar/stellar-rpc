@@ -83,11 +83,11 @@ func TestCSVSinkExactOutput(t *testing.T) {
 
 // TestCSVSinkHotIngestTotal drives the ingest_total reconstruction directly:
 // two complete per-ledger HotPhase bursts (extract→ledgers→txhash→events→
-// commit→apply) plus one FAILED burst (extract, then a phase carrying an error,
-// no apply). Only PhaseApply — the terminal, success-only phase — emits an
-// ingest_total sample, so the failed burst contributes nothing; each complete
-// burst contributes one sample (items=1) whose duration is the sum of that
-// burst's phases.
+// commit→apply) plus two FAILED bursts (one ending at a failed commit, one at
+// a failed apply). Only a PhaseApply without an error emits an ingest_total
+// sample, so the failed bursts contribute nothing; each complete burst
+// contributes one sample (items=1) whose duration is the sum of that burst's
+// phases.
 func TestCSVSinkHotIngestTotal(t *testing.T) {
 	sink := newCSVSink()
 
@@ -104,10 +104,13 @@ func TestCSVSinkHotIngestTotal(t *testing.T) {
 	burst(100) // 6*100 + 21 = 621
 	burst(200) // 6*200 + 21 = 1221
 
-	// A failed ledger: extract ran, then PhaseCommit failed — no apply, so no
-	// ingest_total sample.
+	// Failed ledgers: one whose commit failed (no apply), one whose apply
+	// failed. Neither adds an ingest_total sample.
 	sink.HotPhase(hotchunk.PhaseExtract, 10, 0, nil)
 	sink.HotPhase(hotchunk.PhaseCommit, 20, 0, errors.New("commit failed"))
+	sink.HotPhase(hotchunk.PhaseExtract, 10, 0, nil)
+	sink.HotPhase(hotchunk.PhaseCommit, 20, 0, nil)
+	sink.HotPhase(hotchunk.PhaseApply, 30, 0, errors.New("apply failed"))
 
 	outDir := t.TempDir()
 	_, err := sink.writeCSVs(outDir)

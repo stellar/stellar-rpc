@@ -138,7 +138,7 @@ func TestScanLedgers_ColdHotBorder(t *testing.T) {
 	require.NoError(t, cat.FlipChunkFrozen(c0, geometry.KindLedgers))
 
 	// c0 is ALSO ready-hot with a published (empty) handle: cold must win.
-	emptyHot, err := hotchunk.Open(cat.Layout().HotChunkPath(c0), c0, silentLogger())
+	emptyHot, err := hotchunk.Open(cat.Layout().HotChunkPath(c0), c0, cat.Secret(), silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = emptyHot.Close() })
 	require.NoError(t, cat.FlipHotReady(c0))
