@@ -21,6 +21,9 @@ version = "=29.0.2"
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
 version = "=30.0.0"
+# `next` makes this host report (and simulate) protocol 31, matching
+# stellar-core built with --enable-next-protocol-version-unsafe-for-production.
+features = ["next"]
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
