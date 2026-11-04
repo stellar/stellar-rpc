@@ -864,6 +864,8 @@ func (c *lookupCountingReader) LookupKeys(
 // TestMatches_WholeTermLookupIsOneStage pins that a lookup covering every id
 // makes one stage, without moving the stream.
 func TestMatches_WholeTermLookupIsOneStage(t *testing.T) {
+	defer func(s uint) { slabShift = s }(slabShift)
+	slabShift = 10 // both windows span more than stage 1's four slabs
 	f := newShapedFixture(t)
 	for _, sh := range f.namedShapes() {
 		if _, _, matchAll := planIndexTerms(sh.filters); matchAll {
