@@ -102,8 +102,8 @@ type Reader interface {
 	//
 	// ColdReader coalesces the underlying packfile reads into a
 	// single ReadItems pass, fanning out across the worker count
-	// configured via ColdReaderOptions.Concurrency. It returns whole
-	// terms, so its covered range is the whole id space. HotStore returns
+	// configured via ColdReaderOptions.Concurrency. It reads a split term
+	// only in the slabs the window reaches, and covers them. HotStore returns
 	// snapshots of the live mirror shared by all readers of a term;
 	// a dense term written since its last lookup is cloned once, by
 	// the first reader to look it up, and that clone is then shared,
@@ -111,8 +111,8 @@ type Reader interface {
 	//
 	// Callers MUST treat returned bitmaps as read-only. Dense hot
 	// snapshots are shared with other readers; sparse hot terms
-	// return a fresh caller-owned bitmap per lookup; cold-path
-	// bitmaps are freshly unmarshaled and owned by the caller. See
+	// return a fresh caller-owned bitmap per lookup; a cold reader
+	// hands later lookups the whole terms it already decoded. See
 	// ConcurrentBitmaps.Get.
 	//
 	// ctx cancels in-flight I/O on the cold path (MPHF load,

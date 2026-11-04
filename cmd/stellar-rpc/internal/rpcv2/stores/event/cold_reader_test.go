@@ -188,28 +188,29 @@ func TestColdReader_LookupUnseenTermReturnsNil(t *testing.T) {
 	}
 }
 
-func TestColdReader_LookupKeysReturnsFreshBitmaps(t *testing.T) {
-	// Two LookupKeys calls for the same term return independent
-	// bitmaps — mutating one must not affect the other. The interface
-	// contract says cold-side results are freshly unmarshaled and
-	// logically owned by the caller; this pins that a mutation cannot
-	// bleed into a later lookup.
+func TestColdReader_LookupKeysSharesNothingAcrossReaders(t *testing.T) {
+	// A reader hands its later lookups the whole terms it already
+	// decoded, and a reader serves one request, so a second reader on
+	// the same files decodes its own: a mutation through one reader's
+	// result cannot reach another's.
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
-
-	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cr.Close() })
+	open := func() *ColdReader {
+		cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = cr.Close() })
+		return cr
+	}
 
 	key := contractTermKey(payloads[0])
-	first := lookupOne(t, cr, key)
+	first := lookupOne(t, open(), key)
 	require.NotNil(t, first)
 	first.Add(999_999)
 
-	second := lookupOne(t, cr, key)
+	second := lookupOne(t, open(), key)
 	require.NotNil(t, second)
 	assert.False(t, second.Contains(999_999),
-		"a LookupKeys result mutation must not bleed into the next lookup")
+		"a LookupKeys result mutation must not reach another reader's lookup")
 }
 
 func TestColdReader_FetchEventsRoundTrip(t *testing.T) {
@@ -592,32 +593,6 @@ func TestColdReader_LookupKeys(t *testing.T) {
 	assert.Nil(t, bms[3], "second missing must also be nil")
 }
 
-// TestColdReader_LookupKeysClonesAcrossCalls pins that two
-// LookupKeys batches for the same key return independent bitmaps —
-// mutating one must not bleed into the next.
-func TestColdReader_LookupKeysClonesAcrossCalls(t *testing.T) {
-	const chunkID = chunk.ID(0)
-	dir, payloads := buildColdFixture(t, chunkID, 8, 1)
-
-	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cr.Close() })
-
-	key := contractTermKey(payloads[0])
-	first, _, err := cr.LookupKeys(context.Background(), []TermKey{key}, everyID)
-	require.NoError(t, err)
-	require.Len(t, first, 1)
-	require.NotNil(t, first[0])
-	first[0].Add(999_999)
-
-	second, _, err := cr.LookupKeys(context.Background(), []TermKey{key}, everyID)
-	require.NoError(t, err)
-	require.Len(t, second, 1)
-	require.NotNil(t, second[0])
-	assert.False(t, second[0].Contains(999_999),
-		"a LookupKeys result mutation must not bleed into the next LookupKeys")
-}
-
 func TestColdReader_FetchRangeMidRange(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 6, 1)
@@ -879,14 +854,13 @@ func TestColdReader_RejectsNonEmptyIndexOnEventlessChunk(t *testing.T) {
 
 // TestColdReader_CorruptIndexOffsetsIsCorrupt covers the other half of
 // index.pack. A record-level flip surfaces through LookupKeys' read; a flip in
-// the offsets index or the trailer surfaces at open, through validateMPHF,
+// the offsets index or the trailer surfaces at open, through waitLayout,
 // which is a different path and has to reach the same sentinel.
 func TestColdReader_CorruptIndexOffsetsIsCorrupt(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	dir, payloads := buildColdFixture(t, chunkID, 4, 1)
 
-	// The offsets index sits between the last record and the trailer; app data
-	// is empty for index.pack, so it ends 44 bytes before EOF.
+	// The offsets index sits before the app data and the 44-byte trailer.
 	indexPath := filepath.Join(dir, IndexPackName(chunkID))
 	b, err := os.ReadFile(indexPath)
 	require.NoError(t, err)
@@ -895,7 +869,7 @@ func TestColdReader_CorruptIndexOffsetsIsCorrupt(t *testing.T) {
 	tr, err := pr.Trailer()
 	require.NoError(t, err)
 	require.Positive(t, tr.IndexSize)
-	flipByteAt(t, indexPath, len(b)-44-int(tr.IndexSize))
+	flipByteAt(t, indexPath, len(b)-44-int(tr.AppDataSize)-int(tr.IndexSize))
 
 	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
@@ -921,7 +895,7 @@ func TestColdReader_CloseOnlySurfacesCorrupt(t *testing.T) {
 	tr, err := pr.Trailer()
 	require.NoError(t, err)
 	require.Positive(t, tr.IndexSize)
-	flipByteAt(t, indexPath, len(b)-44-int(tr.IndexSize))
+	flipByteAt(t, indexPath, len(b)-44-int(tr.AppDataSize)-int(tr.IndexSize))
 
 	cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 	require.NoError(t, err)
@@ -974,16 +948,10 @@ func TestColdReader_UncheckedIndexPackIsCorrupt(t *testing.T) {
 // eventful and eventless chunks.
 func rewriteIndexPackStamp(t *testing.T, dir string, chunkID chunk.ID, schema uint16, mask uint64) {
 	t.Helper()
-	stamp := make([]byte, indexStampLen)
-	stamp[0] = indexStampVersion
+	stamp := encodeIndexAppData(indexLayout{})
 	binary.BigEndian.PutUint16(stamp[1:3], schema)
 	binary.BigEndian.PutUint64(stamp[3:11], mask)
-	pw, err := packfile.Create(filepath.Join(dir, IndexPackName(chunkID)), packfile.WriterOptions{
-		Format:         indexPackFormat,
-		ItemsPerRecord: indexPackItemsPerRecord,
-		RecordChecksum: indexPackChecksum,
-		Overwrite:      true,
-	})
+	pw, err := packfile.Create(filepath.Join(dir, IndexPackName(chunkID)), indexPackWriterOptions())
 	require.NoError(t, err)
 	require.NoError(t, pw.Finish(stamp))
 }
