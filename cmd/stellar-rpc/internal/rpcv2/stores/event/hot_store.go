@@ -232,10 +232,7 @@ func (h *HotStore) FetchEvents(ctx context.Context, eventIDs []uint32) ([]Payloa
 		return nil, err
 	}
 
-	keys := make([][]byte, len(eventIDs))
-	for i, id := range eventIDs {
-		keys[i] = encodeDataKey(id)
-	}
+	keys := encodeDataKeys(eventIDs)
 	values, err := h.chunkStore.BatchMultiGet(DataCF, keys)
 	if err != nil {
 		return nil, fmt.Errorf("events: batch fetch from chunk %s: %w", h.chunkID, err)
@@ -673,6 +670,27 @@ func encodeDataKey(eventID uint32) []byte {
 	var key [dataKeyLen]byte
 	binary.BigEndian.PutUint32(key[:], eventID)
 	return key[:]
+}
+
+// encodeDataKeys encodes every id into one backing buffer and returns
+// per-id sub-slices of it, in input order: two allocations for the
+// batch rather than one per id, which is what encodeDataKey costs
+// because its array escapes through the returned slice.
+//
+// The slices alias one array and must not be retained past the call
+// they are passed to. BatchMultiGet qualifies: grocksdb copies each key
+// into C memory and frees the copy before returning.
+func encodeDataKeys(eventIDs []uint32) [][]byte {
+	buf := make([]byte, dataKeyLen*len(eventIDs))
+	keys := make([][]byte, len(eventIDs))
+	for i, id := range eventIDs {
+		lo := i * dataKeyLen
+		hi := lo + dataKeyLen
+		key := buf[lo:hi:hi]
+		binary.BigEndian.PutUint32(key, id)
+		keys[i] = key
+	}
+	return keys
 }
 
 func encodeIndexKey(term TermKey, eventID uint32) []byte {
