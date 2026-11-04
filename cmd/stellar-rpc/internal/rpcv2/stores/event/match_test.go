@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"math"
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -54,10 +55,12 @@ type countingReader struct {
 	totalKeys       int
 }
 
-func (c *countingReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
+func (c *countingReader) LookupKeys(
+	ctx context.Context, keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, IDRange, error) {
 	c.lookupKeysCalls++
 	c.totalKeys += len(keys)
-	return c.Reader.LookupKeys(ctx, keys)
+	return c.Reader.LookupKeys(ctx, keys, window)
 }
 
 // queryFixture seeds a hot chunk with a small, hand-crafted event set
@@ -174,6 +177,9 @@ func eventIDRangeFor(t *testing.T, fx *queryFixture, startLedger, endLedger uint
 	require.NoError(t, err)
 	return r
 }
+
+// everyID asks a lookup for every id, for assertions on whole terms.
+var everyID = IDRange{End: math.MaxUint32}
 
 // wholeChunk returns the IDRange covering everything r has
 // ingested at this moment — the test-side equivalent of the
@@ -1547,6 +1553,23 @@ func TestMatches_FirstBatchHintSizesIO(t *testing.T) {
 	}
 	assert.Equal(t, []uint32{4, 3}, matchOrdinals(got))
 	assert.Equal(t, []int{2}, cr.rangeSizes)
+}
+
+// TestMatches_FirstBatchHintCarriesAcrossWindowBatches pins that after a stage
+// seam, the first fetch is what is left of the hint, not the whole hint.
+func TestMatches_FirstBatchHintCarriesAcrossWindowBatches(t *testing.T) {
+	f := newShapedFixture(t)
+	defer func(s uint) { slabShift = s }(slabShift)
+	// 4096-wide slabs put the four-slab first stage at [0, 16384), which holds
+	// two of the sparse term's five ids; the other three fall to stage 2.
+	slabShift = 12
+
+	cr := &fetchCountingReader{Reader: diffReader{f.corpus}}
+	got := drainMatches(t, Matches(context.Background(), cr, f.filterSparseOnly(),
+		IDRange{0, shapedCorpusSize}, false, 4), 0)
+	assert.Equal(t, f.rareContract, matchOrdinals(got))
+	assert.Equal(t, []int{2, 2, 1}, cr.fetchSizes,
+		"a batch's first fetch is what is left of the hint, not the whole hint")
 }
 
 // TestMatches_DropsAreInvisible is the successor of the batch API's
