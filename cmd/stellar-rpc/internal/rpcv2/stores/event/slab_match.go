@@ -297,8 +297,11 @@ func (s *slabStepper) evalSlab(lo, hi uint32) *roaring.Bitmap {
 }
 
 // ensureSlab loads the next slab holding a match, or reports false.
-func (s *slabStepper) ensureSlab() bool {
+func (s *slabStepper) ensureSlab(ctx context.Context) bool {
 	for s.cur == nil {
+		if ctx.Err() != nil {
+			return false
+		}
 		lo, hi, ok := s.nextBounds()
 		if !ok {
 			return false
@@ -322,10 +325,10 @@ func (s *slabStepper) dropSlab() {
 }
 
 // appendUpTo fills dst up to n ids in emission order. A shorter result means
-// the walk is done.
-func (s *slabStepper) appendUpTo(dst []uint32, n int) []uint32 {
+// the walk is done or ctx is canceled.
+func (s *slabStepper) appendUpTo(ctx context.Context, dst []uint32, n int) []uint32 {
 	for len(dst) < n {
-		if !s.ensureSlab() {
+		if !s.ensureSlab(ctx) {
 			return dst
 		}
 		if s.desc {
@@ -361,12 +364,12 @@ func streamSlabs(
 	ids := make([]uint32, 0, fetch)
 	emitted := 0
 	for {
+		ids = st.appendUpTo(ctx, ids[:0], fetch)
+		fetch = rest
 		if err := ctx.Err(); err != nil {
 			yield(Match{}, err)
 			return emitted, false
 		}
-		ids = st.appendUpTo(ids[:0], fetch)
-		fetch = rest
 		if len(ids) == 0 {
 			return emitted, true
 		}

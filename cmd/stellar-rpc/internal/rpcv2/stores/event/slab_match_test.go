@@ -783,6 +783,23 @@ func TestSlabStepperSkipsCandidateFreeSlabs(t *testing.T) {
 	assert.Empty(t, walk([]termPlan{{3}}, true))
 }
 
+// TestSlabStepperStopsWhenCanceled pins that a walk notices a canceled
+// request at its next slab, even one that finds nothing to fetch.
+func TestSlabStepperStopsWhenCanceled(t *testing.T) {
+	defer func(s uint) { slabShift = s }(slabShift)
+	slabShift = 16
+	window := IDRange{0, 4 << 16}
+	every := roaring.New()
+	every.AddRange(uint64(window.Start), uint64(window.End))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, desc := range []bool{false, true} {
+		st := newSlabStepper([]termPlan{{0}}, []*roaring.Bitmap{every}, window, desc)
+		assert.Empty(t, st.appendUpTo(ctx, nil, 10))
+		assert.Len(t, st.appendUpTo(context.Background(), nil, 10), 10)
+	}
+}
+
 // TestMatches_RareTermsSpanSlabs checks the skip against the oracle at slab
 // widths that leave hundreds of empty slabs between rare ids.
 func TestMatches_RareTermsSpanSlabs(t *testing.T) {
