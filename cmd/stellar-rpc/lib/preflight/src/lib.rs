@@ -226,6 +226,20 @@ fn bytes_vec_to_c(v: Vec<Vec<u8>>) -> CXDRVector {
     CXDRVector { array, len }
 }
 
+// Each host runs ledgers on its own protocol only, and fails any other protocol
+// with an opaque `Error(Context, InternalError)`. So the dispatch only hands a
+// host its own protocol, and rejects any other protocol with an error that says
+// why (see https://github.com/stellar/stellar-rpc/issues/1163).
+fn unsupported_protocol_message(proto: u32) -> String {
+    format!(
+        "cannot simulate transaction: the network is on protocol {proto}, but this \
+         stellar-rpc only supports protocols {} and {}; run a stellar-rpc release \
+         that supports protocol {proto}",
+        prev::PROTOCOL,
+        curr::PROTOCOL,
+    )
+}
+
 #[no_mangle]
 pub extern "C" fn preflight_invoke_hf_op(
     handle: libc::uintptr_t, // Go Handle to forward to SnapshotSourceGet and SnapshotSourceHas
@@ -239,7 +253,7 @@ pub extern "C" fn preflight_invoke_hf_op(
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
     catch_preflight_panic(&move || {
-        if proto <= prev::PROTOCOL {
+        if proto == prev::PROTOCOL {
             prev::shared::preflight_invoke_hf_op_or_maybe_panic(
                 handle,
                 invoke_hf_op,
@@ -262,7 +276,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 use_upgraded_auth,
             )
         } else {
-            bail!("unsupported protocol version: {proto}")
+            bail!(unsupported_protocol_message(proto))
         }
     })
 }
@@ -276,7 +290,7 @@ pub extern "C" fn preflight_footprint_ttl_op(
 ) -> *mut CPreflightResult {
     let proto = ledger_info.protocol_version;
     catch_preflight_panic(&move || {
-        if proto <= prev::PROTOCOL {
+        if proto == prev::PROTOCOL {
             prev::shared::preflight_footprint_ttl_op_or_maybe_panic(
                 handle,
                 op_body,
@@ -291,7 +305,7 @@ pub extern "C" fn preflight_footprint_ttl_op(
                 ledger_info,
             )
         } else {
-            bail!("unsupported protocol version: {proto}")
+            bail!(unsupported_protocol_message(proto))
         }
     })
 }

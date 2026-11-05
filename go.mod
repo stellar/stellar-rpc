@@ -4,9 +4,7 @@ go 1.26.0
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
-	// Minimum v2.18.2: first upstream release with the FastOr/runContainer16
-	// fix (RoaringBitmap/roaring#527) that the fork previously carried.
-	github.com/RoaringBitmap/roaring/v2 v2.18.2
+	github.com/RoaringBitmap/roaring/v2 v2.26.0
 	github.com/aws/aws-sdk-go-v2 v1.45.1
 	github.com/aws/aws-sdk-go-v2/config v1.31.16
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.110.0
@@ -61,7 +59,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.30.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.39.0 // indirect
-	github.com/bits-and-blooms/bitset v1.24.2 // indirect
+	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
 	github.com/edsrzf/mmap-go v1.2.0 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
@@ -165,3 +163,8 @@ require (
 	gopkg.in/tylerb/graceful.v1 v1.2.15 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+// TODO: drop this replace once a roaring release includes
+// RoaringBitmap/roaring#566 and RoaringBitmap/roaring#572. It pins the
+// head of #572, which sits on #566 and on roaring's master.
+replace github.com/RoaringBitmap/roaring/v2 => github.com/tamirms/roaring/v2 v2.0.0-20261019091757-d5dd08cc80e5

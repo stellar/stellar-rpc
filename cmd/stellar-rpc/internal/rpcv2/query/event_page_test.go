@@ -964,12 +964,16 @@ func (f *fakeEventReader) EventCount() (uint32, error) {
 
 func (f *fakeEventReader) Offsets() (*event.LedgerOffsets, error) { return f.ofs, nil }
 
-func (f *fakeEventReader) LookupKeys(_ context.Context, keys []event.TermKey) ([]*roaring.Bitmap, error) {
+// The bitmaps are whole terms; covering only the window makes the walk stage
+// as it would over a windowed reader.
+func (f *fakeEventReader) LookupKeys(
+	_ context.Context, keys []event.TermKey, window event.IDRange,
+) ([]*roaring.Bitmap, event.IDRange, error) {
 	out := make([]*roaring.Bitmap, len(keys))
 	for i, k := range keys {
 		out[i] = f.bitmaps[k]
 	}
-	return out, nil
+	return out, window, nil
 }
 
 func (f *fakeEventReader) FetchEvents(_ context.Context, ids []uint32) ([]event.Payload, error) {

@@ -24,6 +24,9 @@ FROM ubuntu:22.04 AS build
 ARG GO_VERSION=1.26.9
 ARG RUST_TOOLCHAIN_VERSION=stable
 ARG REPOSITORY_VERSION
+# false builds a binary that refuses --enable-rpcv2, the same as every release.
+# The package builder never sets it; only an explicit rpcv2 image build does.
+ARG RPCV2=false
 
 ENV CARGO_HOME=/rust/.cargo
 ENV RUSTUP_HOME=/rust/.rust
@@ -47,7 +50,7 @@ RUN git config --global --add safe.directory "/go/src/github.com/stellar/stellar
 
 # The archives are already in /usr/local, so make links them instead of
 # rebuilding them.
-RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} ZSTD_HOME=/usr/local ROCKSDB_HOME=/usr/local build-stellar-rpc
+RUN make REPOSITORY_VERSION=${REPOSITORY_VERSION} RPCV2=${RPCV2} ZSTD_HOME=/usr/local ROCKSDB_HOME=/usr/local build-stellar-rpc
 RUN mv stellar-rpc /bin/stellar-rpc
 
 # --- Stage 4: Runtime ---

@@ -2,11 +2,47 @@ package packfile
 
 import (
 	"context"
+	"path/filepath"
 	"strconv"
 	"testing"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/zstd"
 )
+
+// BenchmarkOpen measures a warm Open, TotalItems and Close on packs with the
+// record counts of an index.pack (12.6K) and two events.packs (80K, 450K).
+func BenchmarkOpen(b *testing.B) {
+	for _, records := range []int{12_600, 80_000, 450_000} {
+		b.Run(strconv.Itoa(records), func(b *testing.B) {
+			path := filepath.Join(b.TempDir(), "pack")
+			w, err := Create(path, WriterOptions{ItemsPerRecord: 128})
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer w.Close()
+			item := []byte{1}
+			for range records * 128 {
+				if err := w.AppendItem(item); err != nil {
+					b.Fatal(err)
+				}
+			}
+			if err := w.Finish(nil); err != nil {
+				b.Fatal(err)
+			}
+
+			b.ReportAllocs()
+			for b.Loop() {
+				r := Open(path, ReaderOptions{})
+				if _, err := r.TotalItems(); err != nil {
+					b.Fatal(err)
+				}
+				if err := r.Close(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
 
 // BenchmarkReader measures end-to-end read throughput across representative
 // configurations. The fixture is built once per codec; workloads on the same

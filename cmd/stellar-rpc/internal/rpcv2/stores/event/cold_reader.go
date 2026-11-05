@@ -7,15 +7,15 @@ package event
 // interface against them.
 //
 // Lifecycle: each ColdReader owns two stores.PackReader instances
-// plus an in-memory parsed MPHF index. Open returns immediately,
+// plus a memory-mapped MPHF index. Open returns immediately,
 // but all three I/O units start right away in background
 // goroutines: OpenPack opens each file (holding its fd) and
-// reads its trailer in the background, and the MPHF read kicks off
+// reads its trailer in the background, and the MPHF open kicks off
 // alongside them. Decoded metadata is awaited on the first call
 // that needs it. Close drains the MPHF goroutine and releases the
 // packfile handles. Multiple ColdReaders can be open against the
 // same chunk's files concurrently — the pack handle is safe for
-// concurrent reads and the MPHF is read-only after load.
+// concurrent reads and the MPHF is read-only once open.
 //
 // Concurrency contract: read methods (LookupKeys,
 // FetchEvents, All) are safe to call concurrently with each other
@@ -45,6 +45,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -160,9 +161,8 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 	}
 	ch := make(chan mphfResult, 1)
 	go func() {
-		// openMPHF already wraps with the path on error — pass
-		// through without re-wrapping to avoid "events: read X:
-		// events: open X: ..." double prefixes.
+		// openMPHF already wraps its errors with the path; pass them
+		// through so the path isn't printed twice.
 		m, err := openMPHF(indexHashPath)
 		ch <- mphfResult{idx: m, err: err}
 	}()
@@ -321,7 +321,7 @@ func (c *ColdReader) Offsets() (*LedgerOffsets, error) {
 }
 
 // verifyAndDeserializeBitmap checks the index.pack record's leading
-// fingerprint against the one mphf.Lookup returned and, on match, unmarshals a fresh
+// fingerprint against the one mphf.LookupBatch returned and, on match, unmarshals a fresh
 // bitmap. On fingerprint mismatch (residual MPHF collision on an
 // unseen key) it returns (nil, nil) — the caller treats nil as
 // not-found. record is valid only inside ReadItem's callback;
@@ -347,9 +347,16 @@ func verifyAndDeserializeBitmap(
 // the input slice (result[i] corresponds to keys[i]). See
 // Reader.LookupKeys for the semantics.
 //
+// The window is ignored: each index.pack item holds one whole term,
+// so a lookup reads and returns the whole of it and reports the whole
+// id space as covered. A whole term agrees with the index inside any
+// window, which is all the contract asks. The window is honored once
+// the format can answer for part of a term.
+//
 // Cold-side implementation:
 //
-//  1. MPHF-resolve every key. Keys rejected at the routing stage
+//  1. MPHF-resolve every key in one batch, so their index.hash pages
+//     are read together. Keys rejected at the routing stage
 //     (streamhash ErrKeyNotFound) get result[i] = nil and never
 //     touch index.pack.
 //  2. Sort the surviving (key, slot) pairs by slot and dedupe —
@@ -364,23 +371,25 @@ func verifyAndDeserializeBitmap(
 //     match. Misses (fingerprint mismatch) leave result[i] = nil.
 //
 //nolint:cyclop // the four documented steps above, inline; splitting obscures the pass structure
-func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring.Bitmap, error) {
+func (c *ColdReader) LookupKeys(
+	ctx context.Context, keys []TermKey, _ IDRange,
+) ([]*roaring.Bitmap, IDRange, error) {
 	if c.closed.Load() {
-		return nil, stores.ErrStoreClosed
+		return nil, IDRange{}, stores.ErrStoreClosed
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, IDRange{}, err
 	}
 	if len(keys) == 0 {
-		return nil, nil
+		return nil, IDRange{End: math.MaxUint32}, nil
 	}
 
 	if err := c.validateMPHF(); err != nil {
-		return nil, err
+		return nil, IDRange{}, err
 	}
 	mphf, err := c.waitMPHF()
 	if err != nil {
-		return nil, err
+		return nil, IDRange{}, err
 	}
 
 	results := make([]*roaring.Bitmap, len(keys))
@@ -392,18 +401,17 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 		fp     [IndexRecordFingerprintLen]byte
 	}
 	pending := make([]pendingKey, 0, len(keys))
-	for i, key := range keys {
-		slot, fp, err := mphf.Lookup(key)
-		if err != nil {
-			if errors.Is(err, ErrKeyNotFound) {
+	for i, hit := range mphf.LookupBatch(keys) {
+		if hit.err != nil {
+			if errors.Is(hit.err, ErrKeyNotFound) {
 				continue // result[i] stays nil
 			}
-			return nil, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, err)
+			return nil, IDRange{}, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, hit.err)
 		}
-		pending = append(pending, pendingKey{outIdx: i, slot: slot, fp: fp})
+		pending = append(pending, pendingKey{outIdx: i, slot: hit.slot, fp: hit.fp})
 	}
 	if len(pending) == 0 {
-		return results, nil
+		return results, IDRange{End: math.MaxUint32}, nil
 	}
 
 	sort.Slice(pending, func(i, j int) bool { return pending[i].slot < pending[j].slot })
@@ -437,10 +445,10 @@ func (c *ColdReader) LookupKeys(ctx context.Context, keys []TermKey) ([]*roaring
 		}
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
+		return nil, IDRange{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
 	}
 
-	return results, nil
+	return results, IDRange{End: math.MaxUint32}, nil
 }
 
 // FetchEvents decodes events_data records for the supplied
@@ -603,7 +611,7 @@ func (c *ColdReader) loadMeta(eventsPath string) (coldMeta, error) {
 	if err != nil {
 		return coldMeta{}, fmt.Errorf("events: read app data from %s: %w", eventsPath, err)
 	}
-	offsets, err := DecodeLedgerOffsets(appData)
+	offsets, err := decodeLedgerOffsets(appData)
 	if err != nil {
 		return coldMeta{}, fmt.Errorf("events: decode offsets from %s: %w", eventsPath, err)
 	}

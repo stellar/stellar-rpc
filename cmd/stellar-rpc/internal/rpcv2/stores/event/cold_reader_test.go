@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -305,7 +306,7 @@ func TestColdReader_EventlessChunk(t *testing.T) {
 	// Term-filtered paths miss cleanly (nil bitmap, no error) instead
 	// of surfacing a filesystem error.
 	someTerm := ComputeTermKey([]byte("any"), FieldContractID)
-	bms, err := cr.LookupKeys(context.Background(), []TermKey{someTerm})
+	bms, _, err := cr.LookupKeys(context.Background(), []TermKey{someTerm}, everyID)
 	require.NoError(t, err)
 	require.Len(t, bms, 1)
 	assert.Nil(t, bms[0])
@@ -344,7 +345,7 @@ func TestColdReader_EmptyIndexOverNonEmptyPackErrors(t *testing.T) {
 	t.Cleanup(func() { _ = cr.Close() })
 
 	// The mismatch must surface as an error, not a clean miss (nil, no error).
-	_, lerr := cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
+	_, _, lerr := cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])}, everyID)
 	require.Error(t, lerr, "a mispaired empty index must error, not miss silently (nil bitmap)")
 	assert.Contains(t, lerr.Error(), "holds zero terms")
 }
@@ -380,7 +381,7 @@ func TestColdReader_OpenMissingIndexHash(t *testing.T) {
 	t.Cleanup(func() { _ = cr.Close() })
 
 	// First LookupKeys awaits the background MPHF load → missing-file error.
-	_, err = cr.LookupKeys(context.Background(), []TermKey{{}})
+	_, _, err = cr.LookupKeys(context.Background(), []TermKey{{}}, everyID)
 	assert.Error(t, err, "missing index.hash must surface from the first LookupKeys")
 }
 
@@ -400,7 +401,7 @@ func TestColdReader_PostCloseMethodsError(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, cr.Close())
 
-	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
+	_, _, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])}, everyID)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 
 	_, err = cr.FetchEvents(context.Background(), []uint32{0})
@@ -443,11 +444,9 @@ func TestColdReader_SatisfiesReaderInterface(t *testing.T) {
 	assert.Equal(t, chunkID, r.ChunkID())
 }
 
-// TestColdReader_MPHFSurvivesIndexHashDeletion pins the read-to-bytes
-// contract of openMPHF: once the MPHF has been loaded, index.hash is
-// fully resident in memory, so removing the on-disk file must not
-// break subsequent Lookups. This would fail under an mmap-backed
-// implementation if the OS released the inode on unlink.
+// TestColdReader_MPHFSurvivesIndexHashDeletion pins that an open reader
+// keeps serving after its index.hash is unlinked: the mapping keeps the
+// file's inode alive until Close.
 //
 // Open is lazy under the async-open design, so we drive a Lookup
 // before the remove to force the MPHF goroutine to complete first.
@@ -459,14 +458,13 @@ func TestColdReader_MPHFSurvivesIndexHashDeletion(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
-	// Force the background MPHF load to complete before we delete
-	// the file (otherwise the goroutine's os.ReadFile races our
-	// os.Remove).
+	// Force the background MPHF open to complete before we delete
+	// the file (otherwise the goroutine's open races our os.Remove).
 	_ = lookupOne(t, cr, topic0TermKey(t, payloads[0]))
 
 	require.NoError(t, os.Remove(filepath.Join(dir, IndexHashName(chunkID))))
 
-	// Lookup must still find every term — the MPHF lives in memory.
+	// Lookup must still find every term through the open mapping.
 	for i, p := range payloads {
 		bm := lookupOne(t, cr, topic0TermKey(t, p))
 		require.NotNil(t, bm, "lookup after index.hash deletion (payload %d)", i)
@@ -577,9 +575,10 @@ func TestColdReader_LookupKeys(t *testing.T) {
 	missing := ComputeTermKey([]byte("never-added"), FieldTopic1)
 
 	keys := []TermKey{contractKey, missing, topicKey, missing}
-	bms, err := cr.LookupKeys(context.Background(), keys)
+	bms, covered, err := cr.LookupKeys(context.Background(), keys, everyID)
 	require.NoError(t, err)
 	require.Len(t, bms, len(keys))
+	assert.Equal(t, IDRange{End: math.MaxUint32}, covered, "whole terms cover the whole id space")
 
 	require.NotNil(t, bms[0], "contract key should hit")
 	assert.Equal(t, uint64(len(payloads)), bms[0].GetCardinality())
@@ -605,13 +604,13 @@ func TestColdReader_LookupKeysClonesAcrossCalls(t *testing.T) {
 	t.Cleanup(func() { _ = cr.Close() })
 
 	key := contractTermKey(payloads[0])
-	first, err := cr.LookupKeys(context.Background(), []TermKey{key})
+	first, _, err := cr.LookupKeys(context.Background(), []TermKey{key}, everyID)
 	require.NoError(t, err)
 	require.Len(t, first, 1)
 	require.NotNil(t, first[0])
 	first[0].Add(999_999)
 
-	second, err := cr.LookupKeys(context.Background(), []TermKey{key})
+	second, _, err := cr.LookupKeys(context.Background(), []TermKey{key}, everyID)
 	require.NoError(t, err)
 	require.Len(t, second, 1)
 	require.NotNil(t, second[0])
@@ -745,7 +744,7 @@ func TestColdReader_CorruptIndexPackIsCorrupt(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
-	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
+	_, _, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])}, everyID)
 	require.ErrorIs(t, err, stores.ErrCorrupt)
 	require.ErrorIs(t, err, packfile.ErrChecksum, "the underlying signal stays in the chain")
 }
@@ -807,7 +806,7 @@ func TestColdReader_RejectsWrongFormatIndexPack(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
-	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
+	_, _, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])}, everyID)
 	require.ErrorContains(t, err, "expected format")
 }
 
@@ -855,7 +854,7 @@ func TestColdReader_RejectsMispairedIndexHash(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
-	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloadsA[0])})
+	_, _, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloadsA[0])}, everyID)
 	require.ErrorContains(t, err, "index pair mismatch")
 }
 
@@ -874,7 +873,7 @@ func TestColdReader_RejectsNonEmptyIndexOnEventlessChunk(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
-	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
+	_, _, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])}, everyID)
 	require.ErrorContains(t, err, "eventless")
 }
 
@@ -902,7 +901,7 @@ func TestColdReader_CorruptIndexOffsetsIsCorrupt(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
-	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
+	_, _, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])}, everyID)
 	require.ErrorIs(t, err, stores.ErrCorrupt)
 }
 
@@ -962,7 +961,7 @@ func TestColdReader_UncheckedIndexPackIsCorrupt(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cr.Close() })
 
-	_, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])})
+	_, _, err = cr.LookupKeys(context.Background(), []TermKey{contractTermKey(payloads[0])}, everyID)
 	require.ErrorIs(t, err, stores.ErrCorrupt)
 	// Pin the guard itself: reading a widened record as a narrow one also fails,
 	// so a bare ErrCorrupt assertion would survive the guard's removal.
@@ -1012,7 +1011,7 @@ func TestColdReader_RejectsMismatchedBuildStamp(t *testing.T) {
 				cr, err := OpenColdReader(chunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{})
 				require.NoError(t, err)
 				t.Cleanup(func() { _ = cr.Close() })
-				_, err = cr.LookupKeys(context.Background(), []TermKey{{1}})
+				_, _, err = cr.LookupKeys(context.Background(), []TermKey{{1}}, everyID)
 				require.ErrorContains(t, err, "was built under term schema")
 			})
 		}

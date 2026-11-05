@@ -304,7 +304,7 @@ func TestOffsetIndexDecodes(t *testing.T) {
 	indexBytes := data[indexStart:indexEnd]
 
 	recordCount := int(tr.recordCount)
-	offsets, err := decodeIndex(indexBytes, recordCount, int(tr.indexSize), indexStart)
+	offsets, err := decodeOffsets(indexBytes, recordCount, int(tr.totalItems), int(tr.itemsPerRecord), indexStart)
 	require.NoError(t, err)
 	require.Len(t, offsets, recordCount+1)
 
@@ -402,8 +402,8 @@ func TestPassthroughStoresVerbatim(t *testing.T) {
 			indexEnd := totalSize - trailerSize - int64(tr.appDataSize)
 			indexStart := indexEnd - int64(tr.indexSize)
 
-			offsets, err := decodeIndex(data[indexStart:indexEnd],
-				int(tr.recordCount), int(tr.indexSize), indexStart)
+			offsets, err := decodeOffsets(data[indexStart:indexEnd],
+				int(tr.recordCount), int(tr.totalItems), itemsPerRecord, indexStart)
 			require.NoError(t, err)
 
 			// For each record, the payload begins at offsets[r] and is

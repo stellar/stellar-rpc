@@ -3,6 +3,7 @@ package packfile
 import (
 	"encoding/binary"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 
@@ -88,4 +89,51 @@ func TestOpenFirstRead(t *testing.T) {
 		last := len(items) - 1
 		assert.Equal(t, items[last], readItemCopy(t, r, last))
 	})
+}
+
+type firstReadBuf struct {
+	readAtCloser
+
+	buf []byte
+}
+
+func (f *firstReadBuf) ReadAt(p []byte, off int64) (int, error) {
+	if f.buf == nil {
+		f.buf = p
+	}
+	return f.readAtCloser.ReadAt(p, off)
+}
+
+// The first read's buffer goes back to the pool when the open finishes, so
+// the opened index and app data must not be views into it: scribbling over
+// it afterwards changes neither, whether or not the tail needed a second read.
+func TestOpenDoesNotKeepFirstReadBuffer(t *testing.T) {
+	appData := []byte("app data")
+	path := writeAppDataPackfile(t, makeItems(300, 64), appData)
+	_, fileSize := readTrailer(t, path)
+
+	cases := []struct {
+		name      string
+		firstRead int
+	}{
+		{"tail in the first read", int(fileSize)},
+		{"tail needs a second read", trailerSize},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := os.Open(path)
+			require.NoError(t, err)
+			defer func() { _ = f.Close() }()
+			log := &firstReadBuf{readAtCloser: f}
+			res := openFile(log, fileSize, func(int64) int { return tc.firstRead })
+			require.NoError(t, res.err)
+			index := slices.Concat(res.idx.groups, res.idx.dir)
+
+			for i := range log.buf {
+				log.buf[i] = 0xFF
+			}
+			assert.Equal(t, appData, res.appData)
+			assert.Equal(t, index, slices.Concat(res.idx.groups, res.idx.dir))
+		})
+	}
 }

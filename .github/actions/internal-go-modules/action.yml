@@ -1,0 +1,35 @@
+name: 'Fetch the Go SDK from its internal repo'
+description: >-
+  Lets the rest of the job fetch github.com/stellar/go-stellar-sdk versions that
+  aren't public yet from stellar/go-stellar-sdk-internal (see scripts/internal-go-modules.sh).
+  Does nothing without the app credentials, which only the internal repos have.
+inputs:
+  app-id:
+    description: 'ID of the GitHub App that can read stellar/go-stellar-sdk-internal'
+    required: false
+  private-key:
+    description: 'Private key of that app'
+    required: false
+outputs:
+  gitconfig:
+    description: 'Path of the git config that redirects the SDK, or empty'
+    value: ${{ steps.configure.outputs.gitconfig }}
+runs:
+  using: "composite"
+  steps:
+  - id: token
+    if: inputs.private-key != ''
+    uses: actions/create-github-app-token@v2
+    with:
+      app-id: ${{ inputs.app-id }}
+      private-key: ${{ inputs.private-key }}
+      owner: stellar
+      repositories: go-stellar-sdk-internal
+      permission-contents: read
+
+  - id: configure
+    if: inputs.private-key != ''
+    shell: bash
+    env:
+      INTERNAL_GO_MODULES_TOKEN: ${{ steps.token.outputs.token }}
+    run: '"$GITHUB_WORKSPACE/scripts/internal-go-modules.sh" github-actions'
