@@ -200,7 +200,9 @@ impl CPreflightResult {
 // Each host runs ledgers on its own protocol only, and fails any other protocol
 // with an opaque `Error(Context, InternalError)`. So the dispatch only hands a
 // host its own protocol, and rejects any other protocol with an error that says
-// why (see https://github.com/stellar/stellar-rpc/issues/1163).
+// why (see https://github.com/stellar/stellar-rpc/issues/1163). The exception is
+// a curr host built with `next`, which also runs its base protocol, so curr
+// covers every protocol after prev up to its own.
 fn unsupported_protocol_message(proto: u32) -> String {
     format!(
         "cannot simulate transaction: the network is on protocol {proto}, but this \
@@ -235,7 +237,7 @@ pub extern "C" fn preflight_invoke_hf_op(
                 auth_mode.into(),
                 use_upgraded_auth,
             )
-        } else if proto == curr::PROTOCOL {
+        } else if (prev::PROTOCOL + 1..=curr::PROTOCOL).contains(&proto) {
             curr::shared::preflight_invoke_hf_op_or_maybe_panic(
                 handle,
                 invoke_hf_op,
@@ -268,7 +270,7 @@ pub extern "C" fn preflight_footprint_ttl_op(
                 footprint,
                 ledger_info,
             )
-        } else if proto == curr::PROTOCOL {
+        } else if (prev::PROTOCOL + 1..=curr::PROTOCOL).contains(&proto) {
             curr::shared::preflight_footprint_ttl_op_or_maybe_panic(
                 handle,
                 op_body,
