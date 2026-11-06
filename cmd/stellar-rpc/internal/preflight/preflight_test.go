@@ -340,14 +340,18 @@ func TestGetPreflightUnsupportedProtocol(t *testing.T) {
 			require.Contains(t, result.Error, networkProtocol)
 			require.Contains(t, result.Error, supported)
 
-			params.OpBody = xdr.OperationBody{
+			opBody, err := xdr.OperationBody{
 				Type:                 xdr.OperationTypeExtendFootprintTtl,
 				ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 100},
-			}
-			params.Footprint = xdr.LedgerFootprint{ReadOnly: []xdr.LedgerKey{{
+			}.MarshalBinary()
+			require.NoError(t, err)
+			footprint, err := xdr.LedgerFootprint{ReadOnly: []xdr.LedgerKey{{
 				Type:         xdr.LedgerEntryTypeContractCode,
 				ContractCode: &xdr.LedgerKeyContractCode{Hash: mockContractHash},
-			}}}
+			}}}.MarshalBinary()
+			require.NoError(t, err)
+			params.OpBody = opBody
+			params.Footprint = footprint
 			result, err = GetPreflight(t.Context(), params)
 			require.NoError(t, err)
 			require.Contains(t, result.Error, networkProtocol)
