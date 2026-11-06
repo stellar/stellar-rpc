@@ -165,6 +165,33 @@ func TestStore_LoadSorted_CloseWaitsForLoad(t *testing.T) {
 	requireValue(t, reopened, "", "a", "1")
 }
 
+// An overlapping file lands in level 0, and its value wins for a key an
+// older file holds too.
+func TestStore_LoadSortedOverlapping(t *testing.T) {
+	const cf = "loaded"
+	cfg := Config{Path: t.TempDir(), ColumnFamilies: []string{cf}, Logger: silentLogger()}
+	s, err := New(cfg)
+	require.NoError(t, err)
+
+	require.NoError(t, s.LoadSortedOverlapping(cf, pairs("a", "old", "c", "old")))
+	require.NoError(t, s.LoadSortedOverlapping(cf, pairs("a", "new", "b", "new")))
+	require.Equal(t, uint64(1), uintProperty(t, s, cf, "rocksdb.num-files-at-level0"))
+	require.Error(t, s.LoadSorted(cf, pairs("b", "x")), "LoadSorted still refuses an overlap")
+	require.Empty(t, loadFiles(t, s))
+
+	check := func(s *Store) {
+		requireValue(t, s, cf, "a", "new")
+		requireValue(t, s, cf, "b", "new")
+		requireValue(t, s, cf, "c", "old")
+	}
+	check(s)
+	require.NoError(t, s.Close())
+	reopened, err := New(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	check(reopened)
+}
+
 // The file is written with the column family's own options: a compressed
 // column family gets a compressed file.
 func TestStore_LoadSorted_UsesTheColumnFamilyOptions(t *testing.T) {
