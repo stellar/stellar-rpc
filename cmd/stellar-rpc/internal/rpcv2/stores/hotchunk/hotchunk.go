@@ -359,6 +359,12 @@ type LedgerReport struct {
 	CloseTime int64
 }
 
+// StartCompress starts compressing the ledger IngestLedger will write. The
+// returned pending must be passed to IngestLedger, or discarded.
+func (d *DB) StartCompress(seq uint32, lcmView xdr.LedgerCloseMetaView) *ledger.PendingCompression {
+	return d.ledger.StartCompress(ledger.Entry{Seq: seq, Bytes: []byte(lcmView)})
+}
+
 // IngestLedger commits ONE ledger as a SINGLE atomic synced WriteBatch across all
 // hot CFs (decision (a)): queue ledgers, txhash, and events rows into one
 // BatchWriter, commit once, and only then apply the txhash window and events
@@ -370,13 +376,18 @@ type LedgerReport struct {
 // serving state. lcmView is still needed for the raw-ledgers write and the
 // close time.
 //
+// pending is lcmView's compression, which the caller starts with StartCompress
+// before its walk so the two overlap. IngestLedger joins it on every path.
+//
 // lcmView is a borrowed zero-copy view and txParts aliases it; every extractor
 // copies what it retains, so neither need outlive this call. Store.Batch's
 // lifecycle RLock + checkOpen is the authoritative closed-store guard, so there
 // is no separate pre-check here.
 func (d *DB) IngestLedger(
 	seq uint32, lcmView xdr.LedgerCloseMetaView, txParts []sdkingest.LedgerTxParts,
+	pending *ledger.PendingCompression,
 ) (LedgerReport, error) {
+	defer pending.Discard()
 	var rep LedgerReport
 
 	// A read-only (ledgers-only) DB has no events facade to assign event IDs, and
@@ -440,14 +451,6 @@ func (d *DB) IngestLedger(
 	failed := PhaseCommit
 	batchStart := time.Now()
 	cerr := d.store.Batch(func(b *rocksdb.BatchWriter) error {
-		ls := time.Now()
-		if err := d.ledger.AddLedgerToBatch(b, ledger.Entry{Seq: seq, Bytes: []byte(lcmView)}); err != nil {
-			rep.Phases[PhaseLedgers].Dur = time.Since(ls)
-			failed = PhaseLedgers
-			return fmt.Errorf("queue ledger seq %d: %w", seq, err)
-		}
-		rep.Phases[PhaseLedgers].Dur = time.Since(ls)
-
 		ts := time.Now()
 		applyTxhash = d.txhash.AddRowToBatch(b, seq, txRow)
 		rep.Phases[PhaseTxhash].Dur = time.Since(ts)
@@ -461,6 +464,16 @@ func (d *DB) IngestLedger(
 		}
 		rep.Phases[PhaseEvents].Dur = time.Since(es)
 		applyEvents = apply
+
+		// The ledger's compression is joined last, so it has the longest to
+		// finish; PhaseLedgers is the wait for it plus the Put.
+		ls := time.Now()
+		if err := d.ledger.AddPendingToBatch(b, pending); err != nil {
+			rep.Phases[PhaseLedgers].Dur = time.Since(ls)
+			failed = PhaseLedgers
+			return fmt.Errorf("queue ledger seq %d: %w", seq, err)
+		}
+		rep.Phases[PhaseLedgers].Dur = time.Since(ls)
 		return nil
 	})
 	// Commit is the whole Batch call minus the three queue steps: the RocksDB write
