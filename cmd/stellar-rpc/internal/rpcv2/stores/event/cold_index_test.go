@@ -577,6 +577,17 @@ func TestColdIndexBuilder_RemovesRuns(t *testing.T) {
 		require.NoDirExists(t, runsDir)
 		require.NoFileExists(t, filepath.Join(dir, IndexHashName(chunk.ID(0))))
 	})
+	t.Run("on a Write canceled with a spill in flight", func(t *testing.T) {
+		dir := t.TempDir()
+		b := NewColdIndexBuilder(chunk.ID(0), dir, testIndexSecret)
+		for id := range uint32(hotSlabEvents + 1) {
+			require.NoError(t, b.Add(id, []TermKey{{1}}))
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		require.ErrorIs(t, b.Write(ctx), context.Canceled)
+		require.NoDirExists(t, filepath.Join(dir, IndexRunsDirName(chunk.ID(0))))
+	})
 }
 
 // A term's run bitmaps become its index.pack entries: a term in several
