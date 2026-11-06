@@ -37,7 +37,7 @@ func TestColdRuns_MergeYieldsEachTermWithItsSlabs(t *testing.T) {
 			spillSlab(t, &runs, newHotSlab(9)) // an empty run
 		}
 	}
-	require.Len(t, runs.paths, 4)
+	require.Len(t, runs.spans, 4)
 
 	var prev TermKey
 	terms := 0
@@ -76,12 +76,11 @@ func TestColdRuns_ReportTruncation(t *testing.T) {
 	s.add(TermKey{1}, 1)
 	s.add(TermKey{2}, 2)
 	spillSlab(t, &runs, s)
-	data, err := os.ReadFile(runs.paths[0])
-	require.NoError(t, err)
-	boundary := len(data) / 2 // two entries of the same size
+	size := runs.spans[0].n
+	boundary := size / 2 // two entries of the same size
 
-	for cut := len(data) - 1; cut > 0; cut-- {
-		require.NoError(t, os.WriteFile(runs.paths[0], data[:cut], 0o600))
+	for cut := size - 1; cut > 0; cut-- {
+		require.NoError(t, runs.f.Truncate(cut))
 		terms, err := mergedTerms(&runs)
 		if cut == boundary {
 			require.NoError(t, err)
@@ -90,17 +89,51 @@ func TestColdRuns_ReportTruncation(t *testing.T) {
 		}
 		require.ErrorContains(t, err, "unexpected EOF", "cut at %d", cut)
 	}
+	require.NoError(t, runs.remove())
 }
 
 func TestColdRuns_RejectOversizedEntries(t *testing.T) {
 	runs := coldRuns{dir: filepath.Join(t.TempDir(), "runs")}
 	require.NoError(t, os.MkdirAll(runs.dir, 0o755))
-	path := filepath.Join(runs.dir, "00000")
 	entry := binary.AppendUvarint(make([]byte, len(TermKey{})), runValueMax+1)
-	require.NoError(t, os.WriteFile(path, entry, 0o600))
-	runs.paths, runs.slabs = []string{path}, []uint32{0}
-	_, err := mergedTerms(&runs)
+	f, err := os.Create(filepath.Join(runs.dir, "runs"))
+	require.NoError(t, err)
+	_, err = f.Write(entry)
+	require.NoError(t, err)
+	runs.f, runs.spans = f, []runSpan{{n: int64(len(entry))}}
+	_, err = mergedTerms(&runs)
 	require.ErrorContains(t, err, "entry of")
+	require.NoError(t, runs.remove())
+}
+
+// Every run lands in one file, each runGap past the one before, and the merge
+// reads each from there: slabs holding the same term yield all their parts.
+func TestColdRuns_ShareOneFile(t *testing.T) {
+	runs := coldRuns{dir: filepath.Join(t.TempDir(), "runs")}
+	for slab := range uint32(3) {
+		s := newHotSlab(slab)
+		s.add(TermKey{1}, slab<<indexSlabShift)
+		s.add(TermKey{byte(2 + slab)}, slab<<indexSlabShift|1)
+		spillSlab(t, &runs, s)
+	}
+	entries, err := os.ReadDir(runs.dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Len(t, runs.spans, 3)
+	for i, s := range runs.spans[1:] {
+		require.Equal(t, runs.spans[i].off+runs.spans[i].n+runGap, s.off, "run %d starts runGap past run %d", i+1, i)
+	}
+
+	var keys []TermKey
+	for term, err := range runs.merge() {
+		require.NoError(t, err)
+		keys = append(keys, term.key)
+		if term.key == (TermKey{1}) {
+			require.Len(t, term.parts, 3)
+		}
+	}
+	require.Equal(t, []TermKey{{1}, {2}, {3}, {4}}, keys)
+	require.NoError(t, runs.remove())
 }
 
 func spillSlab(t *testing.T, runs *coldRuns, s *hotSlab) {

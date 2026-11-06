@@ -452,7 +452,7 @@ func TestColdIndexBuilder_BuildsAcrossSlabs(t *testing.T) {
 		}
 		require.NoError(t, b.Add(id, keys))
 	}
-	require.FileExists(t, filepath.Join(runsDir, "00000"))
+	require.FileExists(t, filepath.Join(runsDir, "runs"))
 	require.FileExists(t, filepath.Join(runsDir, "stale"))
 	require.NoError(t, b.Write(context.Background()))
 	require.NoDirExists(t, runsDir)
@@ -517,7 +517,7 @@ func TestColdIndexBuilder_SpillsAFullBuffer(t *testing.T) {
 	}
 	runsDir := filepath.Join(dir, IndexRunsDirName(indexTestChunkID))
 	require.NoError(t, b.awaitSpill())
-	require.FileExists(t, filepath.Join(runsDir, "00000"), "the buffer spilled before the slab ended")
+	require.FileExists(t, filepath.Join(runsDir, "runs"), "the buffer spilled before the slab ended")
 	require.NoError(t, b.Write(context.Background()))
 
 	cr, err := OpenColdReader(indexTestChunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{Concurrency: 2})
