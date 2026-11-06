@@ -65,7 +65,7 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 		}
 		var secret [stores.SecretLen]byte
 		copy(secret[:], cfg.TxhashSecret)
-		w, err := newTxhashCold(dirs.TxhashBin, chunkID, sink, secret)
+		w, err := newTxhashCold(dirs.TxhashBin, chunkID, sink, secret, cfg.TxhashPayloadBase)
 		if err != nil {
 			return fail(fmt.Errorf("open txhash cold writer: %w", err))
 		}

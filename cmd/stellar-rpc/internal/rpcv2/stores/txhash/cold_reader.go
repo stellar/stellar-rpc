@@ -70,7 +70,7 @@ func (r *ColdReader) Get(hash [32]byte) (uint32, error) {
 	return r.minLedger + uint32(payload), nil //nolint:gosec // 24-bit payload (width enforced at open)
 }
 
-// MinLedger returns the first ledger the index covers (the payload anchor).
+// MinLedger returns the first ledger of the index's window (the payload anchor).
 // Immutable; safe after Close.
 func (r *ColdReader) MinLedger() uint32 { return r.minLedger }
 
