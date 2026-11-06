@@ -163,6 +163,8 @@ jobs:
             ./cmd/stellar-rpc/internal/integrationtest/... \
             ./cmd/stellar-rpc/internal/${{ inputs.daemon }}/integrationtest/... 2>&1 \
             | tee "${RUNNER_TEMP}/integration-tests.log"
+        env:
+          CGO_CPPFLAGS: ${{ env.CGO_CPPFLAGS }} -DSQLITE_MAX_LENGTH=2147483647
 
       - name: Report the slowest tests
         if: always()

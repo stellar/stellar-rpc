@@ -39,6 +39,8 @@ jobs:
       - uses: stellar/actions/rust-cache@main
       - run: make build-libs
       - run: go test -race -timeout 25m ./cmd/stellar-rpc/...
+        env:
+          CGO_CPPFLAGS: ${{ env.CGO_CPPFLAGS }} -DSQLITE_MAX_LENGTH=2147483647
 
   build:
     name: Build
@@ -86,6 +88,7 @@ jobs:
           file stellar-rpc
         env:
           CGO_ENABLED: 1
+          CGO_CPPFLAGS: ${{ env.CGO_CPPFLAGS }} -DSQLITE_MAX_LENGTH=2147483647
           GOARCH: ${{ matrix.go_arch }}
 
       - name: Check that librocksdb and libzstd are inside the binary
