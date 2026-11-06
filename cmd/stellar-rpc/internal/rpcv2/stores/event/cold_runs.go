@@ -17,35 +17,54 @@ import (
 // coldRuns are a chunk's postings spilled one slab at a time. Run i holds
 // the terms of one slab in key order, each as
 // key || uvarint(len) || serialized bitmap. Merging the runs yields every
-// term once, in key order, with its bitmap from each run holding it.
+// term once, in key order, with its bitmap from each run holding it. The
+// runs are appended to one file, runGap apart, so the merge holds one file
+// open however many runs a chunk spills.
 type coldRuns struct {
 	dir   string
-	paths []string
-	slabs []uint32 // each run's slab
+	f     *os.File // the runs, one after another; nil before the first spill
+	spans []runSpan
 }
 
-// spill writes slab's terms, in key order with their serialized bitmaps, as
-// the next run.
+// runSpan is where a run sits in the runs file, and its slab.
+type runSpan struct {
+	off, n int64
+	slab   uint32
+}
+
+// runGap is the hole left before each run after the first. Readahead near a
+// run's end reads past it: a hole reads as zeros without touching the disk,
+// where the start of the next run, which the merge read long before, would be
+// read from disk again once memory pressure had evicted it.
+const runGap = 1 << 20
+
+// spill appends slab's terms, in key order with their serialized bitmaps, to
+// the runs file as the next run.
 func (r *coldRuns) spill(slab uint32, terms iter.Seq2[TermKey, []byte]) error {
-	if len(r.paths) == 0 {
+	if r.f == nil {
 		if err := os.MkdirAll(r.dir, 0o755); err != nil {
 			return err
 		}
+		f, err := os.Create(filepath.Join(r.dir, "runs"))
+		if err != nil {
+			return err
+		}
+		r.f = f
+	} else if _, err := r.f.Seek(runGap, io.SeekCurrent); err != nil {
+		return err
 	}
-	path := filepath.Join(r.dir, fmt.Sprintf("%05d", len(r.paths)))
-	f, err := os.Create(path)
+	off, err := r.f.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return err
 	}
-	err = writeRun(f, terms)
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	if err := writeRun(r.f, terms); err != nil {
+		return err
 	}
+	end, err := r.f.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return err
 	}
-	r.paths = append(r.paths, path)
-	r.slabs = append(r.slabs, slab)
+	r.spans = append(r.spans, runSpan{off: off, n: end - off, slab: slab})
 	return nil
 }
 
@@ -66,20 +85,23 @@ func writeEntry(w *bufio.Writer, key TermKey, value []byte) {
 	_, _ = w.Write(value)
 }
 
-// removeRuns deletes the run files and leaves the directory.
+// removeRuns deletes the runs file and leaves the directory.
 func (r *coldRuns) removeRuns() error {
-	for _, path := range r.paths {
-		if err := os.Remove(path); err != nil {
-			return err
-		}
+	if r.f == nil {
+		return nil
 	}
-	r.paths, r.slabs = nil, nil
-	return nil
+	_ = r.f.Close()
+	err := os.Remove(r.f.Name())
+	r.f, r.spans = nil, nil
+	return err
 }
 
 // remove deletes the runs and the directory holding them.
 func (r *coldRuns) remove() error {
-	r.paths, r.slabs = nil, nil
+	if r.f != nil {
+		_ = r.f.Close()
+	}
+	r.f, r.spans = nil, nil
 	return os.RemoveAll(r.dir)
 }
 
@@ -100,7 +122,6 @@ type runPart struct {
 func (r *coldRuns) merge() iter.Seq2[runTerm, error] {
 	return func(yield func(runTerm, error) bool) {
 		m, err := r.open()
-		defer m.close()
 		if err != nil {
 			yield(runTerm{}, err)
 			return
@@ -147,25 +168,18 @@ func (r *coldRuns) open() (*runMerge, error) {
 		return cmp.Or(bytes.Compare(a.key[:], b.key[:]), cmp.Compare(a.run, b.run)) < 0
 	}
 	// The runs share 16 MiB of read buffers, between 4 KiB and 64 KiB each.
-	bufSize := min(max(16<<20/max(len(r.paths), 1), 4<<10), 64<<10)
-	for i, path := range r.paths {
-		rr := &runReader{run: i, slab: r.slabs[i]}
-		if err := rr.open(path, bufSize, runValueMax); err != nil {
-			return m, err
+	bufSize := min(max(16<<20/max(len(r.spans), 1), 4<<10), 64<<10)
+	for i, s := range r.spans {
+		rr := &runReader{run: i, slab: s.slab}
+		name := fmt.Sprintf("%s run %d", r.f.Name(), i)
+		if err := rr.start(io.NewSectionReader(r.f, s.off, s.n), name, bufSize, runValueMax); err != nil {
+			return nil, err
 		}
-		if rr.done {
-			_ = rr.f.Close()
-			continue
+		if !rr.done {
+			m.push(rr)
 		}
-		m.push(rr)
 	}
 	return m, nil
-}
-
-func (m *runMerge) close() {
-	for _, rr := range m.items {
-		_ = rr.f.Close()
-	}
 }
 
 // advance moves the smallest run to its next entry.
@@ -176,7 +190,6 @@ func (m *runMerge) advance() error {
 	}
 	if rr.done {
 		m.pop()
-		_ = rr.f.Close()
 	} else {
 		m.down()
 	}
@@ -197,7 +210,8 @@ const runValueMax = 1 << 20
 
 // entryReader reads key || uvarint(len) || value entries in order.
 type entryReader struct {
-	f     *os.File
+	f     *os.File // set by open; nil for a run in the runs file
+	name  string   // what errors call the entries' source
 	br    *bufio.Reader
 	max   uint64 // the longest value accepted
 	key   TermKey
@@ -211,12 +225,18 @@ func (r *entryReader) open(path string, bufSize int, maxValue uint64) error {
 	if err != nil {
 		return err
 	}
-	r.f, r.br, r.max = f, bufio.NewReaderSize(f, bufSize), maxValue
-	if err := r.next(); err != nil {
+	r.f = f
+	if err := r.start(f, f.Name(), bufSize, maxValue); err != nil {
 		_ = f.Close()
 		return err
 	}
 	return nil
+}
+
+// start reads entries from src, called name in errors, and reads the first.
+func (r *entryReader) start(src io.Reader, name string, bufSize int, maxValue uint64) error {
+	r.name, r.br, r.max = name, bufio.NewReaderSize(src, bufSize), maxValue
+	return r.next()
 }
 
 func (r *entryReader) next() error {
@@ -225,12 +245,12 @@ func (r *entryReader) next() error {
 			r.done = true
 			return nil
 		}
-		return fmt.Errorf("events: %s: %w", r.f.Name(), err)
+		return fmt.Errorf("events: %s: %w", r.name, err)
 	}
 	n, err := binary.ReadUvarint(r.br)
 	if err == nil {
 		if n > r.max {
-			return fmt.Errorf("events: %s: entry of %d bytes", r.f.Name(), n)
+			return fmt.Errorf("events: %s: entry of %d bytes", r.name, n)
 		}
 		r.value = slices.Grow(r.value[:0], int(n))[:n] //nolint:gosec // n is at most r.max
 		_, err = io.ReadFull(r.br, r.value)
@@ -239,7 +259,7 @@ func (r *entryReader) next() error {
 		if errors.Is(err, io.EOF) {
 			err = io.ErrUnexpectedEOF // a key without its entry
 		}
-		return fmt.Errorf("events: %s: %w", r.f.Name(), err)
+		return fmt.Errorf("events: %s: %w", r.name, err)
 	}
 	return nil
 }
