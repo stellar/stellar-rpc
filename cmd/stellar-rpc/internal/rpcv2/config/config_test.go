@@ -55,6 +55,7 @@ hot = "/mnt/hot"
 
 [backfill]
 workers = 8
+index_workers = 6
 max_retries = 5
 
 [backfill.datastore]
@@ -112,6 +113,7 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	assert.Equal(t, "/mnt/txhash/index", cfg.Storage.TxhashIndex)
 	assert.Equal(t, "/mnt/hot", cfg.Storage.Hot)
 	assert.Equal(t, 8, *cfg.Backfill.Workers)
+	assert.Equal(t, 6, *cfg.Backfill.IndexWorkers)
 	assert.Equal(t, 5, *cfg.Backfill.MaxRetries)
 	assert.Equal(t, "GCS", cfg.Backfill.DataStore.Type)
 	assert.Equal(t, "my-bucket/ledgers", cfg.Backfill.DataStore.Params["destination_bucket_path"])
@@ -133,6 +135,7 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 
 	// Documented defaults filled.
 	assert.Equal(t, runtime.GOMAXPROCS(0), *cfg.Backfill.Workers)
+	assert.Equal(t, max(runtime.GOMAXPROCS(0)/2, 1), *cfg.Backfill.IndexWorkers)
 	assert.Equal(t, DefaultMaxRetries, *cfg.Backfill.MaxRetries)
 	assert.Equal(t, uint32(backfill.DefaultBSBPrefetchObjects), *cfg.Backfill.BSB.BufferSize)
 	assert.Equal(t, uint32(backfill.DefaultBSBDownloads), *cfg.Backfill.BSB.NumWorkers)
@@ -351,6 +354,7 @@ func TestParseConfig_ExplicitZeroPreserved(t *testing.T) {
 default_data_dir = "/d"
 [backfill]
 workers = 0
+index_workers = 0
 max_retries = 0
 [service.methods.getLedgers]
 queue_limit = 0
@@ -360,6 +364,7 @@ captive_core_config = "/cc"
 	cfg, err := ParseConfig([]byte(cfgText))
 	require.NoError(t, err)
 	assert.Equal(t, 0, *cfg.Backfill.Workers)
+	assert.Equal(t, 0, *cfg.Backfill.IndexWorkers)
 	assert.Equal(t, 0, *cfg.Backfill.MaxRetries)
 	assert.Equal(t, uint(0), *cfg.Service.Methods.GetLedgers.QueueLimit)
 }

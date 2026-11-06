@@ -97,37 +97,33 @@ The cold tier has two kinds of file: a per-chunk sorted run (`.bin`) and the per
 
 ### 6.1 The per-chunk sorted run: `.bin`
 
-The `.bin` lives at `txhash/raw/{bucket:05d}/{chunk:08d}.bin`, with catalog key `chunk:{chunk:08d}:txhash`. It is produced once, when the chunk is frozen: as the chunk's ledgers are read, each transaction's `(hash, seq)` is collected, and at the end they are **sorted in memory** (~3M entries ≈ 60 MB for a dense chunk — negligible) and written out.
+The `.bin` lives at `txhash/raw/{bucket:05d}/{chunk:08d}.bin`, with catalog key `chunk:{chunk:08d}:txhash`. It is produced once, when the chunk is frozen: as the chunk's ledgers are read, each transaction's `(hash, seq)` is collected. Every 2²⁰ entries the build sorts what it holds and writes it as a run under the hot root's scratch directory, in the background while the next entries fill a second buffer, and the `.bin` is a merge of the runs; a chunk that never reaches 2²⁰ entries is sorted and written from memory. Either way a build holds at most about 40 MB of entries.
 
-**Format** (streamhash's sorted-file format):
+**Format.** The `.bin` is a streamhash **sorted file**: a header with the record count, then one 19-byte record per entry, `[key: 16][payload: 3 LE]`. Streamhash owns that layout. The header also carries stellar-rpc's own metadata blob:
 
 ```
-uint32 LE        magic 0x53545346 ("STSF")
-uint16 LE        version (1)
-uint8            payload size (3)
-uint8            reserved (zero)
-uint64 LE        entry count
-uint32 LE        metadata length (21)
-21 bytes         metadata: version (1), chunk ID (uint32 LE), index secret the keys were blinded with
-zero padding     to 4096 bytes
-entry × count    19 bytes each: [key: 16][seq minus the window's first ledger: 3 LE]
+uint8            version (1)
+uint32 LE        payload base: the first ledger of the chunk's window
+uint32 LE        chunk ID
+16 bytes         index secret the keys were blinded with
 ```
 
 - `key` is the **secret-blinded first 16 bytes of the transaction hash** (blinded with the index secret recorded in the header, so the deferred build always adopts the secret its inputs were keyed with). The index uses only these 16 bytes to place and find a transaction; what happens when two hashes share a 16-byte prefix is in §8.2.
-- Entries are sorted ascending by `key`, **bytewise over all 16 bytes** — a total order, so the same entries always produce byte-identical files (rebuilds are deterministic).
+- `payload` is the transaction's ledger as an offset from the **payload base**, the first ledger of the chunk's window. The base is known when the `.bin` is written and stays fixed for the window's life, so the payload is already the one the index stores (§6.2). The writers refuse a ledger outside the chunk.
+- Records are sorted ascending by `key`, **bytewise over all 16 bytes**. That is a total order, so the same entries always produce byte-identical files (rebuilds are deterministic). The writer refuses a key out of order.
 
-The `.bin` is a pre-sorted file, and a lookup never reads it directly. It is sorted because streamhash builds an index **much faster, and with much less memory, when its keys arrive already sorted** — its *sorted-builder mode*.
+The `.bin` is a pre-sorted file, and a lookup never reads it directly. It is sorted because streamhash builds an index from sorted files **without merging them**: every file holds any range of the index's blocks as one contiguous run, so the build reads each file once, in order, on as many workers as it is given.
 
-A `.bin` is kept while it is still a rebuild input — every rebuild re-merges the `.bin` files for the chunks its window currently covers. Once the window is complete and its final index is built, the `.bin` files are no longer needed, and are deleted — or, if retention is narrower than a window so its chunks age out before the window completes, retention pruning deletes them first.
+A `.bin` is kept while it is still a rebuild input — every rebuild reads the `.bin` files again for the chunks its window currently covers. Once the window is complete and its final index is built, the `.bin` files are no longer needed, and are deleted — or, if retention is narrower than a window so its chunks age out before the window completes, retention pruning deletes them first.
 
 ### 6.2 The per-window index: `.idx`
 
-The `.idx` lives at `txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx`, tracked by the catalog key `index:{window:08d}:{lo:08d}:{hi:08d}`. There is one minimal-perfect-hash file per **coverage** — a coverage being the chunk range `[lo, hi]` the file actually hashes. Streamhash's `SortedBuilder` builds it from the k-way merge of `.bin[lo..hi]`. The index carries two per-entry fields:
+The `.idx` lives at `txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx`, tracked by the catalog key `index:{window:08d}:{lo:08d}:{hi:08d}`. There is one minimal-perfect-hash file per **coverage** — a coverage being the chunk range `[lo, hi]` the file actually hashes. Streamhash's `BuildFromSortedFiles` builds it from the files `.bin[lo..hi]` as they are. The index carries two per-entry fields:
 
-- **Payload (3 bytes): the answer the hash maps to — a ledger seq.** It is stored as an offset from the window's first ledger (`MinLedger`), written so by the `.bin` producer, rather than as a full seq, to save bytes. A window spans 10,000,000 ledgers, so the largest offset (`10_000_000 - 1`) fits in a 24-bit field. Streamhash writes the payload width into the index file's header; `[MinLedger, MaxLedger]` (the window's first ledger and the coverage's last), which streamhash does not model itself, rides in the file's user-metadata slot behind a leading version byte, as two 4-byte little-endian values followed by the 16-byte routing secret. All of it is read back when the index is opened, so there is no separate sidecar file.
+- **Payload (3 bytes): the answer the hash maps to — a ledger seq.** It is stored as an offset from the payload base, the window's first ledger, rather than as a full seq, to save bytes. The base stays put when the retention floor raises the coverage's first ledger (`MinLedger = chunkFirstLedger(lo)`), so the `.bin` payloads serve every rebuild of the window. A window spans 10,000,000 ledgers, so the largest offset (`10_000_000 - 1`) fits in a 24-bit field. Streamhash writes the payload width into the index file's header; the payload base and the coverage's ledger range `[MinLedger, MaxLedger]`, which streamhash does not model itself, ride in the file's user-metadata slot behind a leading version byte, as three 4-byte little-endian values followed by the 16-byte routing secret. All of it is read back when the index is opened, so there is no separate sidecar file.
 - **Fingerprint (1 byte, fixed by the format): screens out wrong hashes** before the expensive fetch-and-verify. One byte rejects ~255/256 of foreign hashes per window probe (§8.2), costing one byte per transaction.
 
-All-in, the index costs ≈4.2 bytes per transaction (MPHF structure + payload + fingerprint) — ≈12.5 GB for a dense full window, versus the ≈60 GB of `.bin` runs it consumes.
+All-in, the index costs ≈4.2 bytes per transaction (MPHF structure + payload + fingerprint) — ≈12.5 GB for a dense full window, versus the ≈57 GB of `.bin` runs it consumes.
 
 ### 6.3 Coverage and the live index
 
@@ -155,16 +151,12 @@ This is affordable because the rebuild is cheap relative to its cadence: a full-
 To rebuild window `w`'s index over coverage `[lo, hi]`:
 
 1. **Skip if already done.** If the live index already covers `[lo, hi]`, there is nothing to do. (A live index *wider* than desired also counts — a risen floor never forces a narrowing rebuild; the below-floor slice is masked by the retention gate, §8.2.)
-2. **Merge.** Merge the sorted `.bin` files for chunks `[lo, hi]` into a new index file, with streamhash's sorted-builder. (Every chunk in `[lo, hi]` must have a `.bin`; a missing one fails the merge. A coverage with no transactions at all builds a valid empty index, and lookups against it simply miss.)
+2. **Build.** Build a new index file from the sorted `.bin` files for chunks `[lo, hi]`, with streamhash's `BuildFromSortedFiles`. The files must share one index secret and one payload base, and each must hold a chunk of `[lo, hi]`. (Every chunk in `[lo, hi]` must have a `.bin`; a missing one fails the build. A coverage with no transactions at all builds a valid empty index, and lookups against it simply miss.)
 3. **Swap in.** Make the new file the window's live index, replacing the previous one.
 
 ```go
 // rebuild window w's index over [lo, hi]
-sb := streamhash.NewSortedBuilder(newIndexFile, sortedBuilderOpts)
-for entry := range kWayMerge(binFiles(lo, hi)) { // sorted .bin files → one stream
-    sb.Add(entry)
-}
-sb.Finish()
+streamhash.BuildFromSortedFiles(ctx, newIndexFile, binFiles(lo, hi), indexOpts...) // reads each sorted .bin once
 // then make newIndexFile the window's live index, replacing the old one
 ```
 
@@ -176,7 +168,7 @@ When a window's last chunk is folded in, its index is final: it covers the windo
 
 ### 7.4 Disk use during a rebuild
 
-A rebuild writes a whole new index file before the old one is removed, so a window directory briefly holds ~2× the index size (~25 GB at the end of a dense window). The window's `.bin` files are also all on disk together, since the rebuild merges them at once — about 60 GB for a dense window. Both are transient. During a multi-window catch-up (a first start, or backfill after long downtime) the executor does not serialize windows, so several windows' `.bin` sets can be on disk at once: the transient scales with the backlog, up to every window in the plan — size a full-history first start for that, not for one window.
+A rebuild writes a whole new index file before the old one is removed, so a window directory briefly holds ~2× the index size (~25 GB at the end of a dense window). The window's `.bin` files are also all on disk together, since the rebuild reads them all at once — about 57 GB for a dense window. Both are transient. During a multi-window catch-up (a first start, or backfill after long downtime) the executor does not serialize windows, so several windows' `.bin` sets can be on disk at once: the transient scales with the backlog, up to every window in the plan — size a full-history first start for that, not for one window.
 
 The window-end rebuild writes ~12.5 GB in ~1 minute (~200 MB/s burst) — trivial on instance NVMe, but worth provisioning for on throughput-capped volumes like EBS gp3.
 
@@ -202,7 +194,7 @@ for each in-retention window (its live index → {lo}-{hi}.idx):
   → MPHF probe on the hash's 16-byte prefix
   → fingerprint check (1 byte)                    — miss ⇒ skip this window
   → on a fingerprint hit:
-       seq = MinLedger + payload (3 bytes)
+       seq = base + payload (3 bytes)
        retention gate: seq ≥ floor?               — else skip this window
        fetch the LCM for seq, extract the tx
        verify the full 32-byte hash               — confirms, or rejects a false positive
@@ -236,16 +228,16 @@ Per dense chunk (~3M transactions) and dense window (1,000 chunks, ~3×10⁹ tra
 | Structure | Unit cost | Dense chunk | Dense window | Lifetime |
 |---|---|---|---|---|
 | hot `txhash` CF | 36 B/tx raw (32 key + 4 value), before RocksDB overhead | ~110 MB raw | — (per-chunk) | chunk ingestion → index coverage |
-| `.bin` sorted run | 20 B/tx exactly | ~60 MB | ~60 GB | chunk freeze → window finalization, or retention floor |
+| `.bin` sorted run | 19 B/tx | ~57 MB | ~57 GB | chunk freeze → window finalization, or retention floor |
 | `.idx` | ≈4.2 B/tx (3-byte payload) | — (per-window) | ~12.5 GB | build → superseded next boundary, or retention |
 
-Transient peaks: ~2× the index size in the window dir during each rebuild (~25 GB at window end); the `.bin` files for the in-flight window total ~60 GB. Both are transient (§7.4). The steady-state durable cost of the cold tier is the `.idx` files alone: ≈4.2 bytes per transaction across all retained history.
+Transient peaks: ~2× the index size in the window dir during each rebuild (~25 GB at window end); the `.bin` files for the in-flight window total ~57 GB. Both are transient (§7.4). The steady-state durable cost of the cold tier is the `.idx` files alone: ≈4.2 bytes per transaction across all retained history.
 
 ## 10. Performance
 
 - **Ingest, hot**: one `(hash, seq)` put per transaction, inside the ledger's existing write.
-- **Ingest, cold**: the in-memory sort of ~3M entries is negligible against the chunk's streaming pass; the `.bin` write is sequential.
-- **Rebuild**: a full dense window merges ~60 GB of sorted `.bin` files into a ~12.5 GB `.idx` in ≈1 minute (~200 MB/s write burst), measured in the `bench-fullhistory` harness. Mid-window rebuilds scale with `hi − lo`. Against a ~14-hour boundary cadence at mainnet rates, the rebuild is a ~0.1% duty cycle.
+- **Ingest, cold**: sorted runs of 2²⁰ entries merged into the `.bin`, negligible against the chunk's streaming pass; the `.bin` write is sequential.
+- **Rebuild**: a full dense window builds a ~12.5 GB `.idx` from ~57 GB of sorted `.bin` files in about a minute (~200 MB/s write burst) on 8 build workers: streamhash's sorted-file build runs at about 6M keys/s per worker, up to what the disk reads. A build gets `[backfill] index_workers` workers, half of `GOMAXPROCS` by default. Mid-window rebuilds scale with `hi − lo`. Against a ~14-hour boundary cadence at mainnet rates, the rebuild is a ~0.1% duty cycle.
 - **Lookup, cold**: one MPHF probe per in-retention window — fingerprint screen, then fetch-and-verify on a hit. The hash is in at most one window, so at most one fetch confirms; fingerprint false positives (~1/256 per window, §6.2) are rejected by the full-hash verify. Probe ordering, parallelism, and the resulting latency/throughput are the query-routing design's concern (§8.1).
 - **Lookup, hot**: one RocksDB point get in a bloom-filtered CF, then the same ledger fetch.
 
