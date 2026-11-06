@@ -117,6 +117,7 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 	}
 	b.written = true
 	defer func() {
+		_ = b.awaitSpill() // a spill in flight writes the runs remove deletes
 		if rerr := b.runs.remove(); rerr != nil {
 			err = errors.Join(err, fmt.Errorf("events: remove index runs: %w", rerr))
 		}
