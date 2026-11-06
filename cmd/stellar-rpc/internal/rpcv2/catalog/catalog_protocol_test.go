@@ -80,7 +80,7 @@ func TestCommitIndexTerminalDemotesTxhashKeys(t *testing.T) {
 	// Terminal build covers the whole index [0,999] => hi == last chunk.
 	cov, err := cat.MarkTxHashIndexFreezing(0, 0, 999)
 	require.NoError(t, err)
-	require.True(t, cat.txhashIndex.IsTerminalCoverage(cov))
+	require.True(t, cat.TxHashIndexLayout().IsTerminalCoverage(cov))
 	require.NoError(t, cat.CommitTxHashIndex(cov))
 
 	// Every present txhash key in the index demoted to "pruning".
@@ -110,7 +110,7 @@ func TestCommitIndexNonTerminalLeavesTxhashKeys(t *testing.T) {
 	// Non-terminal: hi (5) < index's last chunk (999).
 	cov, err := cat.MarkTxHashIndexFreezing(0, 0, 5)
 	require.NoError(t, err)
-	require.False(t, cat.txhashIndex.IsTerminalCoverage(cov))
+	require.False(t, cat.TxHashIndexLayout().IsTerminalCoverage(cov))
 	require.NoError(t, cat.CommitTxHashIndex(cov))
 
 	// txhash key NOT demoted — the index is still filling.
@@ -139,7 +139,7 @@ func TestCommitIndexTerminalDemotesOnlyCoverageRange(t *testing.T) {
 	// A TERMINAL coverage starting after the index's first chunk: [5500,5999].
 	cov, err := cat.MarkTxHashIndexFreezing(5, 5500, 5999)
 	require.NoError(t, err)
-	require.True(t, cat.txhashIndex.IsTerminalCoverage(cov))
+	require.True(t, cat.TxHashIndexLayout().IsTerminalCoverage(cov))
 	require.NoError(t, cat.CommitTxHashIndex(cov))
 
 	// .bin inputs inside [Lo,Hi] are demoted...
