@@ -766,6 +766,8 @@ func TestStore_TuningRoundTrip(t *testing.T) {
 			MaxOpenFiles:      500,
 			BlockCacheMB:      4,
 			MaxTotalWalSizeMB: 16,
+			BytesPerSyncMB:    1,
+			WALBytesPerSyncMB: 2,
 		},
 		PerCFOptions: map[string]CFOptions{
 			defaultCFName: {
@@ -781,6 +783,9 @@ func TestStore_TuningRoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
+
+	assert.Equal(t, uint64(1<<20), s.opts.GetBytesPerSync())
+	assert.Equal(t, uint64(2<<20), s.opts.GetWALBytesPerSync())
 
 	require.NoError(t, s.Put(defaultCFName, []byte("k"), []byte("v")))
 	v, found, err := s.Get(defaultCFName, []byte("k"))
