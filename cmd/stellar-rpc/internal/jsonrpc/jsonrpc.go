@@ -78,31 +78,34 @@ type Params struct {
 	MaxRequestBatchSize   uint // the most calls a JSON-RPC batch may hold
 }
 
+// register registers c with daemon's registry and returns it, or returns the
+// collector already registered in its place. Each daemon builds its handler
+// once today, but a second build on the same registry (a future reload or
+// re-bind) must keep counting on the existing series, not panic on duplicate
+// registration.
+func register[C prometheus.Collector](daemon host.Daemon, c C) C {
+	err := daemon.MetricsRegistry().Register(c)
+	if err == nil {
+		return c
+	}
+	if are, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); ok {
+		if existing, ok := are.ExistingCollector.(C); ok {
+			return existing
+		}
+	}
+	panic(err)
+}
+
 // decorateHandlers wraps every method with request logging and the duration
-// summary. Each daemon builds its handler once, so creating and registering
-// the collector here happens once per registry.
+// summary.
 func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) handler.Map {
-	requestMetric := prometheus.NewSummaryVec(prometheus.SummaryOpts{
+	requestMetric := register(daemon, prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Namespace:  daemon.MetricsNamespace(),
 		Subsystem:  "json_rpc",
 		Name:       "request_duration_seconds",
 		Help:       "JSON RPC request duration",
 		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
-	}, []string{"endpoint", labelStatus})
-	// Register-or-reuse: each daemon builds its handler once today, but a
-	// second build on the same registry (a future reload or re-bind) must keep
-	// counting on the existing series, not panic on duplicate registration.
-	if rerr := daemon.MetricsRegistry().Register(requestMetric); rerr != nil {
-		are := prometheus.AlreadyRegisteredError{}
-		if !errors.As(rerr, &are) {
-			panic(rerr)
-		}
-		existing, ok := are.ExistingCollector.(*prometheus.SummaryVec)
-		if !ok {
-			panic(rerr)
-		}
-		requestMetric = existing
-	}
+	}, []string{"endpoint", labelStatus}))
 	decorated := handler.Map{}
 	for endpoint, h := range m {
 		decorated[endpoint] = handler.New(func(ctx context.Context, r *jrpc2.Request) (any, error) {
@@ -180,11 +183,11 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry, i
 	queueLimiterGaugeName := longName + "_inflight_requests"
 	queueLimiterGaugeHelp := "Number of concurrenty in-flight " + spec.MethodName + " requests"
 
-	queueLimiterGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+	queueLimiterGauge := register(daemon, prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: daemon.MetricsNamespace(), Subsystem: subsystemNetwork,
 		Name: queueLimiterGaugeName,
 		Help: queueLimiterGaugeHelp,
-	})
+	}))
 	queueLimiter := network.MakeJrpcBacklogQueueLimiter(
 		spec.Handler,
 		queueLimiterGauge,
@@ -198,16 +201,16 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry, i
 	durationLimitCounterHelp := "The metric measures the count of " + spec.MethodName +
 		" requests that surpassed the limit threshold for execution time"
 
-	requestDurationWarnCounter := prometheus.NewCounter(prometheus.CounterOpts{
+	requestDurationWarnCounter := register(daemon, prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: daemon.MetricsNamespace(), Subsystem: subsystemNetwork,
 		Name: durationWarnCounterName,
 		Help: durationWarnCounterHelp,
-	})
-	requestDurationLimitCounter := prometheus.NewCounter(prometheus.CounterOpts{
+	}))
+	requestDurationLimitCounter := register(daemon, prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: daemon.MetricsNamespace(), Subsystem: subsystemNetwork,
 		Name: durationLimitCounterName,
 		Help: durationLimitCounterHelp,
-	})
+	}))
 	// set the warning threshold to be one third of the limit.
 	requestDurationWarn := spec.RequestDurationLimit / warningThresholdDenominator
 	durationLimiter := network.MakeJrpcRequestDurationLimiter(
@@ -237,18 +240,20 @@ func NewHandler(params Params) Handler {
 		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger, inflight)
 	}
 
-	globalQueueRequestExecutionDurationWarningCounter := prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: params.Daemon.MetricsNamespace(),
-		Subsystem: subsystemNetwork,
-		Name:      "global_request_execution_duration_threshold_warning",
-		Help:      "The metric measures the count of requests that surpassed the warning threshold for execution time",
-	})
-	globalQueueRequestExecutionDurationLimitCounter := prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: params.Daemon.MetricsNamespace(),
-		Subsystem: subsystemNetwork,
-		Name:      "global_request_execution_duration_threshold_limit",
-		Help:      "The metric measures the count of requests that surpassed the limit threshold for execution time",
-	})
+	globalQueueRequestExecutionDurationWarningCounter := register(params.Daemon,
+		prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: params.Daemon.MetricsNamespace(),
+			Subsystem: subsystemNetwork,
+			Name:      "global_request_execution_duration_threshold_warning",
+			Help:      "The metric measures the count of requests that surpassed the warning threshold for execution time",
+		}))
+	globalQueueRequestExecutionDurationLimitCounter := register(params.Daemon,
+		prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: params.Daemon.MetricsNamespace(),
+			Subsystem: subsystemNetwork,
+			Name:      "global_request_execution_duration_threshold_limit",
+			Help:      "The metric measures the count of requests that surpassed the limit threshold for execution time",
+		}))
 	rpc := newBridge(decorateHandlers(params.Daemon, params.Logger, handlersMap), params.MaxRequestBatchSize,
 		durationLimits{
 			warning:  params.GlobalDurationWarning,
@@ -259,18 +264,17 @@ func NewHandler(params Params) Handler {
 		})
 
 	// globalQueueRequestBacklogLimiter is a metric for measuring the total concurrent inflight requests
-	globalQueueRequestBacklogLimiter := prometheus.NewGauge(prometheus.GaugeOpts{
+	globalQueueRequestBacklogLimiter := register(params.Daemon, prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: params.Daemon.MetricsNamespace(), Subsystem: subsystemNetwork, Name: "global_inflight_requests",
 		Help: "Number of concurrenty in-flight http requests",
-	})
+	}))
+	rpc.requests = &requestLimit{
+		limit:  uint64(params.GlobalQueueLimit),
+		gauge:  globalQueueRequestBacklogLimiter,
+		logger: params.Logger,
+	}
 
-	queueLimitedBridge := network.MakeHTTPBacklogQueueLimiter(
-		rpc,
-		globalQueueRequestBacklogLimiter,
-		uint64(params.GlobalQueueLimit),
-		params.Logger)
-
-	handler := http.MaxBytesHandler(queueLimitedBridge, maxHTTPRequestSize)
+	handler := http.MaxBytesHandler(rpc, maxHTTPRequestSize)
 
 	corsMiddleware := cors.New(cors.Options{
 		AllowedOrigins:         []string{},

@@ -15,9 +15,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/creachadair/jrpc2"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/stellar/go-stellar-sdk/support/log"
@@ -38,6 +40,7 @@ const (
 
 var (
 	errBridgeClosed = errors.New("the bridge is closed")
+	errBusy         = errors.New("too many requests are running")
 	errEmptyMethod  = &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: "empty method name"}
 	errNoSuchMethod = &jrpc2.Error{Code: jrpc2.MethodNotFound, Message: jrpc2.MethodNotFound.String()}
 )
@@ -55,6 +58,8 @@ type Bridge struct {
 	maxHandlers  int
 	maxBatchSize uint
 	limits       durationLimits
+	// requests, when set, bounds the requests whose calls run at once.
+	requests *requestLimit
 
 	mu     sync.RWMutex // read-held while a request's handlers run
 	closed bool
@@ -129,6 +134,10 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// its own write time, which write extends as it goes.
 	rc := http.NewResponseController(w)
 	_ = rc.SetWriteDeadline(time.Now().Add(responseChunkTimeout))
+	if errors.Is(err, errBusy) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
 	if b.limits.timedOut(r, time.Since(start)) {
 		if r.Context().Err() == nil {
 			w.WriteHeader(http.StatusGatewayTimeout)
@@ -154,6 +163,10 @@ func (b *Bridge) serve(ctx context.Context, r *http.Request) (bool, []*response,
 	if err != nil {
 		return false, nil, err
 	}
+	if !b.requests.acquire() {
+		return false, nil, errBusy
+	}
+	defer b.requests.release()
 	reqs, err := parseRequests(body, b.maxBatchSize)
 	if err != nil {
 		return false, nil, err
@@ -187,6 +200,45 @@ func (l durationLimits) timedOut(r *http.Request, elapsed time.Duration) bool {
 		l.logger.Infof("Request processing for %s exceed warning threshold of %v", r.URL.Path, l.warning)
 	}
 	return false
+}
+
+// requestLimit bounds the requests whose calls run at once, as network's HTTP
+// backlog limiter did, but counts a request only from when its body has been
+// read, so a client that sends its body slowly holds no slot.
+type requestLimit struct {
+	limit   uint64
+	running atomic.Uint64
+	logged  atomic.Bool // the limit was logged since a request last finished
+	gauge   prometheus.Gauge
+	logger  *log.Entry
+}
+
+// acquire counts a request, unless limit requests are running. A nil l has no
+// limit.
+func (l *requestLimit) acquire() bool {
+	if l == nil {
+		return true
+	}
+	if l.running.Add(1) > l.limit {
+		l.running.Add(^uint64(0))
+		if l.logged.CompareAndSwap(false, true) {
+			l.logger.Infof("Backlog queue limiter reached the queue limit of %d executing concurrent http requests.",
+				l.limit)
+		}
+		return false
+	}
+	l.gauge.Inc()
+	return true
+}
+
+// release stops counting a request that acquire counted.
+func (l *requestLimit) release() {
+	if l == nil {
+		return
+	}
+	l.running.Add(^uint64(0))
+	l.gauge.Dec()
+	l.logged.Store(false)
 }
 
 // recoverPanic answers 500 to a request whose serving panicked outside a

@@ -10,9 +10,9 @@ warning and limiting mechanisms. This guide aims to help operators effectively m
 
 To ensure the smooth operation of stellar-rpc, several key metrics should be monitored continuously:
 
-1. **Global Inflight Requests (Concurrent HTTP Requests)**: Monitor the number of concurrent HTTP requests being enqueued at the HTTP endpoint. This metric is tracked via the
-   `global_inflight_requests` gauge. If this number reaches the predefined limit, an HTTP 503 error is generated. This metric helps identify if the server is reaching its limit in handling
-   incoming requests.
+1. **Global Inflight Requests (Concurrent HTTP Requests)**: Monitor the number of concurrent HTTP requests the server is running, counted from when a request's body has been read
+   until its calls finish. This metric is tracked via the `global_inflight_requests` gauge. If this number reaches the predefined limit, an HTTP 503 error is generated. This metric
+   helps identify if the server is reaching its limit in handling incoming requests.
 
 2. **Method-specific Inflight Requests (Concurrent JRPC Requests)**: Track the number of concurrent JRPC requests for each method using the `<method_name>_inflight_requests` gauge. This
    allows you to limit the workload of specific methods in case the server runs out of resources.
