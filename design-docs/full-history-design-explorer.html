@@ -673,8 +673,10 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <div class="note warn">
     <b>Provisioning note:</b> old and new coverage files coexist from the start of a rebuild's write until
     the eager sweep's unlink, so the window dir transiently holds ~2× the index size (~25 GB at the end of a
-    dense full window), and the window-end rebuild writes ~12.5 GB in ~1 minute (~200 MB/s burst) — trivial
-    on instance NVMe, worth provisioning for on throughput-capped volumes like EBS gp3.
+    dense full window). Every rebuild reads all of the window's <code>.bin</code> files, so with a local NVMe
+    disk and EBS they go on an EBS volume of their own: on the local disk, losing it would mean hours of
+    regenerating them, and on the volume serving cold queries, the rebuild's reads would delay the queries'.
+    At the gp3 baseline of 125 MiB/s, reading a dense window's ~60 GB takes about 8 minutes.
   </div>
 </section>
 
