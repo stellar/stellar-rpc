@@ -145,7 +145,7 @@ So the index hashes exactly the transactions in chunks `[lo, hi]`. Chunks below 
 
 The current window's index is **rebuilt from scratch on every chunk boundary**, to fold in the chunk that just froze; it grows until the window is complete. In steady state only the current window is rebuilt; startup backfill also rebuilds a past window's non-terminal index after downtime crosses its boundary, and retention widening rebuilds a finalized one (§7.3). Outside those, a finalized window's index never changes.
 
-This is affordable because the rebuild is cheap relative to its cadence: a full-window build takes ≈1 minute, against a boundary only every ~14 hours at mainnet rates (Part 4). Rebuilding the whole index each time keeps every `.idx` on disk a complete index for its coverage, with no half-updated state.
+This is affordable because the rebuild is cheap relative to its cadence: a full-window build takes about a minute when it reads its inputs from local NVMe, and about 8 minutes from a gp3 volume at the baseline 125 MiB/s (§7.4), against a boundary only every ~14 hours at mainnet rates (Part 4). Rebuilding the whole index each time keeps every `.idx` on disk a complete index for its coverage, with no half-updated state.
 
 ### 7.2 The rebuild
 
@@ -175,7 +175,7 @@ When a window's last chunk is folded in, its index is final: it covers the windo
 
 A rebuild writes a whole new index file before the old one is removed, so a window directory briefly holds ~2× the index size (~25 GB at the end of a dense window). The window's `.bin` files are also all on disk together, since the rebuild merges them at once — about 60 GB for a dense window. Both are transient. During a multi-window catch-up (a first start, or backfill after long downtime) the executor does not serialize windows, so several windows' `.bin` sets can be on disk at once: the transient scales with the backlog, up to every window in the plan — size a full-history first start for that, not for one window.
 
-The window-end rebuild writes ~12.5 GB in ~1 minute (~200 MB/s burst) — trivial on instance NVMe, but worth provisioning for on throughput-capped volumes like EBS gp3.
+Every rebuild reads all of its window's `.bin` files, so where they live matters. In a deployment with a local NVMe disk and EBS, they go on an EBS volume of their own. On the local disk they would be lost with it, and regenerating a window's `.bin` files from the ledger packs takes hours. On the volume that serves cold queries, a rebuild reading at the volume's limit would make every query read wait behind its own reads. On a volume of their own, that volume's throughput setting is what paces the rebuild: reading a dense window's ~60 GB takes about 8 minutes at the gp3 baseline of 125 MiB/s. The window-end rebuild also writes its ~12.5 GB index to the volume that holds terminal indexes.
 
 ## 8. Query path
 

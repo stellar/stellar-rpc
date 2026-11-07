@@ -33,10 +33,14 @@
 default_data_dir = "/var/stellar/rpc-v2"
 # Per-store paths, for putting stores on different disks. Relative paths
 # resolve against the working directory, and two stores cannot share a path.
-# With a local NVMe disk and a slower durable volume, put hot and txhash_raw
-# (and [ingestion] captive_core_storage_path) on the NVMe disk and keep the
-# catalog on the durable volume. The other stores can sit on the slower
-# volume. events and events_index move independently: the indexes are small
+# With a local NVMe disk and slower durable volumes, put hot (and [ingestion]
+# captive_core_storage_path) on the NVMe disk, and keep the catalog and the
+# other stores on a durable volume. Give txhash_raw a durable volume of its
+# own: every chunk boundary rereads the window's .bin files in full, which
+# slows queries on a shared volume, and on the NVMe disk they would have to
+# be regenerated from the ledger packs after losing the disk. A first start
+# holds every window's .bin files at once, so size that volume for the full
+# history. events and events_index move independently: the indexes are small
 # and read randomly, so putting events_index on fast disk speeds up filtered
 # event queries over wide ranges.
 #catalog = ""        # {default_data_dir}/catalog/rocksdb  (catalog RocksDB)
