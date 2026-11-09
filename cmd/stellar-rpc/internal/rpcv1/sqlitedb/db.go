@@ -8,12 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"sync"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
-	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
 	"github.com/prometheus/client_golang/prometheus"
 	migrate "github.com/rubenv/sql-migrate"
 
@@ -217,12 +218,53 @@ func openIndexBuildSession(ctx context.Context, dbFilePath string) (*db.Session,
 	return session, nil
 }
 
+// sqliteMaxLength is SQLite's architectural maximum for SQLITE_MAX_LENGTH and
+// the largest frame captive core's meta pipe can deliver, so any ledger fits.
+const sqliteMaxLength = math.MaxInt32
+
+// blobLimit reads SQLITE_LIMIT_LENGTH, which a build sets at compile time and
+// sqlite3_limit can only lower.
+func blobLimit(ctx context.Context, sqlDB *sql.DB) (int, error) {
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	var limit int
+	err = conn.Raw(func(driverConn any) error {
+		c, ok := driverConn.(*sqlite3.SQLiteConn)
+		if !ok {
+			return fmt.Errorf("unexpected SQLite driver connection %T", driverConn)
+		}
+		limit = c.GetLimit(sqlite3.SQLITE_LIMIT_LENGTH)
+		return nil
+	})
+	return limit, err
+}
+
+func checkBlobLimit(limit int) error {
+	if limit < sqliteMaxLength {
+		return fmt.Errorf("SQLite blob limit is %d bytes, so large ledgers would halt ingestion; "+
+			"build with CGO_CPPFLAGS=-DSQLITE_MAX_LENGTH=%d (make does this)", limit, sqliteMaxLength)
+	}
+	return nil
+}
+
+// OpenSQLiteDBWithPrometheusMetrics opens the daemon's DB, refusing a SQLite
+// built without the raised blob limit.
 func OpenSQLiteDBWithPrometheusMetrics(dbFilePath string, namespace string, sub db.Subservice,
 	registry *prometheus.Registry,
 ) (*DB, error) {
 	session, err := openSQLiteDB(dbFilePath)
 	if err != nil {
 		return nil, err
+	}
+	limit, err := blobLimit(context.Background(), session.DB.DB)
+	if err == nil {
+		err = checkBlobLimit(limit)
+	}
+	if err != nil {
+		return nil, errors.Join(err, session.Close())
 	}
 	return newDB(db.RegisterMetrics(session, namespace, sub, registry))
 }
@@ -285,6 +327,7 @@ func getMetaValue(ctx context.Context, q db.SessionInterface, key string) (strin
 
 type ReadWriterMetrics struct {
 	TxIngestDuration, TxCount prometheus.Observer
+	OversizedLedgerMeta       prometheus.Counter
 }
 
 type readWriter struct {
@@ -322,7 +365,13 @@ func NewReadWriter(
 		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001}, //nolint:mnd
 	})
 
-	daemon.MetricsRegistry().MustRegister(txDurationMetric, txCountMetric)
+	oversizedLedgerMetaMetric := prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: daemon.MetricsNamespace(), Subsystem: "ingest",
+		Name: "oversized_ledger_meta_total",
+		Help: "count of ingested ledgers whose meta exceeded 256 MiB",
+	})
+
+	daemon.MetricsRegistry().MustRegister(txDurationMetric, txCountMetric, oversizedLedgerMetaMetric)
 
 	return &readWriter{
 		log:                    log,
@@ -330,8 +379,9 @@ func NewReadWriter(
 		historyRetentionWindow: historyRetentionWindow,
 		passphrase:             networkPassphrase,
 		metrics: ReadWriterMetrics{
-			TxIngestDuration: txDurationMetric.With(prometheus.Labels{"operation": "ingest"}),
-			TxCount:          txCountMetric,
+			TxIngestDuration:    txDurationMetric.With(prometheus.Labels{"operation": "ingest"}),
+			TxCount:             txCountMetric,
+			OversizedLedgerMeta: oversizedLedgerMetaMetric,
 		},
 	}
 }
@@ -368,7 +418,11 @@ func (rw *readWriter) NewTx(ctx context.Context) (WriteTx, error) {
 		tx:                     txSession,
 		stmtCache:              stmtCache,
 		historyRetentionWindow: rw.historyRetentionWindow,
-		ledgerWriter:           ledgerWriter{stmtCache: stmtCache},
+		ledgerWriter: ledgerWriter{
+			log:             rw.log,
+			stmtCache:       stmtCache,
+			oversizedMetric: rw.metrics.OversizedLedgerMeta,
+		},
 
 		txWriter: &transactionHandler{
 			log:        rw.log,

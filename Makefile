@@ -76,7 +76,7 @@ RPCV2 ?= false
 # go-sqlite3's bundled SQLite sets no -O of its own.
 ZSTD_HOME ?= $(HOME)/.zstd
 ROCKSDB_HOME ?= $(HOME)/.rocksdb
-override CGO_CPPFLAGS := -I$(ZSTD_HOME)/include -I$(ROCKSDB_HOME)/include $(CGO_CPPFLAGS)
+override CGO_CPPFLAGS := -I$(ZSTD_HOME)/include -I$(ROCKSDB_HOME)/include $(CGO_CPPFLAGS) -DSQLITE_MAX_LENGTH=2147483647
 override CGO_LDFLAGS := -L$(ZSTD_HOME)/lib -L$(ROCKSDB_HOME)/lib $(CGO_LDFLAGS)
 export CGO_CPPFLAGS CGO_LDFLAGS
 
