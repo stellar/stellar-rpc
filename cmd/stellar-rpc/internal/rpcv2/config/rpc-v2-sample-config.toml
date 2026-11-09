@@ -41,8 +41,9 @@ default_data_dir = "/var/stellar/rpc-v2"
 # be regenerated from the ledger packs after losing the disk. A first start
 # holds every window's .bin files at once, so size that volume for the full
 # history. events and events_index move independently: the indexes are small
-# and read randomly, so putting events_index on fast disk speeds up filtered
-# event queries over wide ranges.
+# and read randomly, so a fast disk speeds up filtered event queries over wide
+# ranges, but only use one that survives a node replacement. After losing
+# events_index, every chunk's events have to be rebuilt from the ledger packs.
 #catalog = ""        # {default_data_dir}/catalog/rocksdb  (catalog RocksDB)
 #ledgers = ""        # {default_data_dir}/ledgers          (ledger packs)
 #events = ""         # {default_data_dir}/events/data      (event packs)
