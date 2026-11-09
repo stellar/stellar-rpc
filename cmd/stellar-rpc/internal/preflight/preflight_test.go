@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/sha256"
 	_ "embed"
+	"encoding"
 	"encoding/base64"
 	"fmt"
 	"os"
 	"path"
 	"runtime"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -406,5 +408,162 @@ func TestGetPreflightExtendFootprintTTL(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, result.Error)
 		require.NotEmpty(t, result.TransactionData)
+	}
+}
+
+// readCounter counts the reads of each ledger key.
+type readCounter struct {
+	ledgerentries.LedgerEntryGetter
+
+	reads map[string]int
+}
+
+func (c *readCounter) GetLedgerEntries(
+	ctx context.Context, keys []xdr.LedgerKeyView,
+) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
+	for _, key := range keys {
+		c.reads[string(key)]++
+	}
+	return c.LedgerEntryGetter.GetLedgerEntries(ctx, keys)
+}
+
+func marshal(t *testing.T, v encoding.BinaryMarshaler) []byte {
+	t.Helper()
+	b, err := v.MarshalBinary()
+	require.NoError(t, err)
+	return b
+}
+
+// extendOp extends the TTLs of the entries in a footprint to ledger 2000.
+var extendOp = xdr.OperationBody{
+	Type:                 xdr.OperationTypeExtendFootprintTtl,
+	ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 2000},
+}
+
+// footprintOf returns the footprint of the transaction a simulation built.
+func footprintOf(t *testing.T, result Preflight) xdr.LedgerFootprint {
+	t.Helper()
+	var data xdr.SorobanTransactionData
+	require.NoError(t, data.UnmarshalBinary(result.TransactionData))
+	return data.Resources.Footprint
+}
+
+// A simulation reads each ledger entry from core once, although the host
+// reads the footprint's entries again after the invocation.
+func TestGetPreflightReadsEachLedgerEntryOnce(t *testing.T) {
+	for _, protocolVersion := range supportedProtocolVersions {
+		params := getPreflightParameters(t, protocolVersion)
+		counter := &readCounter{LedgerEntryGetter: params.LedgerEntryGetter, reads: map[string]int{}}
+		params.LedgerEntryGetter = counter
+		result, err := GetPreflight(t.Context(), params)
+		require.NoError(t, err)
+		require.Empty(t, result.Error)
+		footprint := footprintOf(t, result)
+		require.NotEmpty(t, footprint.ReadOnly)
+		for _, key := range footprint.ReadOnly {
+			require.Contains(t, counter.reads, string(marshal(t, key)))
+		}
+		for key, reads := range counter.reads {
+			require.Equal(t, 1, reads, "key %x", key)
+		}
+	}
+}
+
+// An extend or restore reads a key its footprint repeats once, and the
+// transaction it builds holds the key once.
+func TestGetPreflightReadsRepeatedFootprintKeysOnce(t *testing.T) {
+	key, err := mockLedgerEntriesWithoutTTLs[1].LedgerKey()
+	require.NoError(t, err)
+	repeated := []xdr.LedgerKey{key, key, key}
+	restore := xdr.OperationBody{Type: xdr.OperationTypeRestoreFootprint, RestoreFootprintOp: &xdr.RestoreFootprintOp{}}
+	for _, protocolVersion := range supportedProtocolVersions {
+		params := getPreflightParameters(t, protocolVersion)
+		counter := &readCounter{LedgerEntryGetter: params.LedgerEntryGetter, reads: map[string]int{}}
+		params.LedgerEntryGetter = counter
+
+		params.OpBody = marshal(t, extendOp)
+		params.Footprint = marshal(t, xdr.LedgerFootprint{ReadOnly: repeated})
+		result, err := GetPreflight(t.Context(), params)
+		require.NoError(t, err)
+		require.Empty(t, result.Error)
+		require.Equal(t, 1, counter.reads[string(marshal(t, key))])
+		require.Equal(t, []xdr.LedgerKey{key}, footprintOf(t, result).ReadOnly)
+
+		// The entry lives until ledger entryTTLValue, so it is restored after it.
+		clear(counter.reads)
+		params.OpBody = marshal(t, restore)
+		params.Footprint = marshal(t, xdr.LedgerFootprint{ReadWrite: repeated})
+		params.LedgerSeq = entryTTLValue + 1
+		result, err = GetPreflight(t.Context(), params)
+		require.NoError(t, err)
+		require.Empty(t, result.Error)
+		require.Equal(t, 1, counter.reads[string(marshal(t, key))])
+		require.Equal(t, []xdr.LedgerKey{key}, footprintOf(t, result).ReadWrite)
+	}
+}
+
+// simulateWithMaxFootprintEntries simulates params on the mock ledger with
+// its limit on a transaction's footprint entries set to n.
+func simulateWithMaxFootprintEntries(t *testing.T, params Parameters, n uint32) Preflight {
+	t.Helper()
+	entries := slices.Clone(mockLedgerEntries)
+	for i, entry := range entries {
+		setting := entry.Data.ConfigSetting
+		if setting == nil || setting.ConfigSettingId != xdr.ConfigSettingIdConfigSettingContractLedgerCostExtV0 {
+			continue
+		}
+		cost := *setting.ContractLedgerCostExt
+		cost.TxMaxFootprintEntries = xdr.Uint32(n)
+		limited := *setting
+		limited.ContractLedgerCostExt = &cost
+		entries[i].Data.ConfigSetting = &limited
+	}
+	getter, err := newInMemoryLedgerEntryGetter(entries, latestSimulateTransactionLedgerSeq)
+	require.NoError(t, err)
+	params.LedgerEntryGetter = getter
+	result, err := GetPreflight(t.Context(), params)
+	require.NoError(t, err)
+	return result
+}
+
+// A simulation may read as many ledger entries as a transaction's footprint
+// may hold, and fails when it reads one more.
+func TestGetPreflightReadsAtMostTheEntriesAFootprintMayHold(t *testing.T) {
+	tooMany := func(n uint32) string {
+		return fmt.Sprintf("the simulation read more than %d ledger entries, "+
+			"the most a transaction's footprint may hold", n)
+	}
+	instance, err := mockLedgerEntriesWithoutTTLs[1].LedgerKey()
+	require.NoError(t, err)
+	code, err := mockLedgerEntriesWithoutTTLs[2].LedgerKey()
+	require.NoError(t, err)
+	missingKey := xdr.Uint32(7)
+	missing := xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeContractData,
+		ContractData: &xdr.LedgerKeyContractData{
+			Contract:   xdr.ScAddress{Type: xdr.ScAddressTypeScAddressTypeContract, ContractId: &mockContractID},
+			Key:        xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &missingKey},
+			Durability: xdr.ContractDataDurabilityPersistent,
+		},
+	}
+	for _, protocolVersion := range supportedProtocolVersions {
+		t.Run(fmt.Sprintf("protocol %d", protocolVersion), func(t *testing.T) {
+			invoke := getPreflightParameters(t, protocolVersion)
+			result, err := GetPreflight(t.Context(), invoke)
+			require.NoError(t, err)
+			footprint := footprintOf(t, result)
+			n := uint32(len(footprint.ReadOnly) + len(footprint.ReadWrite))
+			require.Empty(t, simulateWithMaxFootprintEntries(t, invoke, n).Error)
+			require.Equal(t, tooMany(n-1), simulateWithMaxFootprintEntries(t, invoke, n-1).Error)
+
+			params := getPreflightParameters(t, protocolVersion)
+			params.OpBody = marshal(t, extendOp)
+			params.Footprint = marshal(t, xdr.LedgerFootprint{ReadOnly: []xdr.LedgerKey{instance, code}})
+			result = simulateWithMaxFootprintEntries(t, params, 2)
+			require.Empty(t, result.Error)
+			require.Len(t, footprintOf(t, result).ReadOnly, 2)
+			params.Footprint = marshal(t, xdr.LedgerFootprint{ReadOnly: []xdr.LedgerKey{instance, code, missing}})
+			require.Equal(t, tooMany(2), simulateWithMaxFootprintEntries(t, params, 2).Error)
+		})
 	}
 }

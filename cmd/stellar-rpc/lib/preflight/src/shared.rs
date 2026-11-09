@@ -13,9 +13,10 @@
 // `crate::`.
 use super::soroban_env_host::e2e_invoke::RecordingInvocationAuthMode;
 use super::soroban_env_host::xdr::{
-    AccountId, Error as XdrError, ExtendFootprintTtlOp, HostFunction, InvokeHostFunctionOp,
-    LedgerEntry, LedgerFootprint, LedgerKey, Limits, OperationBody, ReadXdr, ScErrorCode,
-    ScErrorType, SorobanTransactionData, WriteXdr,
+    AccountId, ConfigSettingEntry, ConfigSettingId, Error as XdrError, ExtendFootprintTtlOp,
+    HostFunction, InvokeHostFunctionOp, LedgerEntry, LedgerEntryData, LedgerFootprint, LedgerKey,
+    LedgerKeyConfigSetting, Limits, OperationBody, ReadXdr, ScErrorCode, ScErrorType,
+    SorobanTransactionData, WriteXdr,
 };
 use super::soroban_env_host::{LedgerInfo, DEFAULT_XDR_RW_LIMITS};
 use super::soroban_simulation::simulation::{
@@ -29,8 +30,8 @@ use super::soroban_simulation::{AutoRestoringSnapshotSource, NetworkConfig};
 // of the `shared` module import the same definitions for these.
 
 use crate::{
-    anyhow, extract_error_string, from_c_string, from_c_xdr, CLedgerInfo, CResourceConfig, Digest,
-    GoLedgerStorage, PreflightOutput, Result, Sha256, CXDR, MAX_RESULT_BYTES,
+    anyhow, bail, extract_error_string, from_c_string, from_c_xdr, CLedgerInfo, CResourceConfig,
+    Digest, GoLedgerStorage, PreflightOutput, Result, Sha256, CXDR, MAX_RESULT_BYTES,
 };
 use std::convert::TryFrom;
 use std::rc::Rc;
@@ -54,6 +55,39 @@ fn fill_ledger_info(c_ledger_info: CLedgerInfo, network_config: &NetworkConfig) 
     };
     network_config.fill_config_fields_in_ledger_info(&mut ledger_info);
     ledger_info
+}
+
+// Loads the network config, then limits the ledger entries the simulation may
+// read.
+fn load_network_config(storage: &GoLedgerStorage) -> Result<NetworkConfig> {
+    let network_config = NetworkConfig::load_from_snapshot(storage)?;
+    storage.limit_reads(load_tx_max_footprint_entries(storage)?);
+    Ok(network_config)
+}
+
+// NetworkConfig does not keep the most entries a transaction's footprint may
+// hold, so this reads its setting again, which the storage already holds.
+fn load_tx_max_footprint_entries(storage: &GoLedgerStorage) -> Result<u32> {
+    let key = LedgerKey::ConfigSetting(LedgerKeyConfigSetting {
+        config_setting_id: ConfigSettingId::ContractLedgerCostExtV0,
+    });
+    if let Some((entry, _)) = get_fallible_from_go_ledger_storage(storage, &key)? {
+        if let LedgerEntryData::ConfigSetting(ConfigSettingEntry::ContractLedgerCostExtV0(cost)) =
+            &entry.data
+        {
+            return Ok(cost.tx_max_footprint_entries);
+        }
+    }
+    bail!("the ledger has no ContractLedgerCostExtV0 setting")
+}
+
+// The keys sorted, each once, so that the footprint a simulation returns holds
+// each once.
+fn unique(keys: &[LedgerKey]) -> Vec<LedgerKey> {
+    let mut keys = keys.to_vec();
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 fn output_from_invoke_host_function(
@@ -128,7 +162,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
         AccountId::from_xdr(unsafe { from_c_xdr(source_account) }, DEFAULT_XDR_RW_LIMITS).unwrap();
 
     let go_storage = Rc::new(GoLedgerStorage::new(handle));
-    let network_config = NetworkConfig::load_from_snapshot(go_storage.as_ref())?;
+    let network_config = load_network_config(&go_storage)?;
     let ledger_info = fill_ledger_info(c_ledger_info, &network_config);
 
     let mut adjustment_config = SimulationAdjustmentConfig::default_adjustment();
@@ -206,7 +240,7 @@ pub(crate) fn preflight_footprint_ttl_op_or_maybe_panic(
     let footprint =
         LedgerFootprint::from_xdr(unsafe { from_c_xdr(footprint) }, DEFAULT_XDR_RW_LIMITS)?;
     let go_storage = Rc::new(GoLedgerStorage::new(handle));
-    let network_config = NetworkConfig::load_from_snapshot(go_storage.as_ref())?;
+    let network_config = load_network_config(&go_storage)?;
 
     let ledger_info = fill_ledger_info(c_ledger_info, &network_config);
     // TODO: It would make for a better UX if the user passed only the necessary fields for every operation.
@@ -214,10 +248,10 @@ pub(crate) fn preflight_footprint_ttl_op_or_maybe_panic(
     // field.
     match op_body {
         OperationBody::ExtendFootprintTtl(extend_op) => {
-            preflight_extend_ttl_op(&extend_op, footprint.read_only.as_slice(), &go_storage, &network_config, &ledger_info)
+            preflight_extend_ttl_op(&extend_op, &unique(&footprint.read_only), &go_storage, &network_config, &ledger_info)
         }
         OperationBody::RestoreFootprint(_) => {
-            preflight_restore_op(footprint.read_write.as_slice(), &go_storage, &network_config, &ledger_info)
+            preflight_restore_op(&unique(&footprint.read_write), &go_storage, &network_config, &ledger_info)
         }
         _ => Err(anyhow!("encountered unsupported operation type: '{:?}', instead of 'ExtendFootprintTtl' or 'RestoreFootprint' operations.",
             op_body.discriminant()))
@@ -331,35 +365,23 @@ pub(crate) fn get_fallible_from_go_ledger_storage(
     Option<super::soroban_env_host::storage::EntryWithLiveUntil>,
     super::soroban_env_host::HostError,
 > {
-    let mut key_xdr = match key.to_xdr(DEFAULT_XDR_RW_LIMITS) {
-        Ok(res) => res,
-        Err(e) => {
-            // Store the internal error in the storage as the info won't
-            // be propagated from simulation.
-            if let Ok(mut err) = storage.internal_error.try_borrow_mut() {
-                *err = Some(e.into());
-            }
-            // Errors that occur in storage are not recoverable, so we
-            // force host to halt by passing it an internal error.
-            return Err((ScErrorType::Storage, ScErrorCode::InternalError).into());
+    // Errors that occur in storage are not recoverable, so we force host to
+    // halt by passing it an internal error, and store the cause in the storage
+    // as the info won't be propagated from simulation.
+    let fail = |e: anyhow::Error| -> super::soroban_env_host::HostError {
+        if let Ok(mut err) = storage.internal_error.try_borrow_mut() {
+            *err = Some(e);
         }
+        (ScErrorType::Storage, ScErrorCode::InternalError).into()
     };
-
-    let Some((xdr, live_until_ledger_seq)) = storage.get_xdr_internal(&mut key_xdr) else {
+    let key_xdr = key
+        .to_xdr(DEFAULT_XDR_RW_LIMITS)
+        .map_err(|e| fail(e.into()))?;
+    let Some((xdr, live_until_ledger_seq)) = storage.get_xdr_internal(key_xdr).map_err(fail)?
+    else {
         return Ok(None);
     };
-
-    let entry = match LedgerEntry::from_xdr(xdr, DEFAULT_XDR_RW_LIMITS) {
-        Ok(res) => res,
-        Err(e) => {
-            // Same error handling as above
-            if let Ok(mut err) = storage.internal_error.try_borrow_mut() {
-                *err = Some(e.into());
-            }
-            return Err((ScErrorType::Storage, ScErrorCode::InternalError).into());
-        }
-    };
-
+    let entry = LedgerEntry::from_xdr(xdr, DEFAULT_XDR_RW_LIMITS).map_err(|e| fail(e.into()))?;
     Ok(Some((Rc::new(entry), live_until_ledger_seq)))
 }
 

@@ -80,7 +80,8 @@ mod prev {
     }
 }
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::panic;
 use std::ptr::{null_mut, slice_from_raw_parts_mut};
 
@@ -467,9 +468,27 @@ extern "C" {
     fn SnapshotSourceGet(handle: libc::uintptr_t, ledger_key: CXDR) -> CLedgerEntryAndTTL;
 }
 
+/// Ledger entries a simulation reads past the network config that are not in
+/// its transaction's footprint: none, on either host. Every key the host
+/// reads, during or after an invocation, is one it records in the footprint,
+/// and the simulation re-reads only written ones. TTLs come back with their
+/// entries, the source account is read only when the footprint holds it, and
+/// extend, restore and their auto-restore read only the keys they are given.
+const READS_OUTSIDE_FOOTPRINT: u32 = 0;
+
+/// A ledger entry's XDR and live-until ledger, or `None` when the ledger has no
+/// such entry.
+type EntryXdr = Option<(Vec<u8>, Option<u32>)>;
+
 struct GoLedgerStorage {
     golang_handle: libc::uintptr_t,
     internal_error: RefCell<Option<anyhow::Error>>,
+    // The entries the simulation has read, missing ones included, by key XDR,
+    // so that Go reads each entry once.
+    entries: RefCell<HashMap<Vec<u8>, EntryXdr>>,
+    // Once `limit_reads` sets it: how many entries had been read then, and the
+    // most the simulation may read after.
+    max_reads: Cell<Option<(usize, usize)>>,
 }
 
 impl GoLedgerStorage {
@@ -477,27 +496,52 @@ impl GoLedgerStorage {
         Self {
             golang_handle,
             internal_error: RefCell::new(None),
+            entries: RefCell::default(),
+            max_reads: Cell::new(None),
         }
     }
 
-    // Get the entry XDR and TTL
-    fn get_xdr_internal(&self, key_xdr: &mut Vec<u8>) -> Option<(Vec<u8>, Option<u32>)> {
+    /// From now on, fails a read of a new entry once the simulation has read
+    /// as many as a transaction's footprint may hold.
+    fn limit_reads(&self, tx_max_footprint_entries: u32) {
+        let max = tx_max_footprint_entries.saturating_add(READS_OUTSIDE_FOOTPRINT);
+        self.max_reads.set(Some((
+            self.entries.borrow().len(),
+            usize::try_from(max).unwrap_or(usize::MAX),
+        )));
+    }
+
+    // Gets the entry XDR and TTL, from Go only the first time the simulation
+    // reads the entry. Once `limit_reads` has run, it fails a new entry past
+    // the limit.
+    fn get_xdr_internal(&self, mut key_xdr: Vec<u8>) -> Result<EntryXdr> {
+        let mut entries = self.entries.borrow_mut();
+        if let Some(entry) = entries.get(&key_xdr) {
+            return Ok(entry.clone());
+        }
+        if let Some((before, max)) = self.max_reads.get() {
+            if entries.len() - before >= max {
+                bail!("the simulation read more than {max} ledger entries, the most a transaction's footprint may hold");
+            }
+        }
         let key_c_xdr = CXDR {
             xdr: key_xdr.as_mut_ptr(),
             len: key_xdr.len(),
         };
         let res = unsafe { SnapshotSourceGet(self.golang_handle, key_c_xdr) };
-        if res.entry.xdr.is_null() {
-            return None;
-        }
-        let v = unsafe { from_c_xdr(res.entry) };
-        unsafe { FreeGoLedgerEntryAndTTL(res) };
-        if res.ttl < 0 {
-            Some((v, None))
+        let entry = if res.entry.xdr.is_null() {
+            None
         } else {
-            let ttl = u32::try_from(res.ttl).ok()?;
-            Some((v, Some(ttl)))
-        }
+            let v = unsafe { from_c_xdr(res.entry) };
+            unsafe { FreeGoLedgerEntryAndTTL(res) };
+            if res.ttl < 0 {
+                Some((v, None))
+            } else {
+                u32::try_from(res.ttl).ok().map(|ttl| (v, Some(ttl)))
+            }
+        };
+        entries.insert(key_xdr, entry.clone());
+        Ok(entry)
     }
 }
 
