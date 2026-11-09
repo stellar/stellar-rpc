@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/network"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/toid"
@@ -324,6 +325,15 @@ func TestGetTransactions_NoResults(t *testing.T) {
 func createTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 	sequence -= 100
 	meta := txMeta(sequence, true)
+	// The second transaction differs from the first only in its fee, so it has its own hash.
+	envelope := txEnvelope(sequence)
+	envelope.V1.Tx.Fee++
+	hash, err := network.HashTransactionInEnvelope(envelope, NetworkPassphrase)
+	if err != nil {
+		panic(err)
+	}
+	component := (*meta.V2.TxSet.V1TxSet.Phases[0].V0Components)[0].TxsMaybeDiscountedFee
+	component.Txs = append(component.Txs, envelope)
 	meta.V2.TxProcessing = append(meta.V2.TxProcessing, xdr.TransactionResultMetaV1{
 		TxApplyProcessing: xdr.TransactionMeta{
 			V:          3,
@@ -334,7 +344,7 @@ func createTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 			V3: &xdr.TransactionMetaV3{},
 		},
 		Result: xdr.TransactionResultPair{
-			TransactionHash: txHash(sequence),
+			TransactionHash: hash,
 			Result:          transactionResult(false),
 		},
 	})

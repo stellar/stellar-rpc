@@ -32,8 +32,11 @@ on:
         required: false
         type: string
     secrets:
-      INTERNAL_GO_MODULES_APP_PRIVATE_KEY:
-        description: 'Private key of the GitHub App that can read stellar/go-stellar-sdk-internal, passed only by the internal repo. Other callers leave it out.'
+      INTERNAL_GO_MODULES_GH_APP_CLIENT_ID:
+        description: 'Client ID of the GitHub App that can read stellar/go-stellar-sdk-internal, passed only by the internal repo. Other callers leave it out.'
+        required: false
+      INTERNAL_GO_MODULES_GH_APP_PRIVATE_KEY:
+        description: 'Private key of that app, passed the same way.'
         required: false
 
 jobs:
@@ -66,8 +69,8 @@ jobs:
 
       - uses: ./.github/actions/setup-go
         with:
-          internal-go-modules-app-id: ${{ vars.INTERNAL_GO_MODULES_APP_ID }}
-          internal-go-modules-private-key: ${{ secrets.INTERNAL_GO_MODULES_APP_PRIVATE_KEY }}
+          internal-go-modules-client-id: ${{ secrets.INTERNAL_GO_MODULES_GH_APP_CLIENT_ID }}
+          internal-go-modules-private-key: ${{ secrets.INTERNAL_GO_MODULES_GH_APP_PRIVATE_KEY }}
 
       # --- Build stellar-core from source when core_git_ref is provided ---
       - name: Build Stellar Core from source
