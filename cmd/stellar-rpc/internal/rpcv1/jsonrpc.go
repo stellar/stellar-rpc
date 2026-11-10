@@ -54,6 +54,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			DefaultLedgersLimit:      cfg.DefaultLedgersLimit,
 			MaxTransactionsLimit:     cfg.MaxTransactionsLimit,
 			DefaultTransactionsLimit: cfg.DefaultTransactionsLimit,
+			MaxResponseBytes:         cfg.MaxResponseBytes,
 		})
 	specs = jsonrpc.LimitsByMethod{
 		protocol.GetHealthMethodName: {

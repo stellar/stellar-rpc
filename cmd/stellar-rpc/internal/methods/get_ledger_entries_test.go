@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"math"
 	"slices"
 	"testing"
 
@@ -72,7 +73,7 @@ func TestGetLedgerEntriesKeys(t *testing.T) {
 			keys = append(keys, base64.StdEncoding.EncodeToString(keyXDR))
 		}
 	}
-	handler := newGetLedgerEntriesHandlerFromGetter(quietLogger(), getter)
+	handler := newGetLedgerEntriesHandlerFromGetter(quietLogger(), getter, math.MaxInt)
 	getLedgerEntries := func(keys ...string) ([]string, error) {
 		resp, err := handler(t.Context(), jsonRPCRequest(t, protocol.GetLedgerEntriesMethodName,
 			protocol.GetLedgerEntriesRequest{Keys: keys}))
@@ -101,6 +102,21 @@ func TestGetLedgerEntriesKeys(t *testing.T) {
 	truncated := keys[0][:len(keys[0])-4]
 	_, err = getLedgerEntries(keys[0], truncated)
 	require.EqualError(t, err, "[-32602] cannot unmarshal key value "+truncated+" at index 1")
+
+	// A response over the limit fails, so the client can split its keys.
+	for _, format := range []string{protocol.FormatBase64, protocol.FormatJSON} {
+		request := jsonRPCRequest(t, protocol.GetLedgerEntriesMethodName,
+			protocol.GetLedgerEntriesRequest{Keys: keys[:2], Format: format})
+		resp, err := handler(t.Context(), request)
+		require.NoError(t, err)
+		response, ok := resp.(protocol.GetLedgerEntriesResponse)
+		require.True(t, ok)
+		size := entryResultBytes(response.Entries[0]) + entryResultBytes(response.Entries[1])
+		_, err = newGetLedgerEntriesHandlerFromGetter(quietLogger(), getter, size)(t.Context(), request)
+		require.NoError(t, err)
+		_, err = newGetLedgerEntriesHandlerFromGetter(quietLogger(), getter, size-1)(t.Context(), request)
+		require.ErrorContains(t, err, "[-32602] entries exceed maximum response size")
+	}
 }
 
 func TestGetLedgerEntriesRejectsHugeDeclaredCountsCheaply(t *testing.T) {
@@ -112,7 +128,7 @@ func TestGetLedgerEntriesRejectsHugeDeclaredCountsCheaply(t *testing.T) {
 		contract, nestedScMaps())
 	request := jsonRPCRequest(t, protocol.GetLedgerEntriesMethodName,
 		protocol.GetLedgerEntriesRequest{Keys: []string{base64.StdEncoding.EncodeToString(key)}})
-	handler := newGetLedgerEntriesHandlerFromGetter(quietLogger(), mapLedgerEntryGetter{})
+	handler := newGetLedgerEntriesHandlerFromGetter(quietLogger(), mapLedgerEntryGetter{}, math.MaxInt)
 
 	requireCheapRejection(t, func() {
 		_, err := handler(t.Context(), request)

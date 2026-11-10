@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/creachadair/jrpc2"
@@ -28,12 +29,16 @@ func NewGetLedgerEntriesHandler(
 	logger *log.Entry,
 	coreClient host.FastCoreClient,
 	latestLedgerReader store.LedgerReader,
+	maxResponseBytes uint,
 ) jrpc2.Handler {
 	getter := ledgerentries.NewLedgerEntryGetter(coreClient, latestLedgerReader)
-	return newGetLedgerEntriesHandlerFromGetter(logger, getter)
+	return newGetLedgerEntriesHandlerFromGetter(logger, getter,
+		int(min(maxResponseBytes, math.MaxInt))) //nolint:gosec // min clamps it
 }
 
-func newGetLedgerEntriesHandlerFromGetter(logger *log.Entry, getter ledgerentries.LedgerEntryGetter) jrpc2.Handler {
+func newGetLedgerEntriesHandlerFromGetter(
+	logger *log.Entry, getter ledgerentries.LedgerEntryGetter, maxResponseBytes int,
+) jrpc2.Handler {
 	return NewHandler(func(ctx context.Context, request protocol.GetLedgerEntriesRequest,
 	) (protocol.GetLedgerEntriesResponse, error) {
 		if err := protocol.IsValidFormat(request.Format); err != nil {
@@ -89,12 +94,21 @@ func newGetLedgerEntriesHandlerFromGetter(logger *log.Entry, getter ledgerentrie
 		}
 
 		ledgerEntryResults := make([]protocol.LedgerEntryResult, 0, len(ledgerKeys))
+		responseBytes := 0
 		for _, ledgerKeyAndEntry := range ledgerKeysAndEntries {
 			result, err := ledgerKeyEntryToResult(ledgerKeyAndEntry, request.Format)
 			if err != nil {
 				return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
 					Code:    jrpc2.InternalError,
 					Message: err.Error(),
+				}
+			}
+			responseBytes += entryResultBytes(result)
+			if responseBytes > maxResponseBytes {
+				return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
+					Code: jrpc2.InvalidParams,
+					Message: fmt.Sprintf("entries exceed maximum response size (%d bytes); request fewer keys",
+						maxResponseBytes),
 				}
 			}
 			ledgerEntryResults = append(ledgerEntryResults, result)
@@ -192,4 +206,10 @@ func ledgerKeyEntryToResult(keyEntry ledgerentries.LedgerKeyAndEntry,
 
 	result.LiveUntilLedgerSeq = keyEntry.LiveUntilLedgerSeq
 	return result, nil
+}
+
+// entryResultBytes is the size of r's XDR or JSON in the response.
+func entryResultBytes(r protocol.LedgerEntryResult) int {
+	return len(r.KeyXDR) + len(r.DataXDR) + len(r.ExtensionXDR) +
+		xdr2json.EscapedLen(r.KeyJSON) + xdr2json.EscapedLen(r.DataJSON) + xdr2json.EscapedLen(r.ExtensionJSON)
 }

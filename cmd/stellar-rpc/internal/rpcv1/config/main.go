@@ -59,6 +59,7 @@ type Config struct {
 	RequestBacklogGlobalQueueLimit                 uint
 	MaxRequestBatchSize                            uint
 	MaxJSONConversionBytes                         uint
+	MaxResponseBytes                               uint
 	RequestBacklogGetHealthQueueLimit              uint
 	RequestBacklogGetEventsQueueLimit              uint
 	RequestBacklogGetNetworkQueueLimit             uint

@@ -110,6 +110,7 @@ func buildHandlerSpecs(cfg config.Config, p handlerParams) []jsonrpc.HandlerSpec
 			DefaultLedgersLimit:      deref(m.GetLedgers.DefaultItemsPerResponse),
 			MaxTransactionsLimit:     deref(m.GetTransactions.MaxItemsPerResponse),
 			DefaultTransactionsLimit: deref(m.GetTransactions.DefaultItemsPerResponse),
+			MaxResponseBytes:         deref(cfg.Service.MaxResponseBytes),
 		})
 	specs = append(specs, jsonrpc.HandlerSpec{
 		MethodName: protocol.QueryEventsMethodName,

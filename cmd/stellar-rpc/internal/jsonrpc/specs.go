@@ -51,6 +51,9 @@ type HandlerDeps struct {
 	DefaultLedgersLimit      uint
 	MaxTransactionsLimit     uint
 	DefaultTransactionsLimit uint
+
+	// MaxResponseBytes caps the XDR or JSON in one getLedgerEntries response.
+	MaxResponseBytes uint
 }
 
 // MethodLimits is one method's serving limits: the request backlog cap and the
@@ -126,7 +129,8 @@ func BuildHandlerSpecs(deps HandlerDeps) []HandlerSpec {
 			methods.NewGetLedgersHandler(deps.LedgerReader, deps.MaxLedgersLimit, deps.DefaultLedgersLimit,
 				deps.DataStoreLedgerReader, deps.Logger)),
 		spec(protocol.GetLedgerEntriesMethodName,
-			methods.NewGetLedgerEntriesHandler(deps.Logger, deps.Daemon.FastCoreClient(), deps.LedgerReader)),
+			methods.NewGetLedgerEntriesHandler(deps.Logger, deps.Daemon.FastCoreClient(), deps.LedgerReader,
+				deps.MaxResponseBytes)),
 		spec(protocol.GetTransactionMethodName,
 			methods.NewGetTransactionHandler(deps.Logger, deps.TransactionReader, deps.LedgerReader)),
 		spec(protocol.GetTransactionsMethodName,

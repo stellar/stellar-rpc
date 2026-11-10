@@ -212,6 +212,7 @@ func TestParseConfig_ServiceDefaults(t *testing.T) {
 	assert.Equal(t, DefaultRequestExecutionWarningThreshold, *cfg.Service.RequestExecutionWarningThreshold)
 	assert.Equal(t, DefaultMaxRequestBatchSize, *cfg.Service.MaxRequestBatchSize)
 	assert.Equal(t, DefaultMaxJSONConversionBytes, *cfg.Service.MaxJSONConversionBytes)
+	assert.Equal(t, DefaultMaxResponseBytes, *cfg.Service.MaxResponseBytes)
 	assert.Equal(t, DefaultClassicFeeWindowLedgers, *cfg.Service.FeeStats.ClassicFeeWindowLedgers)
 	assert.Equal(t, DefaultSorobanInclusionFeeWindowLedgers, *cfg.Service.FeeStats.SorobanInclusionFeeWindowLedgers)
 

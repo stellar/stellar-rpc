@@ -75,6 +75,9 @@ type ServiceConfig struct {
 	// MaxJSONConversionBytes is the most JSON one XDR value may convert to in
 	// an xdrFormat "json" response. A larger value fails the request.
 	MaxJSONConversionBytes *uint `toml:"max_json_conversion_bytes"`
+	// MaxResponseBytes is the most XDR or JSON one getLedgerEntries response
+	// may carry. A larger response fails the request.
+	MaxResponseBytes *uint `toml:"max_response_bytes"`
 
 	FeeStats  FeeStatsConfig  `toml:"fee_stats"`
 	Preflight PreflightConfig `toml:"preflight"`
@@ -437,6 +440,8 @@ const (
 	// DefaultMaxJSONConversionBytes is twice v1's 128 MiB, as the archive
 	// node's minimum RAM is twice v1's.
 	DefaultMaxJSONConversionBytes uint = 256 * 1024 * 1024
+	// DefaultMaxResponseBytes is twice v1's 128 MiB, like DefaultMaxJSONConversionBytes.
+	DefaultMaxResponseBytes uint = 256 * 1024 * 1024
 
 	// DefaultMethodQueueLimit and the three below it are the compiled
 	// per-method defaults — the last tier of the methods cascade.
@@ -611,6 +616,7 @@ func (cfg Config) WithDefaults() Config {
 	fillDuration(&svc.RequestExecutionWarningThreshold, DefaultRequestExecutionWarningThreshold)
 	fillUint(&svc.MaxRequestBatchSize, DefaultMaxRequestBatchSize)
 	fillUint(&svc.MaxJSONConversionBytes, DefaultMaxJSONConversionBytes)
+	fillUint(&svc.MaxResponseBytes, DefaultMaxResponseBytes)
 	fillUint32(&svc.FeeStats.ClassicFeeWindowLedgers, DefaultClassicFeeWindowLedgers)
 	fillUint32(&svc.FeeStats.SorobanInclusionFeeWindowLedgers, DefaultSorobanInclusionFeeWindowLedgers)
 	fillUint(&svc.Preflight.WorkerCount, NumCPU())

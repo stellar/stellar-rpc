@@ -113,7 +113,7 @@ func (b *Budget) convert(xdrTypeName string, field []byte) (json.RawMessage, err
 	if err != nil {
 		return js, err
 	}
-	n := escapedLen(js)
+	n := EscapedLen(js)
 	if n > b.remaining {
 		return nil, errors.Errorf("JSON output exceeds the %d bytes left in its budget once escaped", b.remaining)
 	}
@@ -121,9 +121,9 @@ func (b *Budget) convert(xdrTypeName string, field []byte) (json.RawMessage, err
 	return js, nil
 }
 
-// escapedLen is the length of js in the response, where encoding/json escapes
+// EscapedLen is the length of js in the response, where encoding/json escapes
 // <, > and & as \u00XX and U+2028 and U+2029 as \u202X.
-func escapedLen(js []byte) int {
+func EscapedLen(js []byte) int {
 	n := len(js)
 	for _, c := range []string{"<", ">", "&"} {
 		n += 5 * bytes.Count(js, []byte(c))
