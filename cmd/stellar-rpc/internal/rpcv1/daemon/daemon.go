@@ -112,12 +112,14 @@ func (d *Daemon) close() {
 		closeErrors = append(closeErrors, err)
 	}
 	d.ingestService.Wait()
+	// Closing the pool first kills the simulations still running, so the
+	// handler does not wait out their deadlines.
+	d.preflightWorkerPool.Close()
 	d.jsonRPCHandler.Close()
 	if err := d.db.Close(); err != nil {
 		d.logger.WithError(err).Error("Error closing db")
 		closeErrors = append(closeErrors, err)
 	}
-	d.preflightWorkerPool.Close()
 
 	if d.dataStore != nil {
 		err := d.dataStore.Close()
@@ -330,9 +332,13 @@ func createStellarCoreClient(cfg *config.Config) stellarcore.Client {
 
 func createHighperfStellarCoreClient(cfg *config.Config) host.FastCoreClient {
 	return &stellarcore.Client{
-		URL:  fmt.Sprintf("http://localhost:%d", cfg.CaptiveCoreHTTPQueryPort),
+		URL:  captiveCoreQueryURL(cfg),
 		HTTP: &http.Client{Timeout: cfg.CoreRequestTimeout},
 	}
+}
+
+func captiveCoreQueryURL(cfg *config.Config) string {
+	return fmt.Sprintf("http://localhost:%d", cfg.CaptiveCoreHTTPQueryPort)
 }
 
 func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon,
@@ -381,12 +387,14 @@ func createIngestService(cfg *config.Config, logger *supportlog.Entry, daemon *D
 func createPreflightWorkerPool(cfg *config.Config, logger *supportlog.Entry, daemon *Daemon) *preflight.WorkerPool {
 	return preflight.NewPreflightWorkerPool(
 		preflight.WorkerPoolConfig{
-			Daemon:            daemon,
-			WorkerCount:       cfg.PreflightWorkerCount,
-			JobQueueCapacity:  cfg.PreflightWorkerQueueSize,
-			EnableDebug:       cfg.PreflightEnableDebug,
-			NetworkPassphrase: cfg.NetworkPassphrase,
-			Logger:            logger,
+			Daemon:             daemon,
+			WorkerCount:        cfg.PreflightWorkerCount,
+			JobQueueCapacity:   cfg.PreflightWorkerQueueSize,
+			EnableDebug:        cfg.PreflightEnableDebug,
+			NetworkPassphrase:  cfg.NetworkPassphrase,
+			Logger:             logger,
+			CoreURL:            captiveCoreQueryURL(cfg),
+			CoreRequestTimeout: cfg.CoreRequestTimeout,
 		},
 	)
 }

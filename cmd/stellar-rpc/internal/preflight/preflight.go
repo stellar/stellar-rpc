@@ -61,8 +61,8 @@ func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.ledger_entry_an
 	}
 	if err != nil {
 		h.err = err
-		// a canceled request is not a fault
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		// a read that timed out is not a fault
+		if !errors.Is(err, context.DeadlineExceeded) {
 			h.logger.WithError(err).Error("SnapshotSourceGet(): GetLedgerEntries() failed")
 		}
 		return C.ledger_entry_and_ttl_t{}

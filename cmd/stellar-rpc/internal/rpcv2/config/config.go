@@ -84,12 +84,12 @@ type ServiceConfig struct {
 	Methods   MethodsConfig   `toml:"methods"`
 }
 
-// PreflightConfig is [service.preflight] — the worker pool that runs
-// simulateTransaction's preflights. It sits under [service] rather than under the
+// PreflightConfig is [service.preflight] — the pool of worker processes that
+// runs simulateTransaction's preflights. It sits under [service] rather than under the
 // simulateTransaction method table because the pool is sized once at startup,
 // not per request (the same reason [service.fee_stats] lives where it does).
 type PreflightConfig struct {
-	// WorkerCount is how many goroutines run preflights concurrently; >= 1.
+	// WorkerCount is how many worker processes run preflights concurrently; >= 1.
 	// Default NumCPU.
 	WorkerCount *uint `toml:"worker_count"`
 	// WorkerQueueSize is how many preflight requests may wait for a free worker

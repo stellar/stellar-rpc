@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -15,37 +14,37 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 )
 
-const (
-	dbMetricsDurationConversionValue = 1000.0
+var (
+	ErrPreflightQueueFull = errors.New("preflight queue full")
+	// ErrSimulationFailed is returned when the worker process running a
+	// simulation exceeded its memory or time limit, or stopped.
+	ErrSimulationFailed = errors.New("simulation exceeded its resource limits or failed")
+	errPoolClosed       = errors.New("preflight worker pool is closed")
 )
 
-type workerResult struct {
-	response Response
-	err      error
-}
-
-type workerRequest struct {
-	ctx        context.Context //nolint:containedctx
-	params     Parameters
-	format     string
-	resultChan chan<- workerResult
-}
-
+// WorkerPool runs each simulation in one of WorkerCount worker processes. A
+// call takes an idle worker and runs its simulation on it.
 type WorkerPool struct {
-	networkPassphrase          string
-	enableDebug                bool
-	coreClient                 host.FastCoreClient
 	logger                     *log.Entry
-	isClosed                   atomic.Bool
-	requestChan                chan workerRequest
+	ctx                        context.Context //nolint:containedctx // ends at Close
+	cancel                     context.CancelFunc
+	idle                       chan *workerProcess
+	queue                      chan struct{} // a slot for each call waiting for a worker
 	concurrentRequestsMetric   prometheus.Gauge
 	errorFullCounter           prometheus.Counter
 	durationMetric             *prometheus.SummaryVec
 	ledgerEntriesFetchedMetric prometheus.Summary
-	wg                         sync.WaitGroup
+	workerExitsMetric          *prometheus.CounterVec
+
+	// Close cancels ctx under mu, and addWorker starts nothing once ctx is
+	// canceled, so wg cannot grow from zero while Close waits on it.
+	mu sync.Mutex
+	wg sync.WaitGroup
+
+	workerConfig workerConfig
+	limits       poolLimits
 }
 
 type WorkerPoolConfig struct {
@@ -55,15 +54,46 @@ type WorkerPoolConfig struct {
 	EnableDebug       bool
 	NetworkPassphrase string
 	Logger            *log.Entry
+	// CoreURL is captive core's query server, where the workers read ledger
+	// entries.
+	CoreURL            string
+	CoreRequestTimeout time.Duration
+}
+
+// poolLimits are fixed in production. Tests change them.
+type poolLimits struct {
+	maxResponseBytes int
+	minRestartDelay  time.Duration
+	maxRestartDelay  time.Duration
+}
+
+func defaultPoolLimits() poolLimits {
+	return poolLimits{
+		maxResponseBytes: maxResponseBytes,
+		minRestartDelay:  100 * time.Millisecond,
+		maxRestartDelay:  10 * time.Second,
+	}
 }
 
 func NewPreflightWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
+	return newWorkerPool(cfg, defaultPoolLimits())
+}
+
+func newWorkerPool(cfg WorkerPoolConfig, limits poolLimits) *WorkerPool {
+	ctx, cancel := context.WithCancel(context.Background())
 	preflightWP := WorkerPool{
-		networkPassphrase: cfg.NetworkPassphrase,
-		enableDebug:       cfg.EnableDebug,
-		coreClient:        cfg.Daemon.FastCoreClient(),
-		logger:            cfg.Logger,
-		requestChan:       make(chan workerRequest, cfg.JobQueueCapacity),
+		logger: cfg.Logger,
+		ctx:    ctx,
+		cancel: cancel,
+		idle:   make(chan *workerProcess, cfg.WorkerCount),
+		queue:  make(chan struct{}, cfg.JobQueueCapacity),
+		workerConfig: workerConfig{
+			NetworkPassphrase:  cfg.NetworkPassphrase,
+			EnableDebug:        cfg.EnableDebug,
+			CoreURL:            cfg.CoreURL,
+			CoreRequestTimeout: cfg.CoreRequestTimeout,
+		},
+		limits: limits,
 	}
 	requestQueueMetric := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Namespace: cfg.Daemon.MetricsNamespace(),
@@ -71,7 +101,7 @@ func NewPreflightWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 		Name:      "queue_length",
 		Help:      "number of preflight requests in the queue",
 	}, func() float64 {
-		return float64(len(preflightWP.requestChan))
+		return float64(len(preflightWP.queue))
 	})
 	preflightWP.concurrentRequestsMetric = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: cfg.Daemon.MetricsNamespace(),
@@ -99,73 +129,118 @@ func NewPreflightWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 		Help:       "ledger entries fetched by simulate transaction calls",
 		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001}, //nolint:mnd
 	})
+	preflightWP.workerExitsMetric = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: cfg.Daemon.MetricsNamespace(),
+		Subsystem: "preflight_pool",
+		Name:      "worker_exits_total",
+		Help:      "number of preflight worker processes that exited, by cause",
+	}, []string{"cause"})
 	cfg.Daemon.MetricsRegistry().MustRegister(
 		requestQueueMetric,
 		preflightWP.concurrentRequestsMetric,
 		preflightWP.errorFullCounter,
 		preflightWP.durationMetric,
 		preflightWP.ledgerEntriesFetchedMetric,
+		preflightWP.workerExitsMetric,
 	)
-	for range cfg.WorkerCount {
-		preflightWP.wg.Add(1)
-		go preflightWP.work()
+	for slot := range cfg.WorkerCount {
+		preflightWP.addWorker(slot)
 	}
 	return &preflightWP
 }
 
-func (pwp *WorkerPool) work() {
-	defer pwp.wg.Done()
-	for request := range pwp.requestChan {
-		pwp.concurrentRequestsMetric.Inc()
-		startTime := time.Now()
-		preflight, err := GetPreflight(request.ctx, request.params)
-		status := "ok"
-		if err != nil {
-			status = "error"
-		}
-		pwp.durationMetric.With(
-			prometheus.Labels{"type": "all", "status": status},
-		).Observe(time.Since(startTime).Seconds())
-		pwp.concurrentRequestsMetric.Dec()
-		var formatted protocol.SimulateTransactionResponse
-		if err == nil {
-			formatted, err = formatResponse(preflight, request.format, request.params.LedgerSeq)
-		}
-		var response Response
-		if err == nil {
-			response, err = EncodeResponse(formatted)
-		}
-		request.resultChan <- workerResult{response, err}
-	}
-}
-
-func (pwp *WorkerPool) Close() {
-	if !pwp.isClosed.CompareAndSwap(false, true) {
-		// it was already closed
+// addWorker starts a worker for slot in the background, unless the pool has
+// closed, and makes it idle once it is ready. A worker that fails to start
+// is started again after a delay that doubles from minRestartDelay up to
+// maxRestartDelay.
+func (pwp *WorkerPool) addWorker(slot uint) {
+	pwp.mu.Lock()
+	defer pwp.mu.Unlock()
+	if pwp.ctx.Err() != nil {
 		return
 	}
-	close(pwp.requestChan)
+	pwp.wg.Go(func() {
+		for delay := pwp.limits.minRestartDelay; ; delay = min(2*delay, pwp.limits.maxRestartDelay) {
+			w, err := pwp.startWorker(slot)
+			switch {
+			case err == nil:
+				pwp.idle <- w
+				return
+			case pwp.ctx.Err() != nil:
+				return
+			}
+			pwp.logger.WithError(err).WithFields(log.F{"preflight_worker": slot, "retry_in": delay}).
+				Error("could not start a preflight worker")
+			select {
+			case <-pwp.ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+		}
+	})
+}
+
+// takeWorker takes an idle worker, waiting for one until ctx ends or the
+// pool closes. A worker that exited while idle is replaced, and the call
+// takes another.
+func (pwp *WorkerPool) takeWorker(ctx context.Context) (*workerProcess, error) {
+	for {
+		w, err := pwp.nextIdle(ctx)
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case <-w.exited:
+			pwp.replace(w, w.exitCause(nil))
+		default:
+			return w, nil
+		}
+	}
+}
+
+// nextIdle takes an idle worker. When there is none, the call waits in the
+// queue, unless the queue is full.
+func (pwp *WorkerPool) nextIdle(ctx context.Context) (*workerProcess, error) {
+	select {
+	case w := <-pwp.idle:
+		return w, nil
+	default:
+	}
+	select {
+	case pwp.queue <- struct{}{}:
+	default:
+		pwp.errorFullCounter.Inc()
+		return nil, ErrPreflightQueueFull
+	}
+	defer func() { <-pwp.queue }()
+	select {
+	case w := <-pwp.idle:
+		return w, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-pwp.ctx.Done():
+		return nil, errPoolClosed
+	}
+}
+
+// replace counts and logs the exit of w, unless the pool closed and killed
+// it, and starts another worker in its slot.
+func (pwp *WorkerPool) replace(w *workerProcess, cause string) {
+	if pwp.ctx.Err() == nil {
+		pwp.workerExitsMetric.WithLabelValues(cause).Inc()
+		w.logger.WithFields(log.F{"cause": cause, "status": w.cmd.ProcessState.String()}).
+			Warn("preflight worker exited; starting another")
+	}
+	pwp.addWorker(w.slot)
+}
+
+// Close stops the workers. Callers still waiting for a simulation get an
+// error.
+func (pwp *WorkerPool) Close() {
+	pwp.mu.Lock()
+	pwp.cancel()
+	pwp.mu.Unlock()
 	pwp.wg.Wait()
-}
-
-var ErrPreflightQueueFull = errors.New("preflight queue full")
-
-type metricsLedgerEntryGetterWrapper struct {
-	ledgerentries.LedgerEntryGetter
-
-	totalDurationMs      uint64
-	ledgerEntriesFetched uint32
-}
-
-func (m *metricsLedgerEntryGetterWrapper) GetLedgerEntries(ctx context.Context,
-	keys []xdr.LedgerKeyView,
-) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
-	startTime := time.Now()
-	entries, seq, err := m.LedgerEntryGetter.GetLedgerEntries(ctx, keys)
-	//nolint:gosec // elapsed milliseconds are non-negative and bounded in this metric path
-	atomic.AddUint64(&m.totalDurationMs, uint64(time.Since(startTime).Milliseconds()))
-	atomic.AddUint32(&m.ledgerEntriesFetched, uint32(len(keys))) //nolint:gosec // len() is never negative
-	return entries, seq, err
 }
 
 type GetterParameters struct {
@@ -182,48 +257,48 @@ type GetterParameters struct {
 	Format          string
 }
 
+// GetPreflight runs a simulation in a worker.
 func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters) (Response, error) {
-	if pwp.isClosed.Load() {
-		return Response{}, errors.New("preflight worker pool is closed")
+	// A call whose context has ended does not run: takeWorker's select could
+	// still pick an idle worker.
+	if err := ctx.Err(); err != nil {
+		return Response{}, err
 	}
-	wrappedGetter := &metricsLedgerEntryGetterWrapper{
-		LedgerEntryGetter: ledgerentries.NewLedgerEntryAtGetter(pwp.coreClient, params.LedgerSeq),
+	w, err := pwp.takeWorker(ctx)
+	if err != nil {
+		return Response{}, err
 	}
-	preflightParams := Parameters{
-		Logger:            pwp.logger,
-		SourceAccount:     params.SourceAccount,
-		OpBody:            params.OperationBody,
-		NetworkPassphrase: pwp.networkPassphrase,
-		LedgerEntryGetter: wrappedGetter,
-		LedgerSeq:         params.LedgerSeq,
-		LedgerTime:        params.LedgerTime,
-		BucketListSize:    params.BucketListSize,
-		Footprint:         params.Footprint,
-		ResourceConfig:    params.ResourceConfig,
-		EnableDebug:       pwp.enableDebug,
-		AuthMode:          params.AuthMode,
-		UseUpgradedAuth:   params.UseUpgradedAuth,
-		ProtocolVersion:   params.ProtocolVersion,
+	// A worker can become idle just as ctx ends.
+	if err := ctx.Err(); err != nil {
+		pwp.idle <- w
+		return Response{}, err
 	}
-	resultC := make(chan workerResult)
-	select {
-	case pwp.requestChan <- workerRequest{ctx, preflightParams, params.Format, resultC}:
-		result := <-resultC
-		if wrappedGetter.ledgerEntriesFetched > 0 {
-			status := "ok"
-			if result.err != nil {
-				status = "error"
-			}
-			pwp.durationMetric.With(
-				prometheus.Labels{"type": "db", "status": status},
-			).Observe(float64(wrappedGetter.totalDurationMs) / dbMetricsDurationConversionValue)
-		}
-		pwp.ledgerEntriesFetchedMetric.Observe(float64(wrappedGetter.ledgerEntriesFetched))
-		return result.response, result.err
-	case <-ctx.Done():
-		return Response{}, ctx.Err()
-	default:
-		pwp.errorFullCounter.Inc()
-		return Response{}, ErrPreflightQueueFull
+	pwp.concurrentRequestsMetric.Inc()
+	defer pwp.concurrentRequestsMetric.Dec()
+	startTime := time.Now()
+	response, err := w.simulate(ctx, params, pwp.limits.maxResponseBytes)
+	if err != nil {
+		w.stop()
+		pwp.replace(w, w.exitCause(err))
+		pwp.durationMetric.With(
+			prometheus.Labels{"type": "all", "status": "error"},
+		).Observe(time.Since(startTime).Seconds())
+		return Response{}, ErrSimulationFailed
 	}
+	pwp.idle <- w
+	status := "ok"
+	if response.Error != "" {
+		err = errors.New(response.Error)
+		status = "error"
+	}
+	pwp.durationMetric.With(
+		prometheus.Labels{"type": "all", "status": status},
+	).Observe(time.Since(startTime).Seconds())
+	if response.LedgerEntriesFetched > 0 {
+		pwp.durationMetric.With(
+			prometheus.Labels{"type": "db", "status": status},
+		).Observe(response.LedgerEntriesTime.Seconds())
+	}
+	pwp.ledgerEntriesFetchedMetric.Observe(float64(response.LedgerEntriesFetched))
+	return Response{body: response.Body, failed: response.Failed}, err
 }

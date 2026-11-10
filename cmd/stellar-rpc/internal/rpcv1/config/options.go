@@ -401,7 +401,7 @@ func (cfg *Config) options() Options {
 		},
 		{
 			Name:         "preflight-worker-count",
-			Usage:        "Number of workers (read goroutines) used to compute preflights for the simulateTransaction endpoint. Defaults to the number of CPUs.",
+			Usage:        "Number of worker processes used to compute preflights for the simulateTransaction endpoint. Defaults to the number of CPUs.",
 			ConfigKey:    &cfg.PreflightWorkerCount,
 			DefaultValue: defaultUintCPU,
 			Validate:     positive,

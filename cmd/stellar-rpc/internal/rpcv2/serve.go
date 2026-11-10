@@ -42,6 +42,11 @@ func newServeReads(
 		// Shutdown it is a no-op.
 		defer func() { _ = server.Close() }()
 		defer handler.Close()
+		// Closing the pool first kills the simulations still running after
+		// the drain, so handler.Close does not wait out their deadlines.
+		if pool, ok := params.preflightGetter.(interface{ Close() }); ok {
+			defer pool.Close()
+		}
 		died := make(chan error, 1)
 		go func() { died <- server.Serve(listener) }()
 		select {
