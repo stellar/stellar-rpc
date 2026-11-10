@@ -139,8 +139,7 @@ func BuildHandlerSpecs(deps HandlerDeps) []HandlerSpec {
 		spec(protocol.SendTransactionMethodName,
 			methods.NewSendTransactionHandler(deps.Daemon, deps.Logger, deps.LedgerReader, deps.NetworkPassphrase)),
 		spec(protocol.SimulateTransactionMethodName,
-			methods.NewSimulateTransactionHandler(deps.Logger, deps.LedgerReader, deps.Daemon.FastCoreClient(),
-				deps.PreflightGetter)),
+			methods.NewSimulateTransactionHandler(deps.Logger, deps.LedgerReader, deps.PreflightGetter)),
 		spec(protocol.GetFeeStatsMethodName,
 			methods.NewGetFeeStatsHandler(deps.FeeStats, deps.LedgerReader, deps.Logger)),
 	}

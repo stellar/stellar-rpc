@@ -93,6 +93,18 @@ func (b *Budget) ConvertBytes(xdr any, field []byte) (json.RawMessage, error) {
 	return b.convert(reflect.TypeOf(xdr).Name(), field)
 }
 
+// ConvertSlice converts each of values as ConvertBytes does.
+func (b *Budget) ConvertSlice(xdr any, values [][]byte) ([]json.RawMessage, error) {
+	result := make([]json.RawMessage, len(values))
+	for i, value := range values {
+		var err error
+		if result[i], err = b.ConvertBytes(xdr, value); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
 // ConvertInterface is like the package-level ConvertInterface, but fails
 // instead of exceeding the budget.
 func (b *Budget) ConvertInterface(xdr encoding.BinaryMarshaler) (json.RawMessage, error) {

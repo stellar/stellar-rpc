@@ -23,19 +23,21 @@ const (
 )
 
 type workerResult struct {
-	preflight Preflight
-	err       error
+	response Response
+	err      error
 }
 
 type workerRequest struct {
 	ctx        context.Context //nolint:containedctx
 	params     Parameters
+	format     string
 	resultChan chan<- workerResult
 }
 
 type WorkerPool struct {
 	networkPassphrase          string
 	enableDebug                bool
+	coreClient                 host.FastCoreClient
 	logger                     *log.Entry
 	isClosed                   atomic.Bool
 	requestChan                chan workerRequest
@@ -59,6 +61,7 @@ func NewPreflightWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
 	preflightWP := WorkerPool{
 		networkPassphrase: cfg.NetworkPassphrase,
 		enableDebug:       cfg.EnableDebug,
+		coreClient:        cfg.Daemon.FastCoreClient(),
 		logger:            cfg.Logger,
 		requestChan:       make(chan workerRequest, cfg.JobQueueCapacity),
 	}
@@ -124,7 +127,15 @@ func (pwp *WorkerPool) work() {
 			prometheus.Labels{"type": "all", "status": status},
 		).Observe(time.Since(startTime).Seconds())
 		pwp.concurrentRequestsMetric.Dec()
-		request.resultChan <- workerResult{preflight, err}
+		var formatted protocol.SimulateTransactionResponse
+		if err == nil {
+			formatted, err = formatResponse(preflight, request.format, request.params.LedgerSeq)
+		}
+		var response Response
+		if err == nil {
+			response, err = EncodeResponse(formatted)
+		}
+		request.resultChan <- workerResult{response, err}
 	}
 }
 
@@ -158,25 +169,25 @@ func (m *metricsLedgerEntryGetterWrapper) GetLedgerEntries(ctx context.Context,
 }
 
 type GetterParameters struct {
-	BucketListSize    uint64
-	SourceAccount     xdr.AccountIdView
-	OperationBody     xdr.OperationBodyView
-	Footprint         xdr.LedgerFootprintView
-	ResourceConfig    protocol.ResourceConfig
-	AuthMode          string
-	UseUpgradedAuth   bool
-	ProtocolVersion   uint32
-	LedgerEntryGetter ledgerentries.LedgerEntryGetter
-	LedgerSeq         uint32
-	LedgerTime        uint64
+	BucketListSize  uint64
+	SourceAccount   xdr.AccountIdView
+	OperationBody   xdr.OperationBodyView
+	Footprint       xdr.LedgerFootprintView
+	ResourceConfig  protocol.ResourceConfig
+	AuthMode        string
+	UseUpgradedAuth bool
+	ProtocolVersion uint32
+	LedgerSeq       uint32
+	LedgerTime      uint64
+	Format          string
 }
 
-func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters) (Preflight, error) {
+func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters) (Response, error) {
 	if pwp.isClosed.Load() {
-		return Preflight{}, errors.New("preflight worker pool is closed")
+		return Response{}, errors.New("preflight worker pool is closed")
 	}
 	wrappedGetter := &metricsLedgerEntryGetterWrapper{
-		LedgerEntryGetter: params.LedgerEntryGetter,
+		LedgerEntryGetter: ledgerentries.NewLedgerEntryAtGetter(pwp.coreClient, params.LedgerSeq),
 	}
 	preflightParams := Parameters{
 		Logger:            pwp.logger,
@@ -196,7 +207,7 @@ func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters
 	}
 	resultC := make(chan workerResult)
 	select {
-	case pwp.requestChan <- workerRequest{ctx, preflightParams, resultC}:
+	case pwp.requestChan <- workerRequest{ctx, preflightParams, params.Format, resultC}:
 		result := <-resultC
 		if wrappedGetter.ledgerEntriesFetched > 0 {
 			status := "ok"
@@ -208,11 +219,11 @@ func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters
 			).Observe(float64(wrappedGetter.totalDurationMs) / dbMetricsDurationConversionValue)
 		}
 		pwp.ledgerEntriesFetchedMetric.Observe(float64(wrappedGetter.ledgerEntriesFetched))
-		return result.preflight, result.err
+		return result.response, result.err
 	case <-ctx.Done():
-		return Preflight{}, ctx.Err()
+		return Response{}, ctx.Err()
 	default:
 		pwp.errorFullCounter.Inc()
-		return Preflight{}, ErrPreflightQueueFull
+		return Response{}, ErrPreflightQueueFull
 	}
 }

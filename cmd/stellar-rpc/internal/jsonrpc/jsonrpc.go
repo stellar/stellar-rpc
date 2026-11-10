@@ -8,6 +8,7 @@ package jsonrpc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -96,6 +97,13 @@ func register[C prometheus.Collector](daemon host.Daemon, c C) C {
 	panic(err)
 }
 
+// encodedResult is a result its handler encoded as JSON already, and which
+// may report a failure in its body, as simulateTransaction's does.
+type encodedResult interface {
+	JSON() json.RawMessage
+	Failed() bool
+}
+
 // decorateHandlers wraps every method with request logging and the duration
 // summary.
 func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) handler.Map {
@@ -115,8 +123,11 @@ func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) hand
 			result, err := h(ctx, r)
 			duration := time.Since(startTime)
 			label := prometheus.Labels{"endpoint": r.Method(), "status": "ok"}
-			simulateTransactionResponse, ok := result.(protocol.SimulateTransactionResponse)
-			simulateFailed := ok && simulateTransactionResponse.Error != ""
+			simulateFailed := false
+			if encoded, ok := result.(encodedResult); ok {
+				simulateFailed = encoded.Failed()
+				result = encoded.JSON() // the bridge writes it as is
+			}
 			if simulateFailed {
 				label[labelStatus] = "error"
 			} else if err != nil {
