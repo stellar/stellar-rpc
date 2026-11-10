@@ -84,6 +84,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::panic;
 use std::ptr::{null_mut, slice_from_raw_parts_mut};
+use std::sync::OnceLock;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -311,6 +312,59 @@ pub extern "C" fn preflight_footprint_ttl_op(
             bail!(unsupported_protocol_message(proto))
         }
     })
+}
+
+/// Without a limit of its own, a preflight worker limits the heap of each
+/// simulation to this many times the network's per-transaction memory limit.
+const MEMORY_LIMIT_FACTOR: u64 = 8;
+
+/// The heap limit a preflight worker asked for, or zero when each simulation
+/// sets `MEMORY_LIMIT_FACTOR` times the network's per-transaction memory
+/// limit. It is unset outside a worker, where nothing sets a limit.
+static WORKER_MEMORY_LIMIT: OnceLock<u64> = OnceLock::new();
+
+/// Starts counting the heap the Rust libraries hold in this process, and
+/// limits it: to `bytes` from now on, or when `bytes` is zero, to 8 times the
+/// per-transaction memory limit of the ledger each simulation reads. An
+/// allocation past the limit ends the process with `exit_code`, so only a
+/// preflight worker calls this, before it allocates anything.
+#[no_mangle]
+pub extern "C" fn preflight_limit_memory(bytes: u64, exit_code: libc::c_int) {
+    ffi::memory::start_counting(exit_code);
+    if bytes > 0 {
+        ffi::memory::set_limit(usize::try_from(bytes).unwrap_or(usize::MAX));
+    }
+    let _ = WORKER_MEMORY_LIMIT.set(bytes);
+}
+
+/// The heap limit in force, or zero when there is none.
+#[no_mangle]
+pub extern "C" fn preflight_memory_limit() -> u64 {
+    ffi::memory::limit().map_or(0, |limit| limit as u64)
+}
+
+/// Restarts the measurement `preflight_memory_peak` returns.
+#[no_mangle]
+pub extern "C" fn preflight_reset_memory_peak() {
+    ffi::memory::reset_peak();
+}
+
+/// The most heap the Rust libraries held in this process since the last
+/// `preflight_reset_memory_peak`.
+#[no_mangle]
+pub extern "C" fn preflight_memory_peak() -> u64 {
+    ffi::memory::peak() as u64
+}
+
+/// In a preflight worker without a limit of its own, sets the heap limit of a
+/// simulation from the per-transaction memory limit of the ledger it reads.
+/// The limit holds until the next simulation sets it, so it also covers the
+/// conversion of the result.
+fn limit_memory(tx_memory_limit: u32) {
+    if WORKER_MEMORY_LIMIT.get() == Some(&0) {
+        let limit = MEMORY_LIMIT_FACTOR * u64::from(tx_memory_limit);
+        ffi::memory::set_limit(usize::try_from(limit).unwrap_or(usize::MAX));
+    }
 }
 
 /// A zero-cost wrapper that asserts the contained value is safe to send across

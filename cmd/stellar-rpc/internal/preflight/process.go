@@ -20,6 +20,7 @@ import (
 const (
 	exitCrash           = "crash"
 	exitDeadline        = "deadline"
+	exitMemoryLimit     = "memory_limit"
 	exitInvalidResponse = "invalid_response"
 )
 
@@ -58,6 +59,11 @@ func (pwp *WorkerPool) startWorker(slot uint) (*workerProcess, error) {
 	}
 	cmd := exec.CommandContext(pwp.ctx, executable, workerArg)
 	cmd.Args[0] = os.Args[0]
+	// A worker runs one simulation at a time. GOMEMLIMIT is a soft target for
+	// the garbage collector, not a limit, so it fails nothing. With one malloc
+	// arena, the C library reuses and trims the memory the simulation library
+	// frees instead of keeping it for each thread.
+	cmd.Env = append(os.Environ(), "GOMAXPROCS=1", "GOMEMLIMIT=64MiB", "MALLOC_ARENA_MAX=1")
 	output, outputW, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -157,6 +163,8 @@ func (w *workerProcess) exitCause(err error) string {
 	switch {
 	case errors.Is(err, errDeadline):
 		return exitDeadline
+	case w.cmd.ProcessState.ExitCode() == memoryLimitExitCode:
+		return exitMemoryLimit
 	case errors.Is(err, errFrameTooLarge), errors.Is(err, errInvalidFrame):
 		return exitInvalidResponse
 	default:

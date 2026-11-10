@@ -11,6 +11,7 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/limits"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
@@ -102,6 +103,15 @@ func TestValidateConfig_AcceptsNumericFirstStart(t *testing.T) {
 func TestValidateConfig_AcceptsMinWorkersAndZeroRetries(t *testing.T) {
 	cat, _ := testCatalog(t)
 	_, err := callValidate(t, validCfg(1, 0, "genesis"), cat, downTip())
+	require.NoError(t, err)
+}
+
+func TestValidateConfig_AcceptsTheMinimumSimulationMemoryLimit(t *testing.T) {
+	cat, _ := testCatalog(t)
+	cfg := validCfg(4, 3, "genesis")
+	minimum := uint(limits.MinSimulationMemoryLimit)
+	cfg.Service.Preflight.SimulationMemoryLimit = &minimum
+	_, err := callValidate(t, cfg, cat, downTip())
 	require.NoError(t, err)
 }
 
@@ -259,6 +269,13 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"zero preflight worker_queue_size",
 			func(c *config.Config) { c.Service.Preflight.WorkerQueueSize = uintPtr(0) },
 			"[service.preflight].worker_queue_size",
+		},
+		{
+			"preflight simulation_memory_limit below the minimum",
+			func(c *config.Config) {
+				c.Service.Preflight.SimulationMemoryLimit = uintPtr(limits.MinSimulationMemoryLimit - 1)
+			},
+			"[service.preflight].simulation_memory_limit must be 0 or at least 16000000 bytes",
 		},
 	}
 	for _, tc := range tests {

@@ -60,6 +60,7 @@ type workerConfig struct {
 	EnableDebug        bool
 	CoreURL            string
 	CoreRequestTimeout time.Duration
+	MemoryLimit        uint64
 }
 
 // workerReady is the first frame a worker writes.
@@ -90,6 +91,11 @@ type simulationResponse struct {
 	Error                string
 	LedgerEntriesFetched uint32
 	LedgerEntriesTime    time.Duration
+	// MemoryLimit is the heap limit in force when the simulation finished, 0
+	// when there was none yet. PeakMemory is the most heap the simulation
+	// library held during the simulation and the conversion of its result.
+	MemoryLimit uint64
+	PeakMemory  uint64
 }
 
 func runWorker(in io.Reader, out io.Writer, logger *log.Entry) int {
@@ -102,6 +108,7 @@ func runWorker(in io.Reader, out io.Writer, logger *log.Entry) int {
 		URL:  cfg.CoreURL,
 		HTTP: &http.Client{Timeout: cfg.CoreRequestTimeout},
 	}
+	limitMemory(cfg.MemoryLimit)
 	if err := writeFrame(out, workerReady{}); err != nil {
 		return 1
 	}
@@ -131,6 +138,7 @@ func simulate(
 		ctx, cancel = context.WithTimeout(ctx, request.Timeout-replyMargin)
 		defer cancel()
 	}
+	resetMemoryPeak()
 	preflight, err := GetPreflight(ctx, Parameters{
 		Logger:            logger,
 		SourceAccount:     request.SourceAccount,
@@ -160,6 +168,8 @@ func simulate(
 		Failed:               encoded.Failed(),
 		LedgerEntriesFetched: entries.fetched,
 		LedgerEntriesTime:    entries.duration,
+		MemoryLimit:          memoryLimit(),
+		PeakMemory:           memoryPeak(),
 	}
 	if err != nil {
 		response.Error = err.Error()

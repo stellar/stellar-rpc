@@ -24,10 +24,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 )
 
-var (
-	mockContractID   = xdr.ContractId{0xa, 0xb, 0xc}
-	mockContractHash = xdr.Hash{0xd, 0xe, 0xf}
-)
+var mockContractID = xdr.ContractId{0xa, 0xb, 0xc}
 
 const (
 	latestSimulateTransactionLedgerSeq = 2
@@ -58,43 +55,8 @@ var mockLedgerEntriesWithoutTTLs = func() []xdr.LedgerEntry {
 				},
 			},
 		},
-		{
-			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq - 1,
-			Data: xdr.LedgerEntryData{
-				Type: xdr.LedgerEntryTypeContractData,
-				ContractData: &xdr.ContractDataEntry{
-					Contract: xdr.ScAddress{
-						Type:       xdr.ScAddressTypeScAddressTypeContract,
-						ContractId: &mockContractID,
-					},
-					Key: xdr.ScVal{
-						Type: xdr.ScValTypeScvLedgerKeyContractInstance,
-					},
-					Durability: xdr.ContractDataDurabilityPersistent,
-					Val: xdr.ScVal{
-						Type: xdr.ScValTypeScvContractInstance,
-						Instance: &xdr.ScContractInstance{
-							Executable: xdr.ContractExecutable{
-								Type:     xdr.ContractExecutableTypeContractExecutableWasm,
-								WasmHash: &mockContractHash,
-							},
-							Storage: nil,
-						},
-					},
-				},
-			},
-		},
-		{
-			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
-			Data: xdr.LedgerEntryData{
-				Type: xdr.LedgerEntryTypeContractCode,
-				ContractCode: &xdr.ContractCodeEntry{
-					Hash: mockContractHash,
-					Code: helloWorldContract,
-				},
-			},
-		},
 	}
+	entries = append(entries, contractEntries(mockContractID, helloWorldContract)...)
 
 	for _, configEntry := range config.UpdatedEntry {
 		entry := xdr.LedgerEntry{
@@ -151,6 +113,40 @@ var helloWorldContract = func() []byte {
 	}
 	return ret
 }()
+
+// contractEntries are the ledger entries of the contract id, which runs code.
+func contractEntries(id xdr.ContractId, code []byte) []xdr.LedgerEntry {
+	hash := xdr.Hash(sha256.Sum256(code))
+	return []xdr.LedgerEntry{
+		{
+			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
+			Data: xdr.LedgerEntryData{
+				Type: xdr.LedgerEntryTypeContractData,
+				ContractData: &xdr.ContractDataEntry{
+					Contract:   xdr.ScAddress{Type: xdr.ScAddressTypeScAddressTypeContract, ContractId: &id},
+					Key:        xdr.ScVal{Type: xdr.ScValTypeScvLedgerKeyContractInstance},
+					Durability: xdr.ContractDataDurabilityPersistent,
+					Val: xdr.ScVal{
+						Type: xdr.ScValTypeScvContractInstance,
+						Instance: &xdr.ScContractInstance{
+							Executable: xdr.ContractExecutable{
+								Type:     xdr.ContractExecutableTypeContractExecutableWasm,
+								WasmHash: &hash,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			LastModifiedLedgerSeq: latestSimulateTransactionLedgerSeq,
+			Data: xdr.LedgerEntryData{
+				Type:         xdr.LedgerEntryTypeContractCode,
+				ContractCode: &xdr.ContractCodeEntry{Hash: hash, Code: code},
+			},
+		},
+	}
+}
 
 type inMemoryLedgerEntryGetter struct {
 	entries              map[string]xdr.LedgerEntry
@@ -351,7 +347,7 @@ func TestGetPreflightUnsupportedProtocol(t *testing.T) {
 			require.NoError(t, err)
 			footprint, err := xdr.LedgerFootprint{ReadOnly: []xdr.LedgerKey{{
 				Type:         xdr.LedgerEntryTypeContractCode,
-				ContractCode: &xdr.LedgerKeyContractCode{Hash: mockContractHash},
+				ContractCode: &xdr.LedgerKeyContractCode{Hash: xdr.Hash(sha256.Sum256(helloWorldContract))},
 			}}}.MarshalBinary()
 			require.NoError(t, err)
 			params.OpBody = opBody
@@ -390,7 +386,9 @@ func TestGetPreflightUseUpgradedAuthOnPrevProtocol(t *testing.T) {
 	require.Empty(t, result.Error)
 }
 
-func TestGetPreflightExtendFootprintTTL(t *testing.T) {
+// extendTTLOpBody returns the XDR of an operation extending the TTL of the
+// mock contract's instance, and of its footprint.
+func extendTTLOpBody(t testing.TB) (xdr.OperationBodyView, xdr.LedgerFootprintView) {
 	key, err := mockLedgerEntriesWithoutTTLs[1].LedgerKey()
 	require.NoError(t, err)
 	footprint, err := xdr.LedgerFootprint{ReadOnly: []xdr.LedgerKey{key}}.MarshalBinary()
@@ -400,7 +398,11 @@ func TestGetPreflightExtendFootprintTTL(t *testing.T) {
 		ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 2000},
 	}.MarshalBinary()
 	require.NoError(t, err)
+	return opBody, footprint
+}
 
+func TestGetPreflightExtendFootprintTTL(t *testing.T) {
+	opBody, footprint := extendTTLOpBody(t)
 	for _, protocolVersion := range supportedProtocolVersions {
 		params := getPreflightParameters(t, protocolVersion)
 		params.OpBody = opBody

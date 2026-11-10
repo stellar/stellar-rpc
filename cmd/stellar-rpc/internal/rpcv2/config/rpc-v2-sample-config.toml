@@ -177,6 +177,11 @@ soroban_inclusion_fee_window_ledgers = 50
 # Diagnostic events in simulateTransaction responses. The default is true, but
 # they are expensive to produce, so this sample turns them off.
 enable_debug = false
+# Most heap memory, in bytes, the simulation library may hold in a worker
+# process. 0 means 8 times the network's per-transaction memory limit, and any
+# other value must be at least 16000000. Plan for about this limit + 128 MiB
+# per worker.
+#simulation_memory_limit = 0
 
 # -----------------------------------------------------------------------------
 # [backfill]: downloading history into local storage

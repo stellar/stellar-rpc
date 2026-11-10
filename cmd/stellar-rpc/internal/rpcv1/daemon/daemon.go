@@ -395,6 +395,7 @@ func createPreflightWorkerPool(cfg *config.Config, logger *supportlog.Entry, dae
 			Logger:             logger,
 			CoreURL:            captiveCoreQueryURL(cfg),
 			CoreRequestTimeout: cfg.CoreRequestTimeout,
+			MemoryLimit:        cfg.PreflightSimulationMemoryLimit,
 		},
 	)
 }

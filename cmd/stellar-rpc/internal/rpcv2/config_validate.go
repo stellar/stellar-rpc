@@ -321,7 +321,8 @@ func validatePreflight(p config.PreflightConfig) error {
 	if *p.WorkerQueueSize < 1 {
 		return errors.New("[service.preflight].worker_queue_size must be >= 1")
 	}
-	return nil
+	return limits.ValidateSimulationMemoryLimit(
+		"[service.preflight].simulation_memory_limit", uint64(*p.SimulationMemoryLimit))
 }
 
 func validatePaginatedMethods(m config.MethodsConfig) error {

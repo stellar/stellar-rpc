@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,11 +47,15 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// newCoreServer answers /getledgerentry from mockLedgerEntries, the way
-// captive core's query server does. onRequest, when set, runs first and can
-// delay a request or answer it instead.
-func newCoreServer(t *testing.T, onRequest func(w http.ResponseWriter) bool) *httptest.Server {
-	getter, err := newInMemoryLedgerEntryGetter(mockLedgerEntries, latestSimulateTransactionLedgerSeq)
+// newCoreServer answers /getledgerentry from mockLedgerEntries and entries,
+// the way captive core's query server does. An entry in entries replaces the
+// mock entry with the same key. onRequest, when set, runs first and can delay
+// a request or answer it instead.
+func newCoreServer(
+	t *testing.T, onRequest func(w http.ResponseWriter) bool, entries ...xdr.LedgerEntry,
+) *httptest.Server {
+	getter, err := newInMemoryLedgerEntryGetter(
+		append(slices.Clone(mockLedgerEntries), entries...), latestSimulateTransactionLedgerSeq)
 	require.NoError(t, err)
 	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Core reads the form whatever the content type, and the client sends none.
@@ -109,13 +114,15 @@ func holdFirstSimulationRead() (func(http.ResponseWriter) bool, <-chan struct{},
 		}
 }
 
-func newTestPool(t *testing.T, core *httptest.Server, limits poolLimits) (*WorkerPool, *test.Hook) {
+func newTestPool(
+	t *testing.T, core *httptest.Server, limits poolLimits, configure ...func(*WorkerPoolConfig),
+) (*WorkerPool, *test.Hook) {
 	logger := log.New()
 	logger.SetLevel(logrus.DebugLevel)
 	logger.SetOutput(io.Discard)
 	logs := &test.Hook{}
 	logger.AddHook(logs)
-	pool := newWorkerPool(WorkerPoolConfig{
+	cfg := WorkerPoolConfig{
 		Daemon:             host.MakeNoOpDaemon(),
 		WorkerCount:        1,
 		JobQueueCapacity:   1,
@@ -124,7 +131,11 @@ func newTestPool(t *testing.T, core *httptest.Server, limits poolLimits) (*Worke
 		Logger:             logger,
 		CoreURL:            core.URL,
 		CoreRequestTimeout: 10 * time.Second,
-	}, limits)
+	}
+	for _, f := range configure {
+		f(&cfg)
+	}
+	pool := newWorkerPool(cfg, limits)
 	t.Cleanup(pool.Close)
 	return pool, logs
 }
@@ -206,7 +217,7 @@ func workerPID(t *testing.T, logs *test.Hook, skip int) int {
 }
 
 func TestPoolSimulatesInWorker(t *testing.T) {
-	pool, _ := newTestPool(t, newCoreServer(t, nil), defaultPoolLimits())
+	pool, logs := newTestPool(t, newCoreServer(t, nil), defaultPoolLimits())
 
 	requireSimulates(t, pool)
 	encoded, err := pool.GetPreflight(t.Context(), testSimulation(t, protocol.FormatBase64))
@@ -216,6 +227,22 @@ func TestPoolSimulatesInWorker(t *testing.T) {
 	require.NotNil(t, response.Results[0].ReturnValueXDR)
 	require.NotEmpty(t, response.TransactionDataXDR)
 	require.NotEmpty(t, response.EventsXDR)
+
+	// The workers' memory limit is 8 times the txMemoryLimit in
+	// testnet-config.xdr. The pool logs it once, when it first learns it.
+	const limit = 8 * 41943040
+	require.EqualValues(t, limit, pool.memoryLimit.Load())
+	require.EqualValues(t, 2, samples(t, pool.peakMemoryMetric))
+	var logged []logrus.Fields
+	for _, entry := range logs.AllEntries() {
+		if entry.Message == "set the preflight workers' memory limit" {
+			logged = append(logged, entry.Data)
+		}
+	}
+	require.Len(t, logged, 1)
+	require.Equal(t, uint(1), logged[0]["workers"])
+	require.Equal(t, uint64(limit), logged[0]["simulation_memory_limit_bytes"])
+	require.Equal(t, uint64(limit), logged[0]["all_workers_simulation_memory_limit_bytes"])
 }
 
 func TestPoolReportsSimulationErrors(t *testing.T) {

@@ -30,8 +30,9 @@ use super::soroban_simulation::{AutoRestoringSnapshotSource, NetworkConfig};
 // of the `shared` module import the same definitions for these.
 
 use crate::{
-    anyhow, bail, extract_error_string, from_c_string, from_c_xdr, CLedgerInfo, CResourceConfig,
-    Digest, GoLedgerStorage, PreflightOutput, Result, Sha256, CXDR, MAX_RESULT_BYTES,
+    anyhow, bail, extract_error_string, from_c_string, from_c_xdr, limit_memory, CLedgerInfo,
+    CResourceConfig, Digest, GoLedgerStorage, PreflightOutput, Result, Sha256, CXDR,
+    MAX_RESULT_BYTES,
 };
 use std::convert::TryFrom;
 use std::rc::Rc;
@@ -163,6 +164,7 @@ pub(crate) fn preflight_invoke_hf_op_or_maybe_panic(
 
     let go_storage = Rc::new(GoLedgerStorage::new(handle));
     let network_config = load_network_config(&go_storage)?;
+    limit_memory(network_config.tx_memory_limit);
     let ledger_info = fill_ledger_info(c_ledger_info, &network_config);
 
     let mut adjustment_config = SimulationAdjustmentConfig::default_adjustment();
@@ -241,6 +243,7 @@ pub(crate) fn preflight_footprint_ttl_op_or_maybe_panic(
         LedgerFootprint::from_xdr(unsafe { from_c_xdr(footprint) }, DEFAULT_XDR_RW_LIMITS)?;
     let go_storage = Rc::new(GoLedgerStorage::new(handle));
     let network_config = load_network_config(&go_storage)?;
+    limit_memory(network_config.tx_memory_limit);
 
     let ledger_info = fill_ledger_info(c_ledger_info, &network_config);
     // TODO: It would make for a better UX if the user passed only the necessary fields for every operation.

@@ -51,6 +51,7 @@ type Config struct {
 	Network                                        string
 	PreflightWorkerCount                           uint
 	PreflightWorkerQueueSize                       uint
+	PreflightSimulationMemoryLimit                 uint64
 	PreflightEnableDebug                           bool
 	SQLiteDBPath                                   string
 	HistoryRetentionWindow                         uint32

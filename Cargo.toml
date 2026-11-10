@@ -46,6 +46,7 @@ features = ["serde", "type_enum", "serde_json"]
 version = "0.8.5"
 features = []
 
+# LTO stays thin-local: fat LTO would give each static library its own copy of the heap counter in ffi::memory.
 [profile.release-with-panic-unwind]
 inherits = "release"
 panic = "unwind"

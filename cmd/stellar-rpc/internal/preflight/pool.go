@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -37,6 +38,7 @@ type WorkerPool struct {
 	durationMetric             *prometheus.SummaryVec
 	ledgerEntriesFetchedMetric prometheus.Summary
 	workerExitsMetric          *prometheus.CounterVec
+	peakMemoryMetric           prometheus.Histogram
 
 	// Close cancels ctx under mu, and addWorker starts nothing once ctx is
 	// canceled, so wg cannot grow from zero while Close waits on it.
@@ -44,7 +46,9 @@ type WorkerPool struct {
 	wg sync.WaitGroup
 
 	workerConfig workerConfig
+	workerCount  uint
 	limits       poolLimits
+	memoryLimit  atomic.Uint64 // the last memory limit a worker reported
 }
 
 type WorkerPoolConfig struct {
@@ -58,6 +62,10 @@ type WorkerPoolConfig struct {
 	// entries.
 	CoreURL            string
 	CoreRequestTimeout time.Duration
+	// MemoryLimit is the most heap memory, in bytes, the simulation library
+	// may hold in a worker. 0 means 8 times the network's per-transaction
+	// memory limit.
+	MemoryLimit uint64
 }
 
 // poolLimits are fixed in production. Tests change them.
@@ -92,8 +100,10 @@ func newWorkerPool(cfg WorkerPoolConfig, limits poolLimits) *WorkerPool {
 			EnableDebug:        cfg.EnableDebug,
 			CoreURL:            cfg.CoreURL,
 			CoreRequestTimeout: cfg.CoreRequestTimeout,
+			MemoryLimit:        cfg.MemoryLimit,
 		},
-		limits: limits,
+		workerCount: cfg.WorkerCount,
+		limits:      limits,
 	}
 	requestQueueMetric := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Namespace: cfg.Daemon.MetricsNamespace(),
@@ -135,6 +145,14 @@ func newWorkerPool(cfg WorkerPoolConfig, limits poolLimits) *WorkerPool {
 		Name:      "worker_exits_total",
 		Help:      "number of preflight worker processes that exited, by cause",
 	}, []string{"cause"})
+	preflightWP.peakMemoryMetric = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: cfg.Daemon.MetricsNamespace(),
+		Subsystem: "preflight_pool",
+		Name:      "request_peak_memory_ratio",
+		Help: "the most heap memory the simulation library held during a simulation, " +
+			"as a fraction of the worker's memory limit",
+		Buckets: []float64{0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1}, //nolint:mnd
+	})
 	cfg.Daemon.MetricsRegistry().MustRegister(
 		requestQueueMetric,
 		preflightWP.concurrentRequestsMetric,
@@ -142,6 +160,7 @@ func newWorkerPool(cfg WorkerPoolConfig, limits poolLimits) *WorkerPool {
 		preflightWP.durationMetric,
 		preflightWP.ledgerEntriesFetchedMetric,
 		preflightWP.workerExitsMetric,
+		preflightWP.peakMemoryMetric,
 	)
 	for slot := range cfg.WorkerCount {
 		preflightWP.addWorker(slot)
@@ -234,6 +253,20 @@ func (pwp *WorkerPool) replace(w *workerProcess, cause string) {
 	pwp.addWorker(w.slot)
 }
 
+// noteMemoryLimit logs the workers' memory limit the first time a worker
+// reports it, and whenever it changes, as when the network changes its
+// per-transaction memory limit.
+func (pwp *WorkerPool) noteMemoryLimit(limit uint64) {
+	if pwp.memoryLimit.Swap(limit) == limit {
+		return
+	}
+	pwp.logger.WithFields(log.F{
+		"workers":                       pwp.workerCount,
+		"simulation_memory_limit_bytes": limit,
+		"all_workers_simulation_memory_limit_bytes": uint64(pwp.workerCount) * limit,
+	}).Info("set the preflight workers' memory limit")
+}
+
 // Close stops the workers. Callers still waiting for a simulation get an
 // error.
 func (pwp *WorkerPool) Close() {
@@ -290,6 +323,10 @@ func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters
 	if response.Error != "" {
 		err = errors.New(response.Error)
 		status = "error"
+	}
+	if response.MemoryLimit > 0 {
+		pwp.noteMemoryLimit(response.MemoryLimit)
+		pwp.peakMemoryMetric.Observe(float64(response.PeakMemory) / float64(response.MemoryLimit))
 	}
 	pwp.durationMetric.With(
 		prometheus.Labels{"type": "all", "status": status},

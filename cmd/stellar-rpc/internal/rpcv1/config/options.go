@@ -414,6 +414,17 @@ func (cfg *Config) options() Options {
 			Validate:     positive,
 		},
 		{
+			Name: "preflight-simulation-memory-limit",
+			Usage: fmt.Sprintf(
+				"Most heap memory, in bytes, the simulation library may hold in a preflight worker process. 0 means "+
+					"8 times the network's per-transaction memory limit, and any other value must be at least %d. "+
+					"Plan for about this limit + 128 MiB per worker.",
+				limits.MinSimulationMemoryLimit),
+			ConfigKey:    &cfg.PreflightSimulationMemoryLimit,
+			DefaultValue: uint64(0),
+			Validate:     simulationMemoryLimitValidator,
+		},
+		{
 			Name:         "preflight-enable-debug",
 			Usage:        "Include diagnostic events in simulateTransaction responses",
 			ConfigKey:    &cfg.PreflightEnableDebug,
@@ -764,6 +775,14 @@ func feeStatsRetentionWindowValidator(option *Option) error {
 		return fmt.Errorf("%s is not a uint32", option.Name)
 	}
 	return limits.ValidateFeeStatsRetentionWindow(option.Name, *ptr)
+}
+
+func simulationMemoryLimitValidator(option *Option) error {
+	ptr, ok := option.ConfigKey.(*uint64)
+	if !ok {
+		return fmt.Errorf("%s is not a uint64", option.Name)
+	}
+	return limits.ValidateSimulationMemoryLimit(option.Name, *ptr)
 }
 
 func positive(option *Option) error {
