@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"encoding"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -566,4 +567,54 @@ func TestGetPreflightReadsAtMostTheEntriesAFootprintMayHold(t *testing.T) {
 			require.Equal(t, tooMany(2), simulateWithMaxFootprintEntries(t, params, 2).Error)
 		})
 	}
+}
+
+// readFailingGetter fails its failAt-th read, or returns every entry twice
+// when duplicate is set.
+type readFailingGetter struct {
+	ledgerentries.LedgerEntryGetter
+
+	failAt    int
+	err       error
+	duplicate bool
+	reads     int
+}
+
+func (g *readFailingGetter) GetLedgerEntries(
+	ctx context.Context, keys []xdr.LedgerKeyView,
+) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
+	g.reads++
+	if g.reads == g.failAt {
+		return nil, 0, g.err
+	}
+	entries, ledger, err := g.LedgerEntryGetter.GetLedgerEntries(ctx, keys)
+	if g.duplicate {
+		entries = append(entries, entries...)
+	}
+	return entries, ledger, err
+}
+
+// The library takes a failed read for a missing entry, so a simulation with
+// a failed read must fail even when it would succeed without that entry.
+func TestGetPreflightFailsWhenALedgerEntryReadFails(t *testing.T) {
+	params := getPreflightParameters(t, supportedProtocolVersions[len(supportedProtocolVersions)-1])
+	entries := params.LedgerEntryGetter
+	counter := &readFailingGetter{LedgerEntryGetter: entries}
+	params.LedgerEntryGetter = counter
+	result, err := GetPreflight(t.Context(), params)
+	require.NoError(t, err)
+	require.Empty(t, result.Error)
+	require.Positive(t, counter.reads)
+
+	readErr := errors.New("could not query captive core")
+	for failAt := 1; failAt <= counter.reads; failAt++ {
+		params.LedgerEntryGetter = &readFailingGetter{LedgerEntryGetter: entries, failAt: failAt, err: readErr}
+		result, err := GetPreflight(t.Context(), params)
+		require.ErrorIs(t, err, readErr, "read %d", failAt)
+		require.Equal(t, Preflight{}, result)
+	}
+
+	params.LedgerEntryGetter = &readFailingGetter{LedgerEntryGetter: entries, duplicate: true}
+	_, err = GetPreflight(t.Context(), params)
+	require.ErrorContains(t, err, "more than one entry")
 }

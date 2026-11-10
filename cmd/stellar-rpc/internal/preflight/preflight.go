@@ -35,6 +35,9 @@ type snapshotSourceHandle struct {
 	ledgerEntryGetter ledgerentries.LedgerEntryGetter
 	ctx               context.Context //nolint:containedctx
 	logger            *log.Entry
+	// err is the first failed read. The library takes a failed read for a
+	// missing entry, so the simulation's result cannot be used.
+	err error
 }
 
 // Current base reserve is 0.5XLM (in stroops)
@@ -45,20 +48,23 @@ const defaultBaseReserve = 5_000_000
 //
 //export SnapshotSourceGet
 func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.ledger_entry_and_ttl_t {
-	h, ok := cgo.Handle(handle).Value().(snapshotSourceHandle)
+	h, ok := cgo.Handle(handle).Value().(*snapshotSourceHandle)
 	if !ok {
-		panic("invalid handle type: expected snapshotSourceHandle")
+		panic("invalid handle type: expected *snapshotSourceHandle")
+	}
+	if h.err != nil {
+		return C.ledger_entry_and_ttl_t{}
 	}
 	entries, _, err := h.ledgerEntryGetter.GetLedgerEntries(h.ctx, []xdr.LedgerKeyView{GoXDR(cLedgerKey)})
+	if err == nil && len(entries) > 1 {
+		err = errors.New("GetLedgerEntries() returned more than one entry")
+	}
 	if err != nil {
+		h.err = err
 		// a canceled request is not a fault
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			h.logger.WithError(err).Error("SnapshotSourceGet(): GetLedgerEntries() failed")
 		}
-		return C.ledger_entry_and_ttl_t{}
-	}
-	if len(entries) > 1 {
-		h.logger.WithError(err).Error("SnapshotSourceGet(): GetLedgerEntries() returned more than one entry")
 		return C.ledger_entry_and_ttl_t{}
 	}
 	if len(entries) == 0 {
@@ -185,7 +191,7 @@ func getFootprintTTLPreflight(ctx context.Context, params Parameters) (Preflight
 	defer FreeGoXDR(opBodyCXDR)
 	footprintCXDR := CXDR(params.Footprint)
 	defer FreeGoXDR(footprintCXDR)
-	ssh := snapshotSourceHandle{
+	ssh := &snapshotSourceHandle{
 		ledgerEntryGetter: params.LedgerEntryGetter,
 		ctx:               ctx,
 		logger:            params.Logger,
@@ -203,7 +209,7 @@ func getFootprintTTLPreflight(ctx context.Context, params Parameters) (Preflight
 		ledgerInfo,
 	)
 
-	return GoPreflight(res), nil
+	return preflightResult(GoPreflight(res), ssh, params.LedgerSeq)
 }
 
 func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Preflight, error) {
@@ -217,7 +223,7 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 	defer FreeGoXDR(invokeHostFunctionCXDR)
 	sourceAccountCXDR := CXDR(params.SourceAccount)
 	defer FreeGoXDR(sourceAccountCXDR)
-	ssh := snapshotSourceHandle{
+	ssh := &snapshotSourceHandle{
 		ledgerEntryGetter: params.LedgerEntryGetter,
 		ctx:               ctx,
 		logger:            params.Logger,
@@ -256,7 +262,16 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 		C.bool(params.UseUpgradedAuth),
 	)
 
-	return GoPreflight(res), nil
+	return preflightResult(GoPreflight(res), ssh, params.LedgerSeq)
+}
+
+// preflightResult discards the result of a simulation that had a failed read,
+// whether or not the simulation itself failed.
+func preflightResult(preflight Preflight, ssh *snapshotSourceHandle, ledgerSeq uint32) (Preflight, error) {
+	if ssh.err != nil {
+		return Preflight{}, fmt.Errorf("could not read the ledger state at ledger %d: %w", ledgerSeq, ssh.err)
+	}
+	return preflight, nil
 }
 
 func GoPreflight(result *C.preflight_result_t) Preflight {
