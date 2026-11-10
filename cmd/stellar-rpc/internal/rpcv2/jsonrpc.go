@@ -22,6 +22,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
 // handlerParams carries everything newJSONRPCHandler composes into the method
@@ -65,6 +66,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		}
 	}
 
+	xdr2json.SetMaxOutputBytes(deref(cfg.Service.MaxJSONConversionBytes))
 	return jsonrpc.NewHandler(jsonrpc.Params{
 		Daemon:                p.daemon,
 		Logger:                p.logger,

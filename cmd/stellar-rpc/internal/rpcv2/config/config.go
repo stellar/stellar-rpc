@@ -72,6 +72,9 @@ type ServiceConfig struct {
 	// MaxRequestBatchSize is the most calls a JSON-RPC batch may hold. A larger
 	// batch is answered with one error, and none of its calls run.
 	MaxRequestBatchSize *uint `toml:"max_request_batch_size"`
+	// MaxJSONConversionBytes is the most JSON one XDR value may convert to in
+	// an xdrFormat "json" response. A larger value fails the request.
+	MaxJSONConversionBytes *uint `toml:"max_json_conversion_bytes"`
 
 	FeeStats  FeeStatsConfig  `toml:"fee_stats"`
 	Preflight PreflightConfig `toml:"preflight"`
@@ -431,6 +434,9 @@ const (
 	DefaultMaxRequestExecutionDuration      time.Duration = 25 * time.Second
 	DefaultRequestExecutionWarningThreshold time.Duration = 5 * time.Second
 	DefaultMaxRequestBatchSize              uint          = 10
+	// DefaultMaxJSONConversionBytes is twice v1's 128 MiB, as the archive
+	// node's minimum RAM is twice v1's.
+	DefaultMaxJSONConversionBytes uint = 256 * 1024 * 1024
 
 	// DefaultMethodQueueLimit and the three below it are the compiled
 	// per-method defaults — the last tier of the methods cascade.
@@ -604,6 +610,7 @@ func (cfg Config) WithDefaults() Config {
 	fillDuration(&svc.MaxRequestExecutionDuration, DefaultMaxRequestExecutionDuration)
 	fillDuration(&svc.RequestExecutionWarningThreshold, DefaultRequestExecutionWarningThreshold)
 	fillUint(&svc.MaxRequestBatchSize, DefaultMaxRequestBatchSize)
+	fillUint(&svc.MaxJSONConversionBytes, DefaultMaxJSONConversionBytes)
 	fillUint32(&svc.FeeStats.ClassicFeeWindowLedgers, DefaultClassicFeeWindowLedgers)
 	fillUint32(&svc.FeeStats.SorobanInclusionFeeWindowLedgers, DefaultSorobanInclusionFeeWindowLedgers)
 	fillUint(&svc.Preflight.WorkerCount, NumCPU())

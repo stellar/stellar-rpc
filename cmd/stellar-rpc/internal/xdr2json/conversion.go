@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"math"
 	"reflect"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/pkg/errors"
@@ -30,7 +31,8 @@ import (
 // and returns the raw JSON-formatted serialization of that object.
 // It can be unmarshalled to a proper JSON structure, but the raw bytes are
 // returned to avoid unnecessary round-trips. If there is an
-// error, it returns an empty string.
+// error, it returns an empty string. It fails if the JSON would exceed the
+// cap set by SetMaxOutputBytes.
 //
 // The `xdr` object does not need to actually be initialized/valid:
 // we only use it to determine the name of the structure. We could just
@@ -50,8 +52,28 @@ func ConvertInterface(xdr encoding.BinaryMarshaler) (json.RawMessage, error) {
 	return (*Budget)(nil).ConvertInterface(xdr)
 }
 
+// DefaultMaxOutputBytes caps one conversion until SetMaxOutputBytes is called.
+const DefaultMaxOutputBytes = 128 * 1024 * 1024
+
+//nolint:gochecknoglobals // set once at startup from the daemon config
+var maxOutputBytes atomic.Uint64
+
+// SetMaxOutputBytes caps the JSON, once escaped, that one conversion may
+// produce. Zero restores DefaultMaxOutputBytes.
+func SetMaxOutputBytes(n uint) {
+	maxOutputBytes.Store(uint64(n))
+}
+
+func outputCap() int {
+	n := maxOutputBytes.Load()
+	if n == 0 {
+		return DefaultMaxOutputBytes
+	}
+	return int(min(n, math.MaxInt))
+}
+
 // Budget caps the total size of the JSON produced by a series of conversions.
-// A nil Budget has no cap.
+// A nil Budget caps each conversion at the size SetMaxOutputBytes sets.
 type Budget struct {
 	remaining int
 }
@@ -85,7 +107,7 @@ func (b *Budget) ConvertInterface(xdr encoding.BinaryMarshaler) (json.RawMessage
 
 func (b *Budget) convert(xdrTypeName string, field []byte) (json.RawMessage, error) {
 	if b == nil {
-		return convertAnyBytes(xdrTypeName, field, math.MaxInt)
+		b = NewBudget(outputCap())
 	}
 	js, err := convertAnyBytes(xdrTypeName, field, b.remaining)
 	if err != nil {

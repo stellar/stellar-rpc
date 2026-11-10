@@ -58,6 +58,7 @@ type Config struct {
 	ClassicFeeStatsLedgerRetentionWindow           uint32
 	RequestBacklogGlobalQueueLimit                 uint
 	MaxRequestBatchSize                            uint
+	MaxJSONConversionBytes                         uint
 	RequestBacklogGetHealthQueueLimit              uint
 	RequestBacklogGetEventsQueueLimit              uint
 	RequestBacklogGetNetworkQueueLimit             uint

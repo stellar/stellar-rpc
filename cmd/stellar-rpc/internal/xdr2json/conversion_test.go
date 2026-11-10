@@ -82,6 +82,20 @@ func TestBudgetIsSharedAcrossConversions(t *testing.T) {
 	require.ErrorContains(t, err, "exceeds")
 }
 
+func TestConversionIsCapped(t *testing.T) {
+	asset := xdr.MustNewCreditAsset("ABCD", keypair.MustRandom().Address())
+	js, err := ConvertInterface(asset)
+	require.NoError(t, err)
+	t.Cleanup(func() { SetMaxOutputBytes(0) })
+
+	SetMaxOutputBytes(uint(len(js) - 1))
+	_, err = ConvertInterface(asset)
+	require.ErrorContains(t, err, "exceeds")
+	SetMaxOutputBytes(uint(len(js)))
+	_, err = ConvertInterface(asset)
+	require.NoError(t, err)
+}
+
 // TestConversionError exercises the panic-unwinding path: xdr_to_json still
 // uses panic control flow for malformed bytes.
 func TestConversionError(t *testing.T) {

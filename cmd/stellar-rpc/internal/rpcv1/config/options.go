@@ -434,6 +434,13 @@ func (cfg *Config) options() Options {
 			Validate:     positive,
 		},
 		{
+			Name:         "max-json-conversion-bytes",
+			Usage:        "Maximum bytes of JSON one XDR value may convert to when a request asks for xdrFormat json",
+			ConfigKey:    &cfg.MaxJSONConversionBytes,
+			DefaultValue: uint(128 * 1024 * 1024),
+			Validate:     positive,
+		},
+		{
 			TomlKey:      strutils.KebabToConstantCase("request-backlog-get-health-queue-limit"),
 			Usage:        "Maximum number of outstanding GetHealth requests",
 			ConfigKey:    &cfg.RequestBacklogGetHealthQueueLimit,
