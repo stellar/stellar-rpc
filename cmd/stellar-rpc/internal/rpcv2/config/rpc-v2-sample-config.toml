@@ -171,9 +171,11 @@ soroban_inclusion_fee_window_ledgers = 50
 # The simulateTransaction worker pool.
 [service.preflight]
 # Concurrent preflights, and how many more may wait for a worker before new
-# requests are rejected. Both default to the CPU count.
+# requests are rejected. The worker count defaults to the CPU count, and the
+# queue to the larger of the CPU count and max_request_batch_size, since the
+# calls of one batch start at once.
 #worker_count = 8
-#worker_queue_size = 8
+#worker_queue_size = 10
 # Diagnostic events in simulateTransaction responses. The default is true, but
 # they are expensive to produce, so this sample turns them off.
 enable_debug = false

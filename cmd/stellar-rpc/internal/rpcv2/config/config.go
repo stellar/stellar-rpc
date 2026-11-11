@@ -95,7 +95,8 @@ type PreflightConfig struct {
 	// Default NumCPU.
 	WorkerCount *uint `toml:"worker_count"`
 	// WorkerQueueSize is how many preflight requests may wait for a free worker
-	// before the pool starts rejecting them; >= 1. Default NumCPU.
+	// before the pool starts rejecting them; >= 1. Default the larger of NumCPU
+	// and MaxRequestBatchSize, since the calls of one batch start at once.
 	WorkerQueueSize *uint `toml:"worker_queue_size"`
 	// EnableDebug includes diagnostic events in simulateTransaction responses.
 	// Default true.
@@ -627,7 +628,7 @@ func (cfg Config) WithDefaults() Config {
 	fillUint32(&svc.FeeStats.ClassicFeeWindowLedgers, DefaultClassicFeeWindowLedgers)
 	fillUint32(&svc.FeeStats.SorobanInclusionFeeWindowLedgers, DefaultSorobanInclusionFeeWindowLedgers)
 	fillUint(&svc.Preflight.WorkerCount, NumCPU())
-	fillUint(&svc.Preflight.WorkerQueueSize, NumCPU())
+	fillUint(&svc.Preflight.WorkerQueueSize, max(NumCPU(), *svc.MaxRequestBatchSize))
 	fillBool(&svc.Preflight.EnableDebug, DefaultPreflightEnableDebug)
 	fillUint(&svc.Preflight.SimulationMemoryLimit, 0)
 

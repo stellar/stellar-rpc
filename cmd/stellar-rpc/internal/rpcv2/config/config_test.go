@@ -248,8 +248,18 @@ func TestParseConfig_PreflightDefaults(t *testing.T) {
 
 	p := cfg.Service.Preflight
 	assert.Equal(t, NumCPU(), *p.WorkerCount)
-	assert.Equal(t, NumCPU(), *p.WorkerQueueSize)
+	assert.Equal(t, max(NumCPU(), DefaultMaxRequestBatchSize), *p.WorkerQueueSize)
 	assert.True(t, *p.EnableDebug)
+}
+
+// The preflight queue holds a whole batch of simulations by default.
+func TestParseConfig_PreflightQueueHoldsABatch(t *testing.T) {
+	cfg, err := ParseConfig([]byte(minimalValidConfig + `
+[service]
+max_request_batch_size = 500
+`))
+	require.NoError(t, err)
+	assert.Equal(t, uint(500), *cfg.Service.Preflight.WorkerQueueSize)
 }
 
 func TestParseConfig_PreflightExplicitValues(t *testing.T) {

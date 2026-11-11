@@ -199,8 +199,9 @@ func (pwp *WorkerPool) addWorker(slot uint) {
 	})
 }
 
-// takeWorker takes an idle worker, waiting for one until ctx ends or the
-// pool closes. A worker that exited while idle is replaced, and the call
+// takeWorker takes an idle worker. When there is none, it waits in the queue
+// until ctx ends or the pool closes, or fails with ErrPreflightQueueFull if
+// the queue is full. A worker that exited while idle is replaced, and the call
 // takes another.
 func (pwp *WorkerPool) takeWorker(ctx context.Context) (*workerProcess, error) {
 	for {
@@ -290,7 +291,9 @@ type GetterParameters struct {
 	Format          string
 }
 
-// GetPreflight runs a simulation in a worker.
+// GetPreflight runs a simulation in a worker. When every worker is busy, it
+// waits for one in the queue until ctx ends, or fails with
+// ErrPreflightQueueFull if the queue is full.
 func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters) (Response, error) {
 	// A call whose context has ended does not run: takeWorker's select could
 	// still pick an idle worker.
@@ -337,5 +340,11 @@ func (pwp *WorkerPool) GetPreflight(ctx context.Context, params GetterParameters
 		).Observe(response.LedgerEntriesTime.Seconds())
 	}
 	pwp.ledgerEntriesFetchedMetric.Observe(float64(response.LedgerEntriesFetched))
+	// The worker stops replyMargin before the deadline, so a simulation that
+	// ran out of time fails as the call does once its deadline passes.
+	if _, hasDeadline := ctx.Deadline(); response.TimedOut && hasDeadline {
+		<-ctx.Done()
+		return Response{}, ctx.Err()
+	}
 	return Response{body: response.Body, failed: response.Failed}, err
 }

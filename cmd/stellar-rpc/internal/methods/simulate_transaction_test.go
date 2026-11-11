@@ -20,6 +20,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 )
 
@@ -211,6 +212,26 @@ func TestSimulateTransactionPassesLedgerTimeFromLatestLedgerMetaToPreflight(t *t
 	require.Equal(t, uint64(1_700_000_123), getter.params.LedgerTime)
 
 	ledgerReader.AssertExpectations(t)
+}
+
+// A full preflight queue fails the call with a JSON-RPC error, not a
+// simulation result.
+func TestSimulateTransactionReturnsQueueFullAsJSONRPCError(t *testing.T) {
+	ledgerReader := &MockLedgerReader{}
+	ledgerReader.On("GetLatestLedgerSequence", mock.Anything).Return(uint32(77), nil)
+	ledgerReader.On("GetLedger", mock.Anything, uint32(77)).
+		Return(createLedger(expectedLatestLedgerHashBytes, 77, xdr.TimePoint(1)), true, nil)
+	getter := &recordingPreflightGetter{err: preflight.ErrPreflightQueueFull}
+	handler := NewSimulateTransactionHandler(log.New(), ledgerReader, getter)
+
+	txB64, err := xdr.MarshalBase64(invokeHostFunctionEnvelope(t))
+	require.NoError(t, err)
+	requests, err := jrpc2.ParseRequests(fmt.Appendf(nil,
+		`{"jsonrpc":"2.0","id":1,"method":"simulateTransaction","params":{"transaction":"%s"}}`, txB64))
+	require.NoError(t, err)
+
+	_, err = handler(t.Context(), requests[0].ToRequest())
+	require.Equal(t, network.ErrPreflightQueueFull, err)
 }
 
 func TestSimulateTransactionReturnsErrorWhenLatestLedgerMetaFails(t *testing.T) {

@@ -88,7 +88,9 @@ type simulationResponse struct {
 	Failed bool
 	// Error is set, and Body empty, when the simulation could not run or its
 	// result could not be converted.
-	Error                string
+	Error string
+	// TimedOut says the simulation failed because it ran out of time.
+	TimedOut             bool
 	LedgerEntriesFetched uint32
 	LedgerEntriesTime    time.Duration
 	// MemoryLimit is the heap limit in force when the simulation finished, 0
@@ -173,6 +175,7 @@ func simulate(
 	}
 	if err != nil {
 		response.Error = err.Error()
+		response.TimedOut = ctx.Err() != nil
 	}
 	return response
 }

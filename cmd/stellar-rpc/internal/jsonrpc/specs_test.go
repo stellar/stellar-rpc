@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 )
@@ -105,4 +106,19 @@ func TestLimitsByMethod_LongestDuration(t *testing.T) {
 	limits[protocol.SimulateTransactionMethodName] = MethodLimits{QueueLimit: 1, RequestDurationLimit: time.Minute}
 	assert.Equal(t, time.Minute, limits.LongestDuration())
 	assert.Equal(t, time.Duration(0), LimitsByMethod{}.LongestDuration())
+}
+
+// The preflight pool bounds simulations itself, so they do not take the
+// handler slots the other methods share.
+func TestNewHandler_SimulateTransactionRunsWithoutAHandlerSlot(t *testing.T) {
+	h := NewHandler(Params{
+		Daemon: host.MakeNoOpDaemon(),
+		Logger: log.DefaultLogger,
+		Specs:  fullLimitsByMethod().Apply(BuildHandlerSpecs(testHandlerDeps())),
+	})
+	t.Cleanup(h.Close)
+	for _, spec := range BuildHandlerSpecs(testHandlerDeps()) {
+		assert.Equal(t, spec.MethodName == protocol.SimulateTransactionMethodName,
+			h.bridge.unslotted[spec.MethodName], spec.MethodName)
+	}
 }

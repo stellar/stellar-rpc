@@ -46,16 +46,19 @@ var (
 )
 
 // Bridge serves JSON-RPC 2.0 over HTTP POST by calling an Assigner's handlers
-// directly, at most one per CPU. The zero value is not usable; build it with
-// NewBridge.
+// directly, at most one per CPU apart from the methods in unslotted. The zero
+// value is not usable; build it with NewBridge.
 type Bridge struct {
 	// Bridge keeps the wire behavior of jhttp.Bridge with parseRequests as its
 	// ParseRequest hook (TestBridge_ParityWithJHTTP), but encodes each result
 	// once. It enforces the duration limit itself, so a response is never
 	// buffered to be swapped for a 504.
-	methods      jrpc2.Assigner
-	sem          *semaphore.Weighted // bounds the handlers running at once, as jrpc2.Server does
-	maxHandlers  int
+	methods     jrpc2.Assigner
+	sem         *semaphore.Weighted // bounds the handlers running at once, as jrpc2.Server does
+	maxHandlers int
+	// unslotted are the methods that bound their own concurrency and run
+	// without one of sem's slots.
+	unslotted    map[string]bool
 	maxBatchSize uint
 	limits       durationLimits
 	// requests, when set, bounds the requests whose calls run at once.
@@ -282,12 +285,17 @@ func (b *Bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*respo
 			rsps[i] = rsp
 			continue
 		}
-		if err := b.sem.Acquire(ctx, 1); err != nil {
-			rsps[i] = respond(pr, nil, err)
-			continue
+		slotted := !b.unslotted[pr.Method]
+		if slotted {
+			if err := b.sem.Acquire(ctx, 1); err != nil {
+				rsps[i] = respond(pr, nil, err)
+				continue
+			}
 		}
 		call := func() {
-			defer b.sem.Release(1)
+			if slotted {
+				defer b.sem.Release(1)
+			}
 			defer func() {
 				if p := recover(); p != nil { // answer just this call, as the duration limiter does
 					for _, line := range util.CallStack(p, pr.Method, "(*Bridge).run.func", 8) {

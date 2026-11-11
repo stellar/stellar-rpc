@@ -64,6 +64,10 @@ type HandlerSpec struct {
 	Handler              jrpc2.Handler
 	QueueLimit           uint
 	RequestDurationLimit time.Duration
+	// BoundsOwnConcurrency marks a method that limits how many of its calls
+	// run at once by itself. It runs without one of the handler slots that
+	// all other methods share.
+	BoundsOwnConcurrency bool
 }
 
 // Params carries everything NewHandler needs besides the method specs: the
@@ -131,11 +135,11 @@ func decorateHandlers(daemon host.Daemon, logger *log.Entry, m handler.Map) hand
 			if simulateFailed {
 				label[labelStatus] = "error"
 			} else if err != nil {
-				var jsonRPCErr *jrpc2.Error
-				if errors.As(err, &jsonRPCErr) {
+				label[labelStatus] = "error"
+				var coded jrpc2.ErrCoder
+				if errors.As(err, &coded) {
 					prometheusLabelReplacer := strings.NewReplacer(" ", "_", "-", "_", "(", "", ")", "")
-					status := prometheusLabelReplacer.Replace(jsonRPCErr.Code.String())
-					label[labelStatus] = status
+					label[labelStatus] = prometheusLabelReplacer.Replace(coded.ErrCode().String())
 				}
 			}
 			if ctx.Err() != nil && (err != nil || simulateFailed) {
@@ -246,9 +250,11 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry, i
 // NewHandler constructs a Handler instance from the given method specs
 func NewHandler(params Params) Handler {
 	handlersMap := handler.Map{}
+	unslotted := map[string]bool{}
 	inflight := new(sync.WaitGroup)
 	for _, spec := range params.Specs {
 		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger, inflight)
+		unslotted[spec.MethodName] = spec.BoundsOwnConcurrency
 	}
 
 	globalQueueRequestExecutionDurationWarningCounter := register(params.Daemon,
@@ -273,6 +279,7 @@ func NewHandler(params Params) Handler {
 			timeouts: globalQueueRequestExecutionDurationLimitCounter,
 			logger:   params.Logger,
 		})
+	rpc.unslotted = unslotted
 
 	// globalQueueRequestBacklogLimiter is a metric for measuring the total concurrent inflight requests
 	globalQueueRequestBacklogLimiter := register(params.Daemon, prometheus.NewGauge(prometheus.GaugeOpts{

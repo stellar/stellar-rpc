@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -408,4 +409,44 @@ func TestNewBridge_UnboundedRequestContext(t *testing.T) {
 	b.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.JSONEq(t, `{"jsonrpc":"2.0","id":1,"result":{"deadline":false,"value":"planted"}}`, rec.Body.String())
+}
+
+// A method that bounds its own concurrency runs while other calls hold every
+// handler slot.
+func TestBridge_UnslottedMethodRunsWhenAllSlotsAreTaken(t *testing.T) {
+	release := make(chan struct{})
+	var holding sync.WaitGroup
+	b := newBridge(handler.Map{
+		"slow": handler.New(func(context.Context) (any, error) {
+			holding.Done()
+			<-release
+			return 1, nil
+		}),
+		"own": handler.New(func(context.Context) (any, error) { return 2, nil }),
+	}, testMaxBatchSize, unlimited)
+	b.unslotted = map[string]bool{"own": true}
+	t.Cleanup(b.Close)
+
+	var done sync.WaitGroup
+	holding.Add(b.MaxHandlers())
+	for range b.MaxHandlers() {
+		done.Go(func() { postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"slow"}`) })
+	}
+	holding.Wait()
+	rec := postBridge(t, b, `{"jsonrpc":"2.0","id":2,"method":"own"}`)
+	close(release)
+	done.Wait()
+	require.JSONEq(t, `{"jsonrpc":"2.0","id":2,"result":2}`, rec.Body.String())
+}
+
+// A full preflight queue reaches the wire with its message alone.
+func TestBridge_PreflightQueueFullMessage(t *testing.T) {
+	b := newBridge(handler.Map{"m": handler.New(func(context.Context) (any, error) {
+		return nil, network.ErrPreflightQueueFull
+	})}, testMaxBatchSize, unlimited)
+	t.Cleanup(b.Close)
+	rec := postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"m"}`)
+	require.JSONEq(t,
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"preflight queue full; retry later"}}`,
+		rec.Body.String())
 }

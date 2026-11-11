@@ -13,6 +13,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
@@ -74,6 +75,9 @@ func NewSimulateTransactionHandler(logger *log.Entry,
 			var response preflight.Response
 			if response, err = getter.GetPreflight(ctx, params); err == nil {
 				return response, nil
+			}
+			if errors.Is(err, preflight.ErrPreflightQueueFull) {
+				return preflight.Response{}, network.ErrPreflightQueueFull
 			}
 		}
 		return preflight.EncodeResponse(protocol.SimulateTransactionResponse{

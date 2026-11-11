@@ -408,9 +408,9 @@ func (cfg *Config) options() Options {
 		},
 		{
 			Name:         "preflight-worker-queue-size",
-			Usage:        "Maximum number of outstanding preflight requests for the simulateTransaction endpoint. Defaults to the number of CPUs.",
+			Usage:        "Maximum number of outstanding preflight requests for the simulateTransaction endpoint. 0, the default, means the larger of the number of CPUs and MAX_REQUEST_BATCH_SIZE, since the calls of one batch start at once.",
 			ConfigKey:    &cfg.PreflightWorkerQueueSize,
-			DefaultValue: defaultUintCPU,
+			DefaultValue: uint(0),
 			Validate:     positive,
 		},
 		{

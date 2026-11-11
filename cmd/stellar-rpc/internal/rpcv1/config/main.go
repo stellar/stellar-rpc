@@ -3,6 +3,7 @@ package config
 
 import (
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -163,6 +164,10 @@ func (cfg *Config) SetValues(lookupEnv func(string) (string, bool)) error {
 		}
 	}
 
+	if cfg.PreflightWorkerQueueSize == 0 {
+		//nolint:gosec // runtime.NumCPU() is always non-negative and realistically well below uint limits
+		cfg.PreflightWorkerQueueSize = max(uint(runtime.NumCPU()), cfg.MaxRequestBatchSize)
+	}
 	return nil
 }
 

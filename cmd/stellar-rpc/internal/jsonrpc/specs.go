@@ -139,8 +139,13 @@ func BuildHandlerSpecs(deps HandlerDeps) []HandlerSpec {
 				deps.DefaultTransactionsLimit, deps.MaxResponseBytes, deps.NetworkPassphrase)),
 		spec(protocol.SendTransactionMethodName,
 			methods.NewSendTransactionHandler(deps.Daemon, deps.Logger, deps.LedgerReader, deps.NetworkPassphrase)),
-		spec(protocol.SimulateTransactionMethodName,
-			methods.NewSimulateTransactionHandler(deps.Logger, deps.LedgerReader, deps.PreflightGetter)),
+		{
+			MethodName: protocol.SimulateTransactionMethodName,
+			Handler:    methods.NewSimulateTransactionHandler(deps.Logger, deps.LedgerReader, deps.PreflightGetter),
+			// The preflight pool runs one simulation per worker, and calls wait
+			// for room in its queue.
+			BoundsOwnConcurrency: true,
+		},
 		spec(protocol.GetFeeStatsMethodName,
 			methods.NewGetFeeStatsHandler(deps.FeeStats, deps.LedgerReader, deps.Logger)),
 	}

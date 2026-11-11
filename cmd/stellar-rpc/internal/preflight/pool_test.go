@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/creachadair/jrpc2"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/sirupsen/logrus"
@@ -31,6 +32,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 )
 
 // failStartEnv makes the workers of a test exit before they are ready.
@@ -280,6 +282,26 @@ func TestPoolFailsSimulationWhenLedgerIsGone(t *testing.T) {
 	require.ErrorContains(t, err, "404")
 }
 
+// A request whose caller stopped waiting never reaches a worker.
+func TestPoolSkipsRequestsWhoseCallerStoppedWaiting(t *testing.T) {
+	hold, held, release := holdFirstSimulationRead()
+	defer release()
+	pool, _ := newTestPool(t, newCoreServer(t, hold), defaultPoolLimits())
+
+	first := simulateAsync(context.Background(), t, pool)
+	<-held
+	ctx, cancel := context.WithCancel(t.Context())
+	waiting := simulateAsync(ctx, t, pool)
+	require.Eventually(t, func() bool { return len(pool.queue) == 1 }, time.Minute, time.Millisecond)
+	cancel()
+	require.ErrorIs(t, <-waiting, context.Canceled)
+	release()
+	require.NoError(t, <-first)
+
+	requireSimulates(t, pool)
+	require.EqualValues(t, 2, samples(t, pool.ledgerEntriesFetchedMetric))
+}
+
 // A call whose context has already ended does not run, even on an idle
 // worker.
 func TestPoolDoesNotRunACallWhoseContextEnded(t *testing.T) {
@@ -292,6 +314,41 @@ func TestPoolDoesNotRunACallWhoseContextEnded(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	require.Zero(t, samples(t, pool.ledgerEntriesFetchedMetric))
 	require.Len(t, pool.idle, 1)
+}
+
+// A simulation that finds every worker busy waits for one.
+func TestPoolWaitsForAWorker(t *testing.T) {
+	hold, held, release := holdFirstSimulationRead()
+	defer release()
+	pool, _ := newTestPool(t, newCoreServer(t, hold), defaultPoolLimits())
+
+	running := simulateAsync(t.Context(), t, pool)
+	<-held
+	waiting := simulateAsync(t.Context(), t, pool)
+	require.Eventually(t, func() bool { return len(pool.queue) == 1 }, time.Minute, time.Millisecond)
+	release()
+	require.NoError(t, <-running)
+	require.NoError(t, <-waiting)
+}
+
+// A simulation that finds every worker busy and the queue full fails at once.
+func TestPoolRejectsCallsWhenTheQueueIsFull(t *testing.T) {
+	hold, held, release := holdFirstSimulationRead()
+	defer release()
+	pool, _ := newTestPool(t, newCoreServer(t, hold), defaultPoolLimits())
+
+	running := simulateAsync(t.Context(), t, pool)
+	<-held
+	waiting := simulateAsync(t.Context(), t, pool)
+	require.Eventually(t, func() bool { return len(pool.queue) == 1 }, time.Minute, time.Millisecond)
+	_, err := pool.GetPreflight(t.Context(), testSimulation(t, protocol.FormatJSON))
+	require.ErrorIs(t, err, ErrPreflightQueueFull)
+	var metric dto.Metric
+	require.NoError(t, pool.errorFullCounter.Write(&metric))
+	require.InDelta(t, 1, metric.GetCounter().GetValue(), 0)
+	release()
+	require.NoError(t, <-running)
+	require.NoError(t, <-waiting)
 }
 
 // A worker that exits while idle is replaced before a call gets it.
@@ -375,7 +432,7 @@ func TestPoolKillsWorkerAtTheCallersDeadline(t *testing.T) {
 }
 
 // A worker stops waiting for a ledger read before its caller's deadline, and
-// answers instead of being killed.
+// answers instead of being killed. The call fails with the deadline's error.
 func TestPoolWorkerStopsReadingBeforeTheCallersDeadline(t *testing.T) {
 	hold, _, release := holdFirstSimulationRead()
 	defer release()
@@ -385,13 +442,33 @@ func TestPoolWorkerStopsReadingBeforeTheCallersDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	_, err := pool.GetPreflight(ctx, testSimulation(t, protocol.FormatJSON))
-	require.ErrorContains(t, err, "could not read the ledger state")
-	require.ErrorContains(t, err, context.DeadlineExceeded.Error())
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.NoError(t, syscall.Kill(pid, 0))
 	assert.Zero(t, exits(pool, exitDeadline))
 
 	release()
 	requireSimulates(t, pool)
+}
+
+// The request duration limiter answers a simulation that ran out of time
+// with its timeout error, and counts it.
+func TestDurationLimiterAnswersSimulationThatRanOutOfTime(t *testing.T) {
+	hold, _, release := holdFirstSimulationRead()
+	defer release()
+	pool, _ := newTestPool(t, newCoreServer(t, hold), defaultPoolLimits())
+
+	limited := prometheus.NewCounter(prometheus.CounterOpts{Name: "limited_total", Help: "calls that passed the limit"})
+	limiter := network.MakeJrpcRequestDurationLimiter(
+		func(ctx context.Context, _ *jrpc2.Request) (any, error) {
+			return pool.GetPreflight(ctx, testSimulation(t, protocol.FormatJSON))
+		},
+		new(sync.WaitGroup), time.Second, time.Second, nil, limited, nil,
+	)
+	_, err := limiter.Handle(t.Context(), nil)
+	require.Equal(t, network.ErrRequestExceededProcessingLimitThreshold, err)
+	var counted dto.Metric
+	require.NoError(t, limited.Write(&counted))
+	assert.InDelta(t, 1, counted.GetCounter().GetValue(), 0)
 }
 
 // A caller that stops waiting does not end its simulation, so leaving cannot

@@ -2,6 +2,7 @@ package jsonrpc
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 )
 
 // A client disconnect cancels the handler context, except for sendTransaction,
@@ -198,4 +200,18 @@ func TestNewHandler_RegistersTheLimiterMetrics(t *testing.T) {
 		prefix + "get_health_execution_threshold_warning",
 		prefix + "get_health_execution_threshold_limit",
 	}, names)
+}
+
+// The request metric labels an error with its JSON-RPC code, or as "error"
+// when it has none.
+func TestDecorateHandlersLabelsErrors(t *testing.T) {
+	logger, logs := testLogger()
+	h := decorateHandlers(host.MakeNoOpDaemon(), logger, handler.Map{
+		"plain": handler.New(func(context.Context) (any, error) { return nil, errors.New("boom") }),
+		"coded": handler.New(func(context.Context) (any, error) { return nil, network.ErrPreflightQueueFull }),
+	})
+	for method, want := range map[string]string{"plain": "error", "coded": "error_code__32004"} {
+		_, _ = h[method](t.Context(), (&jrpc2.ParsedRequest{ID: "1", Method: method}).ToRequest())
+		assert.Equal(t, want, logs.LastEntry().Data["status"], method)
+	}
 }
