@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [v30.0.1](https://github.com/stellar/stellar-rpc/compare/v30.0.0...v30.0.1)
+
 ### Breaking Changes
 * JSON-RPC batches with more than `MAX_REQUEST_BATCH_SIZE` calls (default 10) are now rejected with one error, and none of their calls run.
 * `simulateTransaction` error strings no longer include the event log or a backtrace. They now hold only the host error, such as `HostError: Error(WasmVm, MissingValue)`. The diagnostic events are still returned in the `events` field when `--preflight-enable-debug` is on.
@@ -15,6 +17,7 @@
 * `sendTransaction` with `xdrFormat: json` no longer fails with `couldn't decode events` when stellar-core rejects a classic transaction. It now returns the error result, as the base64 format already did.
 * `getLedgerEntries` no longer fails with a 404 error just after a ledger closes. Ledger entry reads for `getLedgerEntries` and `simulateTransaction` now wait for stellar-core's query server to reach the ledger of the read.
 * A failed ledger entry fetch now fails `simulateTransaction` instead of simulating as if the entry were missing, which could return a wrong result that looked successful.
+* rpcv1 ingests a ledger whatever the size of its meta. A ledger whose meta was larger than 256 MiB stopped ingestion, and SQLite's 1 GB blob limit would have stopped it at the first ledger over that size.
 
 ### Changed
 * The memory a node holds in responses waiting to be written is now capped (rpcv1: `MAX_TOTAL_RESPONSE_BYTES`, default 2 GiB; rpcv2: `[service].max_total_response_bytes`, default 4 GiB; `0` means no limit). At the cap, a response over 4 KiB fails with `-32098`, as a call to a full method queue does, and a response larger than the cap always fails, with a message to request fewer items. The `global_total_response_bytes_limit` counter counts those failures.

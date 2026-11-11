@@ -46,6 +46,14 @@ case "${1:-}" in
     file=$RUNNER_TEMP/internal-go-modules.gitconfig
     write_gitconfig "$file" "${INTERNAL_GO_MODULES_TOKEN:?}"
     git config --global --add include.path "$file"
+    # git can answer "Repository not found" for several seconds after the token is
+    # created, so wait until it can read the internal repo.
+    tries=0
+    until git ls-remote -q "$internal" HEAD > /dev/null; do
+      tries=$((tries + 1))
+      [ "$tries" -lt 6 ] || { echo "The token still can't read $internal." >&2; exit 1; }
+      sleep $((1 << tries))
+    done
     echo "GONOSUMDB=${GONOSUMDB:+$GONOSUMDB,}$module" >> "$GITHUB_ENV"
     echo "gitconfig=$file" >> "$GITHUB_OUTPUT"
     ;;
