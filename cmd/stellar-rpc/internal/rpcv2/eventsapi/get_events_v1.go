@@ -91,7 +91,7 @@ func getEventsV1(
 	// An end at or below the start is legal v1 input and an empty window.
 	// Served here: the pager's scopes are inclusive and never inverted.
 	if endLedger <= minLedger {
-		return v1Response(nil, endLedger, limit, lr), nil
+		return v1Response(nil, endLedger, limit, false, lr), nil
 	}
 	maxLedger := endLedger - 1
 	scope := query.EventScope{MinLedger: minLedger, MaxLedger: &maxLedger, Filters: filters}
@@ -125,15 +125,11 @@ func getEventsV1(
 			Message: "getEvents: the scan stopped before the request's window was covered",
 		}
 	}
-	events := make([]protocol.EventInfo, 0, len(page.Events))
-	for i := range page.Events {
-		info, err := eventInfo(&page.Events[i], req.Format)
-		if err != nil {
-			return zero, fmt.Errorf("could not parse event: %w", err)
-		}
-		events = append(events, info)
+	events, err := eventInfos(page.Events, req.Format, limits.MaxResponseBytes)
+	if err != nil {
+		return zero, fmt.Errorf("could not parse event: %w", err)
 	}
-	return v1Response(events, endLedger, limit, lr), nil
+	return v1Response(events, endLedger, limit, len(events) < len(page.Events), lr), nil
 }
 
 // v1ResumePoint maps the request's resolved start onto where the walk
@@ -158,14 +154,14 @@ func v1ResumePoint(start protocol.Cursor, fromCursor bool) (uint32, *query.Event
 	}
 }
 
-// v1Response mints the cursor the v1 way: a page that fills its limit hands
-// back its last event's id; a short page hands back the end of the scanned
-// window, so the next pull continues past it.
+// v1Response mints the cursor the v1 way: a page that fills its limit or is cut
+// at MaxResponseBytes hands back its last event's id; a short page hands back
+// the end of the scanned window, so the next pull continues past it.
 func v1Response(
-	events []protocol.EventInfo, endLedger uint32, limit uint, lr store.LedgerRange,
+	events []protocol.EventInfo, endLedger uint32, limit uint, cut bool, lr store.LedgerRange,
 ) protocol.GetEventsResponse {
 	var cursor string
-	if len(events) > 0 && uint(len(events)) == limit {
+	if len(events) > 0 && (cut || uint(len(events)) == limit) {
 		cursor = events[len(events)-1].ID
 	} else {
 		windowEnd := protocol.MaxCursor

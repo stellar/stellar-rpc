@@ -76,8 +76,9 @@ type ServiceConfig struct {
 	// an xdrFormat "json" response. A larger value fails the request.
 	MaxJSONConversionBytes *uint `toml:"max_json_conversion_bytes"`
 	// MaxResponseBytes is the most XDR or JSON one response may carry.
-	// getLedgerEntries fails a larger response; getLedgers and getTransactions
-	// end the page early. Zero, the default, means no limit.
+	// getLedgerEntries fails a larger response; getLedgers, getTransactions,
+	// getEvents and queryEvents end the page early. Zero, the default, means
+	// no limit.
 	MaxResponseBytes *uint `toml:"max_response_bytes"`
 
 	FeeStats  FeeStatsConfig  `toml:"fee_stats"`

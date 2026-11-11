@@ -93,8 +93,9 @@ func buildHandlerSpecs(cfg config.Config, p handlerParams) []jsonrpc.HandlerSpec
 			FeeStats:          p.feeWindows,
 
 			GetEventsHandler: eventsapi.NewV1Handler(eventsapi.Limits{
-				MaxLimit:     deref(m.GetEvents.MaxItemsPerResponse),
-				DefaultLimit: deref(m.GetEvents.DefaultItemsPerResponse),
+				MaxLimit:         deref(m.GetEvents.MaxItemsPerResponse),
+				DefaultLimit:     deref(m.GetEvents.DefaultItemsPerResponse),
+				MaxResponseBytes: deref(cfg.Service.MaxResponseBytes),
 			}, p.logger),
 
 			// No DataStoreLedgerReader: getLedgers can fall back to a bulk
@@ -116,8 +117,9 @@ func buildHandlerSpecs(cfg config.Config, p handlerParams) []jsonrpc.HandlerSpec
 		MethodName: protocol.QueryEventsMethodName,
 		Handler: eventsapi.NewQueryEventsHandler(eventsapi.QueryEventsLimits{
 			Limits: eventsapi.Limits{
-				MaxLimit:     deref(m.QueryEvents.MaxItemsPerResponse),
-				DefaultLimit: deref(m.QueryEvents.DefaultItemsPerResponse),
+				MaxLimit:         deref(m.QueryEvents.MaxItemsPerResponse),
+				DefaultLimit:     deref(m.QueryEvents.DefaultItemsPerResponse),
+				MaxResponseBytes: deref(cfg.Service.MaxResponseBytes),
 			},
 			TermBudget: uint32(min(deref(m.QueryEvents.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
 		}, p.logger),
