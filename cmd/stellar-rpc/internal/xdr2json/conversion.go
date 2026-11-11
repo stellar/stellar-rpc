@@ -156,7 +156,7 @@ const maxJSONInputLen = 32 * 1024 * 1024
 // ConvertBytes produces, and returns the value's XDR byte encoding. Unlike
 // ConvertBytes, empty input is an error: it is not valid JSON. Inputs over
 // 32 MiB are rejected, and serde_json's recursion limit caps container
-// nesting at 63 levels, below the 500 the read direction allows, so the
+// nesting at 63 levels, below the 1500 the read direction allows, so the
 // deepest protocol-legal values only convert from their base64 form.
 func ConvertJSON(xdr any, js json.RawMessage) ([]byte, error) {
 	// Rejecting empty input here also keeps C.CBytes below from making a
