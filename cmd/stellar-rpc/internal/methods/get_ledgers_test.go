@@ -42,6 +42,19 @@ func setupTestDB(t *testing.T, numLedgers int) *sqlitedb.DB {
 	return testDB
 }
 
+// poolStub is a ResponsePool with room for so many bytes.
+type poolStub struct{ room int64 }
+
+var errPoolStubFull = errors.New("pool full")
+
+func (p *poolStub) Take(n int64) error {
+	if n > p.room {
+		return errPoolStubFull
+	}
+	p.room -= n
+	return nil
+}
+
 func TestGetLedgers_DefaultLimit(t *testing.T) {
 	testDB := setupTestDB(t, 50)
 	handler := ledgersHandler{
@@ -79,6 +92,16 @@ func TestGetLedgers_DefaultLimit(t *testing.T) {
 		assert.Len(t, page.Ledgers, 2)
 		assert.Equal(t, "2", page.Cursor)
 	}
+
+	// The pool bounds a base64 page before it is rendered: room for only one
+	// ledger fails the call.
+	request.Format = protocol.FormatBase64
+	handler.maxResponseBytes = 0
+	page, err := handler.getLedgers(t.Context(), request)
+	require.NoError(t, err)
+	pool := &poolStub{room: int64(len(page.Ledgers[0].LedgerMetadata))}
+	_, err = handler.getLedgers(WithResponsePool(t.Context(), pool), request)
+	require.ErrorIs(t, err, errPoolStubFull)
 }
 
 func TestGetLedgers_CustomLimit(t *testing.T) {

@@ -209,6 +209,15 @@ func (h ledgersHandler) fetchLedgers(
 
 	// appendLedger renders one ledger's raw LedgerCloseMeta into the page if it fits
 	appendLedger := func(seq uint32, raw []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if format != protocol.FormatJSON {
+			// Base64 is held until the bridge writes it: take its bytes before encoding.
+			if err := TakeResponseBytes(ctx, base64.StdEncoding.EncodedLen(len(raw))); err != nil {
+				return err
+			}
+		}
 		info, err := parseLedgerInfo(raw, format)
 		if err != nil {
 			return &jrpc2.Error{

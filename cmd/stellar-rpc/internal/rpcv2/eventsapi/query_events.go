@@ -170,7 +170,7 @@ func serve(
 	if err != nil {
 		return protocol.QueryEventsResponse{}, err
 	}
-	events, err := eventInfos(page.Events, req.Format, limits.MaxResponseBytes)
+	events, err := eventInfos(ctx, page.Events, req.Format, limits.MaxResponseBytes)
 	if err != nil {
 		return protocol.QueryEventsResponse{}, err
 	}
@@ -465,10 +465,15 @@ func responseScanStatus(s query.ScanStatus) string {
 
 // eventInfos converts events in order, stopping before one that would take the
 // page past maxResponseBytes. The first always fits.
-func eventInfos(events []event.Payload, format string, maxResponseBytes uint) ([]protocol.EventInfo, error) {
+func eventInfos(
+	ctx context.Context, events []event.Payload, format string, maxResponseBytes uint,
+) ([]protocol.EventInfo, error) {
 	infos := make([]protocol.EventInfo, 0, len(events))
 	budget := methods.PageBudget{Limit: methods.ByteLimit(maxResponseBytes)}
 	for i := range events {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		info, err := eventInfo(&events[i], format)
 		if err != nil {
 			return nil, err

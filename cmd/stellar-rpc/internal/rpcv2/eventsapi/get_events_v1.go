@@ -125,7 +125,7 @@ func getEventsV1(
 			Message: "getEvents: the scan stopped before the request's window was covered",
 		}
 	}
-	events, err := eventInfos(page.Events, req.Format, limits.MaxResponseBytes)
+	events, err := eventInfos(ctx, page.Events, req.Format, limits.MaxResponseBytes)
 	if err != nil {
 		return zero, fmt.Errorf("could not parse event: %w", err)
 	}

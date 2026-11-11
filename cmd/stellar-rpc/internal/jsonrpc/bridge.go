@@ -24,25 +24,32 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/util"
 )
 
 const contentTypeJSON = "application/json"
 
-// A response gets responseChunkTimeout for each responseChunkSize bytes, so a
-// client that stops reading is dropped without capping how long a large
-// response may take.
+// A response gets responseWriteTime to be written, plus responseWriteTimePerMiB
+// for each MiB of it, so a client that stops reading is dropped and no
+// response is held for long.
 const (
-	responseChunkSize    = 1 << 20
-	responseChunkTimeout = 30 * time.Second
+	responseWriteTimePerMiB = time.Second
+	mib                     = 1 << 20
 )
 
+// A response up to smallResponseBytes is held outside the pool, so getHealth
+// and the like still answer while the pool is full.
+const smallResponseBytes = 4 << 10
+
 var (
-	errBridgeClosed = errors.New("the bridge is closed")
-	errBusy         = errors.New("too many requests are running")
-	errEmptyMethod  = &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: "empty method name"}
-	errNoSuchMethod = &jrpc2.Error{Code: jrpc2.MethodNotFound, Message: jrpc2.MethodNotFound.String()}
+	errBridgeClosed     = errors.New("the bridge is closed")
+	errBusy             = errors.New("too many requests are running")
+	errResponsePoolFull = errors.New("the node holds its most response bytes already; retry later")
+	errResponseTooLarge = errors.New("the response is larger than the node may hold; request fewer items")
+	errEmptyMethod      = &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: "empty method name"}
+	errNoSuchMethod     = &jrpc2.Error{Code: jrpc2.MethodNotFound, Message: jrpc2.MethodNotFound.String()}
 )
 
 // Bridge serves JSON-RPC 2.0 over HTTP POST by calling an Assigner's handlers
@@ -55,6 +62,9 @@ type Bridge struct {
 	// buffered to be swapped for a 504.
 	methods     jrpc2.Assigner
 	sem         *semaphore.Weighted // bounds the handlers running at once, as jrpc2.Server does
+	pool        *semaphore.Weighted // bounds the bytes of the responses held before they are written; nil is no bound
+	poolBytes   int64               // the pool's size
+	rejections  interface{ Inc() }  // counts the responses the pool had no room for
 	maxHandlers int
 	// unslotted are the methods that bound their own concurrency and run
 	// without one of sem's slots.
@@ -133,10 +143,11 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := b.limits.bound(r.Context())
 	defer cancel()
 	batch, rsps, err := b.serve(ctx, r)
+	defer b.release(rsps) // written, or dropped for a 504
 	// The handlers can outlast the server's WriteTimeout, so the response gets
-	// its own write time, which write extends as it goes.
+	// its own write time, which write sets from its size.
 	rc := http.NewResponseController(w)
-	_ = rc.SetWriteDeadline(time.Now().Add(responseChunkTimeout))
+	_ = rc.SetWriteDeadline(time.Now().Add(responseWriteTime))
 	if errors.Is(err, errBusy) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
@@ -296,16 +307,17 @@ func (b *Bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*respo
 			if slotted {
 				defer b.sem.Release(1)
 			}
+			share := &poolShare{bridge: b}
 			defer func() {
 				if p := recover(); p != nil { // answer just this call, as the duration limiter does
 					for _, line := range util.CallStack(p, pr.Method, "(*Bridge).run.func", 8) {
 						b.limits.logger.Warn(line)
 					}
-					rsps[i] = respond(pr, nil, network.ErrFailToProcessDueToInternalIssue)
+					rsps[i] = b.reserve(pr, respond(pr, nil, network.ErrFailToProcessDueToInternalIssue), share)
 				}
 			}()
-			v, err := method(ctx, pr.ToRequest())
-			rsps[i] = respond(pr, v, err)
+			v, err := method(methods.WithResponsePool(ctx, share), pr.ToRequest())
+			rsps[i] = b.reserve(pr, respond(pr, v, err), share)
 		}
 		if i == len(reqs)-1 {
 			call() // the last request runs here, as in jrpc2.Server
@@ -315,6 +327,79 @@ func (b *Bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*respo
 	}
 	wg.Wait()
 	return slices.DeleteFunc(rsps, func(r *response) bool { return r == nil }), nil
+}
+
+// poolShare is one call's share of the pool: what its handler took before
+// rendering, which reserve settles against the response.
+type poolShare struct {
+	bridge *Bridge
+	taken  atomic.Int64
+}
+
+// Take implements methods.ResponsePool. An item up to smallResponseBytes is
+// not taken: rendering it holds almost nothing, and reserve still charges a
+// response over that size in full.
+func (s *poolShare) Take(n int64) error {
+	if s.bridge.pool == nil || n <= smallResponseBytes {
+		return nil
+	}
+	if !s.bridge.pool.TryAcquire(n) {
+		return s.bridge.noRoom(s.taken.Load() + n)
+	}
+	s.taken.Add(n)
+	return nil
+}
+
+// setPool bounds the response bytes b holds at once at n.
+func (b *Bridge) setPool(n int64) {
+	b.pool, b.poolBytes = semaphore.NewWeighted(n), n
+}
+
+// noRoom counts a rejected call and returns its error. need is all the bytes the call asked for.
+func (b *Bridge) noRoom(need int64) error {
+	b.rejections.Inc()
+	if need > b.poolBytes {
+		return errResponseTooLarge
+	}
+	return errResponsePoolFull
+}
+
+// reserve settles rsp's result bytes with the pool, while the call still
+// holds its CPU slot: it takes what the handler did not, returns what the
+// handler took beyond them, or answers pr with noRoom's error.
+func (b *Bridge) reserve(pr *jrpc2.ParsedRequest, rsp *response, share *poolShare) *response {
+	if b.pool == nil {
+		return rsp
+	}
+	taken := share.taken.Load()
+	var n int64
+	if rsp != nil && rsp.err == nil && len(rsp.result) > smallResponseBytes {
+		n = int64(len(rsp.result))
+	}
+	switch {
+	case n > taken:
+		if !b.pool.TryAcquire(n - taken) {
+			if taken > 0 {
+				b.pool.Release(taken)
+			}
+			return respond(pr, nil, b.noRoom(n))
+		}
+	case n < taken:
+		b.pool.Release(taken - n)
+	}
+	if n > 0 {
+		rsp.pooled = n
+	}
+	return rsp
+}
+
+// release returns to the pool the bytes rsps took from it.
+func (b *Bridge) release(rsps []*response) {
+	for _, r := range rsps {
+		if r.pooled > 0 {
+			b.pool.Release(r.pooled)
+		}
+	}
 }
 
 // route returns pr's handler, or else the response pr gets without one:
@@ -369,6 +454,7 @@ type response struct {
 	id     string // the request ID as sent, "" for null
 	result json.RawMessage
 	err    *jrpc2.Error
+	pooled int64 // bytes of result taken from the pool
 }
 
 // write writes rsps as the body of a 200 response, as an array if batch is
@@ -402,32 +488,27 @@ func write(w http.ResponseWriter, rc *http.ResponseController, batch bool, rsps 
 	for _, p := range parts {
 		n += len(p)
 	}
+	_ = rc.SetWriteDeadline(time.Now().Add(writeTime(n)))
 	w.Header().Set("Content-Type", contentTypeJSON)
 	w.Header().Set("Content-Length", strconv.Itoa(n))
 	w.WriteHeader(http.StatusOK)
-	writeChunked(w, rc, parts)
+	writeParts(w, parts)
 	return nil
 }
 
-// writeChunked writes parts to w. The deadline the caller just set on rc covers
-// the first responseChunkSize bytes, and writeChunked moves it before each
-// responseChunkSize bytes after that. It stops at the first write error, which
-// means the client is gone.
-func writeChunked(w io.Writer, rc *http.ResponseController, parts [][]byte) {
-	left := responseChunkSize // bytes the current deadline still covers
+// writeParts writes parts to w, stopping at the first write error, which means
+// the client is gone.
+func writeParts(w io.Writer, parts [][]byte) {
 	for _, p := range parts {
-		for len(p) > 0 {
-			if left == 0 {
-				_ = rc.SetWriteDeadline(time.Now().Add(responseChunkTimeout))
-				left = responseChunkSize
-			}
-			n := min(len(p), left)
-			if _, err := w.Write(p[:n]); err != nil {
-				return
-			}
-			p, left = p[n:], left-n
+		if _, err := w.Write(p); err != nil {
+			return
 		}
 	}
+}
+
+// writeTime is how long a response of n bytes may take to write.
+func writeTime(n int) time.Duration {
+	return responseWriteTime + time.Duration(n/mib)*responseWriteTimePerMiB
 }
 
 // escapeID HTML-escapes a request ID before it is echoed, as re-encoding the

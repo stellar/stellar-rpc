@@ -86,7 +86,7 @@ func missingLedger(seq uint32) *jrpc2.Error {
 // SDK's zero-copy views. Every byte field below aliases raw until it is
 // base64- or JSON-encoded into txns; nothing that aliases raw outlives this call.
 func (h transactionsRPCHandler) processTransactionsInLedger(
-	raw []byte, start toid.ID,
+	ctx context.Context, raw []byte, start toid.ID,
 	txns *[]protocol.TransactionInfo, limit uint, budget *PageBudget,
 	format string,
 ) (*toid.ID, bool, error) {
@@ -129,9 +129,18 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 	}
 
 	for i, txView := range txViews {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 		cursor.TransactionOrder = int32(startTxIdx + i)
 
 		tx := store.ParseTransactionView(txView)
+		if format != protocol.FormatJSON {
+			// Base64 is held until the bridge writes it: take its bytes before encoding.
+			if err := TakeResponseBytes(ctx, transactionXDRLen(tx)); err != nil {
+				return nil, false, err
+			}
+		}
 		txInfo, ferr := transactionInfo(tx, format)
 		if ferr != nil {
 			return nil, false, &jrpc2.Error{
@@ -267,7 +276,7 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 		if entry.Sequence != next {
 			return protocol.GetTransactionsResponse{}, missingLedger(next)
 		}
-		cursor, done, err = h.processTransactionsInLedger(entry.Raw, start, &txns, limit, &budget, request.Format)
+		cursor, done, err = h.processTransactionsInLedger(ctx, entry.Raw, start, &txns, limit, &budget, request.Format)
 		if err != nil {
 			return protocol.GetTransactionsResponse{}, err
 		}

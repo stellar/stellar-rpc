@@ -25,6 +25,10 @@ To ensure the smooth operation of stellar-rpc, several key metrics should be mon
    `<method_name>_execution_threshold_warning` counter and the execution limits using the `<method_name>_execution_threshold_limit` counter. These metrics help operators identify
    slow-performing methods and set execution limits to prevent resource exhaustion.
 
+5. **Total Response Bytes**: A node holds at most `max_total_response_bytes` of built responses in memory while they wait to be written. While it does, a response over 4 KiB fails with
+   error `-32098`, and the `global_total_response_bytes_limit` counter tracks those failures. If it rises, clients are requesting large responses faster than they read them, or the
+   limit is too low for the node's traffic.
+
 ## Best Practices
 
 Follow these best practices to maintain a stable and performant stellar-rpc deployment:

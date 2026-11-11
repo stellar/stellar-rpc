@@ -31,8 +31,8 @@ const responseWriteTime = 30 * time.Second // to deliver a response after the ex
 
 // WriteTimeout is the http.Server write timeout both daemons set on their
 // serving listeners: the request execution limit plus responseWriteTime, or 0
-// (no timeout) when the sum would overflow. The bridge moves the deadline
-// forward as it writes a response.
+// (no timeout) when the sum would overflow. The bridge gives each response its
+// own deadline, from its size.
 func WriteTimeout(maxExecution time.Duration) time.Duration {
 	if maxExecution > network.RequestDurationLimiterNoLimit-responseWriteTime {
 		return 0

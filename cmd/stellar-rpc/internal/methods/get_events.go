@@ -202,6 +202,9 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	var eventViewScanFunction store.ViewScanFunction = func(
 		eventView xdr.DiagnosticEventView, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
 	) (bool, error) {
+		if procErr = ctx.Err(); procErr != nil {
+			return false, procErr
+		}
 		var event xdr.ContractEventView
 		if event, procErr = eventView.Event(); procErr != nil {
 			return false, procErr

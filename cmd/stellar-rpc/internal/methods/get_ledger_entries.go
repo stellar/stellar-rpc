@@ -94,6 +94,9 @@ func newGetLedgerEntriesHandlerFromGetter(
 		ledgerEntryResults := make([]protocol.LedgerEntryResult, 0, len(ledgerKeys))
 		responseBytes := 0
 		for _, ledgerKeyAndEntry := range ledgerKeysAndEntries {
+			if err := ctx.Err(); err != nil {
+				return protocol.GetLedgerEntriesResponse{}, err
+			}
 			result, err := ledgerKeyEntryToResult(ledgerKeyAndEntry, request.Format)
 			if err != nil {
 				return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{

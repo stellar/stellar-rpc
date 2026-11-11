@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -49,7 +48,7 @@ func TestWrapWithLimiters_ClientDisconnect(t *testing.T) {
 				},
 				QueueLimit:           1,
 				RequestDurationLimit: time.Minute,
-			}, host.MakeNoOpDaemon(), log.DefaultLogger, new(sync.WaitGroup))
+			}, host.MakeNoOpDaemon(), log.DefaultLogger)
 
 			req := (&jrpc2.ParsedRequest{ID: "1", Method: test.method}).ToRequest()
 			_, err := h(ctx, req)
@@ -196,6 +195,7 @@ func TestNewHandler_RegistersTheLimiterMetrics(t *testing.T) {
 		prefix + "global_inflight_requests",
 		prefix + "global_request_execution_duration_threshold_warning",
 		prefix + "global_request_execution_duration_threshold_limit",
+		prefix + "global_total_response_bytes_limit",
 		prefix + "get_health_inflight_requests",
 		prefix + "get_health_execution_threshold_warning",
 		prefix + "get_health_execution_threshold_limit",

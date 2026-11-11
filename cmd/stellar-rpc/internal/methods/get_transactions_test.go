@@ -89,6 +89,15 @@ func TestGetTransactions_DefaultLimit(t *testing.T) { //nolint:dupl
 	require.NoError(t, err)
 	assert.Equal(t, uint32(2), response.Transactions[0].Ledger)
 	assert.Equal(t, int32(1), response.Transactions[0].ApplicationOrder)
+
+	// The pool bounds a base64 page before it is rendered: room for only one
+	// transaction fails the call.
+	handler.maxResponseBytes = 0
+	response, err = handler.getTransactionsByLedgerSequence(context.TODO(), request)
+	require.NoError(t, err)
+	pool := &poolStub{room: int64(transactionInfoBytes(response.Transactions[0]))}
+	_, err = handler.getTransactionsByLedgerSequence(WithResponsePool(context.TODO(), pool), request)
+	require.ErrorIs(t, err, errPoolStubFull)
 }
 
 func TestGetTransactions_DefaultLimitExceedsLatestLedger(t *testing.T) { //nolint:dupl

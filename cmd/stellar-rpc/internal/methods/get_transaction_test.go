@@ -65,6 +65,12 @@ func TestGetTransaction(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	// The pool bounds a base64 transaction before it is rendered.
+	_, err = GetTransaction(WithResponsePool(ctx, &poolStub{}), log, store, ledgerReader,
+		protocol.GetTransactionRequest{Hash: hash, Format: ""},
+	)
+	require.ErrorIs(t, err, errPoolStubFull)
+
 	expectedTxResult, err := xdr.MarshalBase64(meta.V2.TxProcessing[0].Result.Result)
 	require.NoError(t, err)
 	expectedEnvelope, err := xdr.MarshalBase64(txEnvelope(1))

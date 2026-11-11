@@ -462,7 +462,7 @@ func TestDurationLimiterAnswersSimulationThatRanOutOfTime(t *testing.T) {
 		func(ctx context.Context, _ *jrpc2.Request) (any, error) {
 			return pool.GetPreflight(ctx, testSimulation(t, protocol.FormatJSON))
 		},
-		new(sync.WaitGroup), time.Second, time.Second, nil, limited, nil,
+		time.Second, time.Second, nil, limited, nil,
 	)
 	_, err := limiter.Handle(t.Context(), nil)
 	require.Equal(t, network.ErrRequestExceededProcessingLimitThreshold, err)

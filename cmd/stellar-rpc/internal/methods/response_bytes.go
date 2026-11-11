@@ -1,11 +1,14 @@
 package methods
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"math"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
@@ -31,6 +34,45 @@ func (b *PageBudget) Fits(n int) bool {
 	}
 	b.used += n
 	return true
+}
+
+// ResponsePool is a request's share of the bridge's response byte pool. Take
+// asks it for n more bytes, which a renderer then holds until the response
+// is written, or returns the pool's error when there is no room.
+type ResponsePool interface{ Take(n int64) error }
+
+type responsePoolKey struct{}
+
+// WithResponsePool returns ctx carrying the request's share of the pool.
+func WithResponsePool(ctx context.Context, pool ResponsePool) context.Context {
+	return context.WithValue(ctx, responsePoolKey{}, pool)
+}
+
+// TakeResponseBytes takes n bytes of the response from the request's pool
+// share, if ctx carries one, or returns the pool's error when it has no room.
+func TakeResponseBytes(ctx context.Context, n int) error {
+	pool, ok := ctx.Value(responsePoolKey{}).(ResponsePool)
+	if !ok {
+		return nil
+	}
+	return pool.Take(int64(n))
+}
+
+// transactionXDRLen is the base64 size of tx's XDR fields in a response.
+func transactionXDRLen(tx store.Transaction) int {
+	n := len(tx.Result) + len(tx.Meta) + len(tx.Envelope)
+	for _, e := range tx.Events {
+		n += len(e)
+	}
+	for _, e := range tx.TransactionEvents {
+		n += len(e)
+	}
+	for _, op := range tx.ContractEvents {
+		for _, e := range op {
+			n += len(e)
+		}
+	}
+	return base64.StdEncoding.EncodedLen(n)
 }
 
 // xdrBytes is the size of base64 XDR in a response.

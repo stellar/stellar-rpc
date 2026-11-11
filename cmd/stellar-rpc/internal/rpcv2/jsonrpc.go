@@ -75,6 +75,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		GlobalDurationWarning: deref(cfg.Service.RequestExecutionWarningThreshold),
 		GlobalDurationLimit:   deref(cfg.Service.MaxRequestExecutionDuration),
 		MaxRequestBatchSize:   deref(cfg.Service.MaxRequestBatchSize),
+		MaxTotalResponseBytes: deref(cfg.Service.MaxTotalResponseBytes),
 	})
 }
 

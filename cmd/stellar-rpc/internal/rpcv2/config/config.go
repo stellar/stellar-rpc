@@ -80,6 +80,10 @@ type ServiceConfig struct {
 	// getEvents and queryEvents end the page early. Zero, the default, means
 	// no limit.
 	MaxResponseBytes *uint `toml:"max_response_bytes"`
+	// MaxTotalResponseBytes is the most bytes all responses may hold together
+	// before they are written. While they do, a larger response fails. Zero
+	// means no limit.
+	MaxTotalResponseBytes *uint `toml:"max_total_response_bytes"`
 
 	FeeStats  FeeStatsConfig  `toml:"fee_stats"`
 	Preflight PreflightConfig `toml:"preflight"`
@@ -451,6 +455,9 @@ const (
 	DefaultMaxJSONConversionBytes uint = 256 * 1024 * 1024
 	// DefaultMaxResponseBytes is no limit, as on v1.
 	DefaultMaxResponseBytes uint = 0
+	// DefaultMaxTotalResponseBytes is two DefaultMaxJSONConversionBytes per CPU
+	// slot on the node's minimum hardware: 8 vCPUs and 32 GiB, 8 GiB of it core's.
+	DefaultMaxTotalResponseBytes uint = 4 * 1024 * 1024 * 1024
 
 	// DefaultMethodQueueLimit and the three below it are the compiled
 	// per-method defaults — the last tier of the methods cascade.
@@ -628,6 +635,7 @@ func (cfg Config) WithDefaults() Config {
 	fillUint(&svc.MaxRequestBatchSize, DefaultMaxRequestBatchSize)
 	fillUint(&svc.MaxJSONConversionBytes, DefaultMaxJSONConversionBytes)
 	fillUint(&svc.MaxResponseBytes, DefaultMaxResponseBytes)
+	fillUint(&svc.MaxTotalResponseBytes, DefaultMaxTotalResponseBytes)
 	fillUint32(&svc.FeeStats.ClassicFeeWindowLedgers, DefaultClassicFeeWindowLedgers)
 	fillUint32(&svc.FeeStats.SorobanInclusionFeeWindowLedgers, DefaultSorobanInclusionFeeWindowLedgers)
 	fillUint(&svc.Preflight.WorkerCount, UsableCPUs())

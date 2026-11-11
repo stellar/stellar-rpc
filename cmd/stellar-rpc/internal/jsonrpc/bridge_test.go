@@ -26,6 +26,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/http/mutil"
 	"github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 )
 
@@ -201,14 +202,17 @@ func TestBridge_ParityWithJHTTP(t *testing.T) {
 	}
 }
 
-// windowRecorder records how many bytes are written under each write deadline.
+// windowRecorder records each write deadline and how many bytes are written
+// under it.
 type windowRecorder struct {
 	*httptest.ResponseRecorder
 
-	windows []int
+	deadlines []time.Time
+	windows   []int
 }
 
-func (r *windowRecorder) SetWriteDeadline(time.Time) error {
+func (r *windowRecorder) SetWriteDeadline(d time.Time) error {
+	r.deadlines = append(r.deadlines, d)
 	r.windows = append(r.windows, 0)
 	return nil
 }
@@ -221,20 +225,24 @@ func (r *windowRecorder) Write(b []byte) (int, error) {
 	return r.ResponseRecorder.Write(b)
 }
 
-// The bridge moves the write deadline before each responseChunkSize bytes of
-// a response, however the response is split into parts.
-func TestBridge_WriteSetsADeadlinePerChunk(t *testing.T) {
-	result := json.RawMessage(`"` + strings.Repeat("x", 2*responseChunkSize-1) + `"`)
+// A response is written under one deadline of its own, responseWriteTime plus
+// responseWriteTimePerMiB for each MiB of it.
+func TestBridge_WriteSetsOneDeadlinePerResponse(t *testing.T) {
+	result := json.RawMessage(`"` + strings.Repeat("x", 2*mib-1) + `"`)
 	b := newBridge(handler.Map{"big": handler.New(func(context.Context) (any, error) { return result, nil })},
 		testMaxBatchSize, unlimited)
 	t.Cleanup(b.Close)
 	rec := &windowRecorder{ResponseRecorder: httptest.NewRecorder()}
 
 	// The logging middleware wraps the writer, so the deadline has to reach through it.
+	before := time.Now()
 	b.ServeHTTP(mutil.WrapWriter(rec), newBridgeRequest(t, `{"jsonrpc":"2.0","id":1,"method":"big"}`))
 
 	require.Equal(t, `{"jsonrpc":"2.0","id":1,"result":`+string(result)+"}", rec.Body.String())
-	require.Equal(t, []int{responseChunkSize, responseChunkSize, rec.Body.Len() - 2*responseChunkSize}, rec.windows)
+	require.Equal(t, []int{0, rec.Body.Len()}, rec.windows) // the deadline for a 504, then the response's own
+	left := rec.deadlines[1].Sub(before)
+	require.GreaterOrEqual(t, left, responseWriteTime+2*responseWriteTimePerMiB)
+	require.Less(t, left, responseWriteTime+3*responseWriteTimePerMiB)
 }
 
 // A response gets its own write time however long the handlers ran, so a 504
@@ -253,6 +261,124 @@ func TestBridge_TimeoutResponseMovesTheWriteDeadline(t *testing.T) {
 
 	require.Equal(t, http.StatusGatewayTimeout, rec.Code)
 	require.Equal(t, []int{0}, rec.windows)
+}
+
+// The pool bounds the response bytes held before they are written: a result
+// the pool has no room for fails at once and is counted, a small one passes
+// it by, and the bytes return once the response is written.
+func TestBridge_ResponsePool(t *testing.T) {
+	result := json.RawMessage(`"` + strings.Repeat("x", 2*smallResponseBytes) + `"`)
+	b := newBridge(handler.Map{
+		"big":  handler.New(func(context.Context) (any, error) { return result, nil }),
+		"ping": handler.New(func(context.Context) (any, error) { return "pong", nil }),
+	}, testMaxBatchSize, unlimited)
+	t.Cleanup(b.Close)
+	const big = `{"jsonrpc":"2.0","id":1,"method":"big"}`
+
+	var rejections counter
+	b.rejections = &rejections
+	b.setPool(int64(len(result)) - 1)
+	require.Equal(t, `{"jsonrpc":"2.0","id":1,"error":{"code":-32098,"message":"`+errResponseTooLarge.Error()+`"}}`,
+		postBridge(t, b, big).Body.String())
+	require.EqualValues(t, 1, rejections.n.Load())
+	require.JSONEq(t, `{"jsonrpc":"2.0","id":1,"result":"pong"}`,
+		postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"ping"}`).Body.String())
+
+	b.setPool(int64(len(result)))
+	require.Equal(t, `{"jsonrpc":"2.0","id":1,"result":`+string(result)+"}", postBridge(t, b, big).Body.String())
+	require.True(t, b.pool.TryAcquire(int64(len(result))), "the pool was not released after the write")
+
+	// A batch takes the pool one response at a time: with room for one, one
+	// call passes and the other fails, and the batch returns what it took.
+	b.setPool(int64(len(result)))
+	body := postBridge(t, b, `[`+big+`,`+strings.Replace(big, `"id":1`, `"id":2`, 1)+`]`).Body.String()
+	require.Equal(t, 1, strings.Count(body, string(result)))
+	require.Equal(t, 1, strings.Count(body, errResponsePoolFull.Error()))
+	require.EqualValues(t, 2, rejections.n.Load())
+	require.True(t, b.pool.TryAcquire(int64(len(result))), "the pool was not released after the batch")
+}
+
+// A handler may take its response's bytes from the pool before rendering,
+// and reserve settles the difference: a short take is topped up, an over-take
+// and a failed call's take go back, a take the pool cannot fill fails the
+// call at once, and a small item is never taken, so it answers while the
+// pool is full.
+func TestBridge_ResponsePoolSettlesWhatTheHandlerTook(t *testing.T) {
+	result := json.RawMessage(`"` + strings.Repeat("x", 2*smallResponseBytes) + `"`)
+	var take int
+	var fail bool
+	b := newBridge(handler.Map{
+		"take": handler.New(func(ctx context.Context) (any, error) {
+			if err := methods.TakeResponseBytes(ctx, take); err != nil {
+				return nil, err
+			}
+			if fail {
+				return nil, &jrpc2.Error{Code: jrpc2.InternalError, Message: "boom"}
+			}
+			return result, nil
+		}),
+		"small": handler.New(func(ctx context.Context) (any, error) {
+			if err := methods.TakeResponseBytes(ctx, smallResponseBytes); err != nil {
+				return nil, err
+			}
+			return "pong", nil
+		}),
+	}, testMaxBatchSize, unlimited)
+	t.Cleanup(b.Close)
+	var rejections counter
+	b.rejections = &rejections
+	const call = `{"jsonrpc":"2.0","id":1,"method":"take"}`
+	served := `{"jsonrpc":"2.0","id":1,"result":` + string(result) + "}"
+	free := func(n int) {
+		t.Helper()
+		require.True(t, b.pool.TryAcquire(int64(n)), "the pool is short of %d bytes", n)
+		b.pool.Release(int64(n))
+	}
+
+	b.setPool(int64(len(result)))
+	take = len(result) / 2
+	require.Equal(t, served, postBridge(t, b, call).Body.String())
+	free(len(result))
+
+	take = 2 * len(result)
+	b.setPool(int64(take))
+	require.Equal(t, served, postBridge(t, b, call).Body.String())
+	free(take)
+
+	fail = true
+	require.Contains(t, postBridge(t, b, call).Body.String(), "boom")
+	free(take)
+	fail = false
+
+	b.setPool(int64(take) - 1)
+	require.Equal(t, `{"jsonrpc":"2.0","id":1,"error":{"code":-32098,"message":"`+errResponseTooLarge.Error()+`"}}`,
+		postBridge(t, b, call).Body.String())
+	require.EqualValues(t, 1, rejections.n.Load())
+	free(take - 1)
+
+	b.setPool(1)
+	require.JSONEq(t, `{"jsonrpc":"2.0","id":1,"result":"pong"}`,
+		postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"small"}`).Body.String())
+	require.EqualValues(t, 1, rejections.n.Load())
+}
+
+// A response dropped for a 504 returns its bytes to the pool, or the pool
+// would drain for good.
+func TestBridge_ResponsePoolReleasesADroppedResponse(t *testing.T) {
+	result := json.RawMessage(`"` + strings.Repeat("x", 2*smallResponseBytes) + `"`)
+	logger, _ := testLogger()
+	limits := durationLimits{limit: time.Second / 20, warnings: &counter{}, timeouts: &counter{}, logger: logger}
+	b := newBridge(handler.Map{"late": handler.New(func(ctx context.Context) (any, error) {
+		<-ctx.Done()
+		return result, nil // past the limit, ignoring the context
+	})}, testMaxBatchSize, limits)
+	t.Cleanup(b.Close)
+	b.setPool(int64(len(result)))
+
+	rec := postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"late"}`)
+
+	require.Equal(t, http.StatusGatewayTimeout, rec.Code)
+	require.True(t, b.pool.TryAcquire(int64(len(result))), "the pool was not released after the 504")
 }
 
 func newBridgeRequest(t *testing.T, body string) *http.Request {

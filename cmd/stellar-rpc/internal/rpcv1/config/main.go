@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"runtime"
 	"time"
@@ -62,6 +63,7 @@ type Config struct {
 	MaxRequestBatchSize                            uint
 	MaxJSONConversionBytes                         uint
 	MaxResponseBytes                               uint
+	MaxTotalResponseBytes                          uint64
 	RequestBacklogGetHealthQueueLimit              uint
 	RequestBacklogGetEventsQueueLimit              uint
 	RequestBacklogGetNetworkQueueLimit             uint
@@ -233,5 +235,12 @@ func (cfg *Config) loadConfigPath() error {
 }
 
 func (cfg *Config) Validate() error {
-	return cfg.options().Validate()
+	if err := cfg.options().Validate(); err != nil {
+		return err
+	}
+	total := cfg.MaxTotalResponseBytes
+	if total > 0 && total < uint64(max(cfg.MaxResponseBytes, cfg.MaxJSONConversionBytes)) {
+		return errors.New("max-total-response-bytes must be at least max-response-bytes and max-json-conversion-bytes")
+	}
+	return nil
 }

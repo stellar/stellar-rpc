@@ -65,6 +65,7 @@ Every TOML leaf is also settable from the command line:
 | `max_request_batch_size` | uint | `10` | Most calls in one JSON-RPC batch; a larger batch gets one error and none of its calls run. |
 | `max_json_conversion_bytes` | uint | `268435456` (256 MiB) | Most JSON one XDR value may convert to with `xdrFormat: "json"`; a larger value fails the request. |
 | `max_response_bytes` | uint | `0` | Most XDR or JSON one response may carry; `0` = no limit. getLedgerEntries fails a larger response; getLedgers, getTransactions, getEvents and queryEvents end the page early. |
+| `max_total_response_bytes` | uint | `4294967296` (4 GiB) | Most bytes all responses may hold together before they are written; while they do, a response over 4 KiB fails. `0` = no limit; otherwise at least `max_response_bytes` and `max_json_conversion_bytes`. |
 
 **[service.fee_stats]** — sizes (in ledgers, 1..1000) of the in-memory fee windows behind getFeeStats; they are fed by live ingestion (#881), and size ingestion-time memory rather than request handling, hence not method config:
 

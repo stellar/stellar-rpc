@@ -173,6 +173,13 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"max_json_conversion_bytes",
 		},
 		{
+			"max_total_response_bytes under max_json_conversion_bytes",
+			func(c *config.Config) {
+				c.Service.MaxTotalResponseBytes = uintPtr(*c.Service.MaxJSONConversionBytes - 1)
+			},
+			"max_total_response_bytes",
+		},
+		{
 			"zero per-method queue_limit",
 			func(c *config.Config) { c.Service.Methods.GetLedgers.QueueLimit = uintPtr(0) },
 			"[service.methods.getLedgers].queue_limit",

@@ -459,6 +459,12 @@ func (cfg *Config) options() Options {
 			DefaultValue: uint(0),
 		},
 		{
+			Name:         "max-total-response-bytes",
+			Usage:        "Maximum bytes of responses held in memory at once, before they are written; while held, a larger response fails (0 means no limit)",
+			ConfigKey:    &cfg.MaxTotalResponseBytes,
+			DefaultValue: uint64(2 * 1024 * 1024 * 1024),
+		},
+		{
 			TomlKey:      strutils.KebabToConstantCase("request-backlog-get-health-queue-limit"),
 			Usage:        "Maximum number of outstanding GetHealth requests",
 			ConfigKey:    &cfg.RequestBacklogGetHealthQueueLimit,

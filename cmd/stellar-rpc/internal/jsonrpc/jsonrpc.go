@@ -10,10 +10,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -46,15 +46,13 @@ const (
 type Handler struct {
 	http.Handler
 
-	bridge   *Bridge
-	inflight *sync.WaitGroup
+	bridge *Bridge
 }
 
 // Close stops accepting JSON-RPC requests, cancels those in flight and waits
 // for their handlers to return, so none outlives the stores closed after it.
 func (h Handler) Close() {
 	h.bridge.Close()
-	h.inflight.Wait() // handlers a duration limiter stopped waiting for
 }
 
 // HandlerSpec describes one JSON-RPC method: its handler plus the per-method
@@ -81,6 +79,10 @@ type Params struct {
 	GlobalDurationWarning time.Duration
 	GlobalDurationLimit   time.Duration
 	MaxRequestBatchSize   uint // the most calls a JSON-RPC batch may hold
+	// MaxTotalResponseBytes is the most bytes all responses may hold together
+	// before they are written. While they do, a larger response fails. Zero
+	// is no bound.
+	MaxTotalResponseBytes uint
 }
 
 // register registers c with daemon's registry and returns it, or returns the
@@ -193,7 +195,7 @@ func toSnakeCase(s string) string {
 
 // wrapWithLimiters applies the per-method backlog-queue and request-duration
 // limiters (and their metrics) around a single method handler.
-func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry, inflight *sync.WaitGroup) jrpc2.Handler {
+func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry) jrpc2.Handler {
 	longName := toSnakeCase(spec.MethodName)
 	queueLimiterGaugeName := longName + "_inflight_requests"
 	queueLimiterGaugeHelp := "Number of concurrenty in-flight " + spec.MethodName + " requests"
@@ -230,7 +232,6 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry, i
 	requestDurationWarn := spec.RequestDurationLimit / warningThresholdDenominator
 	durationLimiter := network.MakeJrpcRequestDurationLimiter(
 		queueLimiter.Handle,
-		inflight,
 		requestDurationWarn,
 		spec.RequestDurationLimit,
 		requestDurationWarnCounter,
@@ -251,9 +252,8 @@ func wrapWithLimiters(spec HandlerSpec, daemon host.Daemon, logger *log.Entry, i
 func NewHandler(params Params) Handler {
 	handlersMap := handler.Map{}
 	unslotted := map[string]bool{}
-	inflight := new(sync.WaitGroup)
 	for _, spec := range params.Specs {
-		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger, inflight)
+		handlersMap[spec.MethodName] = wrapWithLimiters(spec, params.Daemon, params.Logger)
 		unslotted[spec.MethodName] = spec.BoundsOwnConcurrency
 	}
 
@@ -280,6 +280,17 @@ func NewHandler(params Params) Handler {
 			logger:   params.Logger,
 		})
 	rpc.unslotted = unslotted
+	rpc.rejections = register(params.Daemon, prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: params.Daemon.MetricsNamespace(),
+		Subsystem: subsystemNetwork,
+		Name:      "global_total_response_bytes_limit",
+		Help:      "The metric measures the count of responses that failed because the response byte pool was full",
+	}))
+	if params.MaxTotalResponseBytes > 0 {
+		poolBytes := int64(min(params.MaxTotalResponseBytes, math.MaxInt64)) //nolint:gosec // min clamps it
+		rpc.setPool(poolBytes)
+		params.Logger.Infof("Holding at most %d bytes of responses at once", params.MaxTotalResponseBytes)
+	}
 
 	// globalQueueRequestBacklogLimiter is a metric for measuring the total concurrent inflight requests
 	globalQueueRequestBacklogLimiter := register(params.Daemon, prometheus.NewGauge(prometheus.GaugeOpts{
@@ -302,8 +313,7 @@ func NewHandler(params Params) Handler {
 	})
 
 	return Handler{
-		bridge:   rpc,
-		inflight: inflight,
-		Handler:  corsMiddleware.Handler(handler),
+		bridge:  rpc,
+		Handler: corsMiddleware.Handler(handler),
 	}
 }
