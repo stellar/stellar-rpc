@@ -43,7 +43,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			DataStoreLedgerReader: params.DataStoreLedgerReader,
 
 			GetEventsHandler: methods.NewGetEventsHandler(params.Logger, params.EventReader,
-				cfg.MaxEventsLimit, cfg.DefaultEventsLimit),
+				cfg.MaxEventsLimit, cfg.DefaultEventsLimit, cfg.MaxResponseBytes),
 
 			NetworkPassphrase:       cfg.NetworkPassphrase,
 			FriendbotURL:            cfg.FriendbotURL,

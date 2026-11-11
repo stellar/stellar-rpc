@@ -182,7 +182,7 @@ func newV1Client(t *testing.T, lcms [][]byte) *jrpc2.Client {
 	}
 	h := methods.NewGetEventsHandler(logger,
 		sqlitedb.NewEventReader(logger, db),
-		parityMaxLimit, parityDefaultLimit)
+		parityMaxLimit, parityDefaultLimit, 0)
 	return newLocalClient(t, h)
 }
 

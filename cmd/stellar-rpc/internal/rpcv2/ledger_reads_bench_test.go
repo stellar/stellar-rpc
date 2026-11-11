@@ -219,8 +219,8 @@ func benchHandlers(reader store.LedgerReader) handler.Map {
 	logger := silentLogger()
 	return handler.Map{
 		protocol.GetTransactionsMethodName: methods.NewGetTransactionsHandler(
-			logger, reader, 200, 50, network.PublicNetworkPassphrase),
-		protocol.GetLedgersMethodName:      methods.NewGetLedgersHandler(reader, 200, 50, nil, logger),
+			logger, reader, 200, 50, 0, network.PublicNetworkPassphrase),
+		protocol.GetLedgersMethodName:      methods.NewGetLedgersHandler(reader, 200, 50, 0, nil, logger),
 		protocol.GetLatestLedgerMethodName: methods.NewGetLatestLedgerHandler(reader),
 	}
 }

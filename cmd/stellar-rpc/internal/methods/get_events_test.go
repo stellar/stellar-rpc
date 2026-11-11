@@ -820,11 +820,12 @@ func TestGetEvents(t *testing.T) {
 			maxLimit:     10000,
 			defaultLimit: 100,
 		}
-		results, err := handler.getEvents(context.TODO(), protocol.GetEventsRequest{
+		request := protocol.GetEventsRequest{
 			StartLedger: 1,
 			Filters:     []protocol.EventFilter{},
 			Pagination:  &protocol.PaginationOptions{Limit: 10},
-		})
+		}
+		results, err := handler.getEvents(context.TODO(), request)
 		require.NoError(t, err)
 
 		var expected []protocol.EventInfo
@@ -863,6 +864,14 @@ func TestGetEvents(t *testing.T) {
 			},
 			results,
 		)
+
+		// A byte limit ends the page early, with the last event returned as the cursor.
+		handler.maxResponseBytes = EventInfoBytes(expected[0]) + EventInfoBytes(expected[1]) +
+			EventInfoBytes(expected[2])
+		results, err = handler.getEvents(context.TODO(), request)
+		require.NoError(t, err)
+		assert.Equal(t, expected[:3], results.Events)
+		assert.Equal(t, expected[2].ID, results.Cursor)
 	})
 
 	t.Run("with cursor", func(t *testing.T) {
@@ -1162,7 +1171,7 @@ func TestGetEventsRejectsHugeDeclaredCountsCheaply(t *testing.T) {
 		"startLedger": 1,
 		"filters":     []map[string]any{{"topics": [][]string{topic}}},
 	})
-	handler := NewGetEventsHandler(quietLogger(), nil, 100, 10)
+	handler := NewGetEventsHandler(quietLogger(), nil, 100, 10, 0)
 
 	requireCheapRejection(t, func() {
 		_, err := handler(t.Context(), request)

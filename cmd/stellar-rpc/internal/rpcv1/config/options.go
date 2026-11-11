@@ -453,10 +453,9 @@ func (cfg *Config) options() Options {
 		},
 		{
 			Name:         "max-response-bytes",
-			Usage:        "Maximum bytes of XDR or JSON one getLedgerEntries response may carry",
+			Usage:        "Maximum bytes of XDR or JSON that one response may carry (0 means no limit)",
 			ConfigKey:    &cfg.MaxResponseBytes,
-			DefaultValue: uint(128 * 1024 * 1024),
-			Validate:     positive,
+			DefaultValue: uint(0),
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("request-backlog-get-health-queue-limit"),

@@ -73,6 +73,22 @@ func TestGetTransactions_DefaultLimit(t *testing.T) { //nolint:dupl
 
 	// assert the transaction structure. We will match only 1 tx for sanity purposes.
 	assert.Equal(t, expectedTransactionInfo, response.Transactions[0])
+
+	// A byte limit ends the page early. Ledger 1 holds two transactions, so a
+	// limit of two ends the page before ledger 2, and the cursor resumes there.
+	handler.maxResponseBytes = transactionInfoBytes(response.Transactions[0]) +
+		transactionInfoBytes(response.Transactions[1])
+	response, err = handler.getTransactionsByLedgerSequence(context.TODO(), request)
+	require.NoError(t, err)
+	assert.Len(t, response.Transactions, 2)
+	assert.Equal(t, toid.New(2, 0, 1).String(), response.Cursor)
+
+	response, err = handler.getTransactionsByLedgerSequence(context.TODO(), protocol.GetTransactionsRequest{
+		Pagination: &protocol.LedgerPaginationOptions{Cursor: response.Cursor},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(2), response.Transactions[0].Ledger)
+	assert.Equal(t, int32(1), response.Transactions[0].ApplicationOrder)
 }
 
 func TestGetTransactions_DefaultLimitExceedsLatestLedger(t *testing.T) { //nolint:dupl

@@ -242,9 +242,6 @@ func validateService(svc config.ServiceConfig) error {
 	if *svc.MaxJSONConversionBytes < 1 {
 		return errors.New("[service].max_json_conversion_bytes must be >= 1")
 	}
-	if *svc.MaxResponseBytes < 1 {
-		return errors.New("[service].max_response_bytes must be >= 1")
-	}
 	durations := []struct {
 		name string
 		d    time.Duration

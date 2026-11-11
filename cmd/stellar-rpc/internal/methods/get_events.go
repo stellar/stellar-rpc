@@ -26,10 +26,11 @@ const (
 )
 
 type eventsRPCHandler struct {
-	dbReader     store.EventReader
-	maxLimit     uint
-	defaultLimit uint
-	logger       *log.Entry
+	dbReader         store.EventReader
+	maxLimit         uint
+	defaultLimit     uint
+	maxResponseBytes int // zero means no limit
+	logger           *log.Entry
 }
 
 func combineContractIDs(filters []protocol.EventFilter) ([][]byte, error) {
@@ -194,6 +195,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	}
 
 	results := []protocol.EventInfo{}
+	budget := PageBudget{Limit: h.maxResponseBytes}
 	// procErr keeps the callback's own error out of the reader's wrap, as getTransactions does,
 	// so a render failure stays a plain (system) error rather than an InvalidRequest.
 	var procErr error
@@ -227,6 +229,9 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 			procErr = errors.Wrap(err, "could not parse event")
 			return false, procErr
 		}
+		if !budget.Fits(EventInfoBytes(info)) {
+			return false, nil
+		}
 		results = append(results, info)
 		return uint(len(results)) < limit, nil
 	}
@@ -242,7 +247,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	}
 
 	var cursor string
-	if uint(len(results)) == limit {
+	if budget.full || uint(len(results)) == limit {
 		lastEvent := results[len(results)-1]
 		cursor = lastEvent.ID
 	} else {
@@ -409,12 +414,14 @@ func NewGetEventsHandler(
 	dbReader store.EventReader,
 	maxLimit uint,
 	defaultLimit uint,
+	maxResponseBytes uint,
 ) jrpc2.Handler {
 	eventsHandler := eventsRPCHandler{
-		dbReader:     dbReader,
-		maxLimit:     maxLimit,
-		defaultLimit: defaultLimit,
-		logger:       logger,
+		dbReader:         dbReader,
+		maxLimit:         maxLimit,
+		defaultLimit:     defaultLimit,
+		maxResponseBytes: ByteLimit(maxResponseBytes),
+		logger:           logger,
 	}
 	return NewHandler(eventsHandler.getEvents)
 }

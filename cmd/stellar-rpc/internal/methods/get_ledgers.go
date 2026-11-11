@@ -21,18 +21,20 @@ type ledgersHandler struct {
 	ledgerReader          store.LedgerReader
 	maxLimit              uint
 	defaultLimit          uint
+	maxResponseBytes      int // zero means no limit
 	datastoreLedgerReader rpcdatastore.LedgerReader
 	logger                *log.Entry
 }
 
 // NewGetLedgersHandler returns a jrpc2.Handler for the getLedgers method.
-func NewGetLedgersHandler(ledgerReader store.LedgerReader, maxLimit, defaultLimit uint,
+func NewGetLedgersHandler(ledgerReader store.LedgerReader, maxLimit, defaultLimit, maxResponseBytes uint,
 	datastoreLedgerReader rpcdatastore.LedgerReader, logger *log.Entry,
 ) jrpc2.Handler {
 	return NewHandler((&ledgersHandler{
 		ledgerReader:          ledgerReader,
 		maxLimit:              maxLimit,
 		defaultLimit:          defaultLimit,
+		maxResponseBytes:      ByteLimit(maxResponseBytes),
 		datastoreLedgerReader: datastoreLedgerReader,
 		logger:                logger,
 	}).getLedgers)
@@ -189,6 +191,7 @@ func (h ledgersHandler) parseCursor(cursor string, ledgerRange protocol.LedgerSe
 // fetchLedgers retrieves a batch of ledgers in the range [start, start+limit-1]
 // using the local DB when available, and falling back to the remote datastore
 // for any portion of the range that lies outside the locally available range.
+// The batch ends early once the next ledger would not fit h.maxResponseBytes.
 //
 // It handles three cases:
 //  1. Entire range is available in local db.
@@ -202,8 +205,9 @@ func (h ledgersHandler) fetchLedgers(
 ) ([]protocol.LedgerInfo, error) {
 	limit := end - start + 1
 	result := make([]protocol.LedgerInfo, 0, limit)
+	budget := PageBudget{Limit: h.maxResponseBytes}
 
-	// appendLedger renders one ledger's raw LedgerCloseMeta into the page
+	// appendLedger renders one ledger's raw LedgerCloseMeta into the page if it fits
 	appendLedger := func(seq uint32, raw []byte) error {
 		info, err := parseLedgerInfo(raw, format)
 		if err != nil {
@@ -212,7 +216,9 @@ func (h ledgersHandler) fetchLedgers(
 				Message: fmt.Sprintf("error processing ledger %d: %v", seq, err),
 			}
 		}
-		result = append(result, info)
+		if budget.Fits(ledgerInfoBytes(info)) {
+			result = append(result, info)
+		}
 		return nil
 	}
 
@@ -224,7 +230,7 @@ func (h ledgersHandler) fetchLedgers(
 					Message: fmt.Sprintf("error fetching ledgers from db: %v", err),
 				}
 			}
-			if len(result) >= int(limit) {
+			if budget.full || len(result) >= int(limit) {
 				break
 			}
 			if aerr := appendLedger(ledger.Sequence, ledger.Raw); aerr != nil {
@@ -250,7 +256,7 @@ func (h ledgersHandler) fetchLedgers(
 		}
 		// Serialize lazily so a short page never marshals the ledgers past it.
 		for i := range ledgers {
-			if len(result) >= int(limit) {
+			if budget.full || len(result) >= int(limit) {
 				break
 			}
 			raw, merr := ledgers[i].MarshalBinary()

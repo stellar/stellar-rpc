@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"math"
 	"sort"
 
 	"github.com/creachadair/jrpc2"
@@ -32,8 +31,7 @@ func NewGetLedgerEntriesHandler(
 	maxResponseBytes uint,
 ) jrpc2.Handler {
 	getter := ledgerentries.NewLedgerEntryGetter(coreClient, latestLedgerReader)
-	return newGetLedgerEntriesHandlerFromGetter(logger, getter,
-		int(min(maxResponseBytes, math.MaxInt))) //nolint:gosec // min clamps it
+	return newGetLedgerEntriesHandlerFromGetter(logger, getter, ByteLimit(maxResponseBytes))
 }
 
 func newGetLedgerEntriesHandlerFromGetter(
@@ -104,7 +102,7 @@ func newGetLedgerEntriesHandlerFromGetter(
 				}
 			}
 			responseBytes += entryResultBytes(result)
-			if responseBytes > maxResponseBytes {
+			if maxResponseBytes > 0 && responseBytes > maxResponseBytes {
 				return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
 					Code: jrpc2.InvalidParams,
 					Message: fmt.Sprintf("entries exceed maximum response size (%d bytes); request fewer keys",
@@ -210,6 +208,5 @@ func ledgerKeyEntryToResult(keyEntry ledgerentries.LedgerKeyAndEntry,
 
 // entryResultBytes is the size of r's XDR or JSON in the response.
 func entryResultBytes(r protocol.LedgerEntryResult) int {
-	return len(r.KeyXDR) + len(r.DataXDR) + len(r.ExtensionXDR) +
-		xdr2json.EscapedLen(r.KeyJSON) + xdr2json.EscapedLen(r.DataJSON) + xdr2json.EscapedLen(r.ExtensionJSON)
+	return xdrBytes(r.KeyXDR, r.DataXDR, r.ExtensionXDR) + jsonBytes(r.KeyJSON, r.DataJSON, r.ExtensionJSON)
 }

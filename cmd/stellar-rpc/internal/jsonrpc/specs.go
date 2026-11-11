@@ -52,7 +52,8 @@ type HandlerDeps struct {
 	MaxTransactionsLimit     uint
 	DefaultTransactionsLimit uint
 
-	// MaxResponseBytes caps the XDR or JSON in one getLedgerEntries response.
+	// MaxResponseBytes caps the XDR or JSON in one getLedgerEntries, getLedgers
+	// or getTransactions response. Zero means no limit.
 	MaxResponseBytes uint
 }
 
@@ -127,7 +128,7 @@ func BuildHandlerSpecs(deps HandlerDeps) []HandlerSpec {
 			methods.NewGetLatestLedgerHandler(deps.LedgerReader)),
 		spec(protocol.GetLedgersMethodName,
 			methods.NewGetLedgersHandler(deps.LedgerReader, deps.MaxLedgersLimit, deps.DefaultLedgersLimit,
-				deps.DataStoreLedgerReader, deps.Logger)),
+				deps.MaxResponseBytes, deps.DataStoreLedgerReader, deps.Logger)),
 		spec(protocol.GetLedgerEntriesMethodName,
 			methods.NewGetLedgerEntriesHandler(deps.Logger, deps.Daemon.FastCoreClient(), deps.LedgerReader,
 				deps.MaxResponseBytes)),
@@ -135,7 +136,7 @@ func BuildHandlerSpecs(deps HandlerDeps) []HandlerSpec {
 			methods.NewGetTransactionHandler(deps.Logger, deps.TransactionReader, deps.LedgerReader)),
 		spec(protocol.GetTransactionsMethodName,
 			methods.NewGetTransactionsHandler(deps.Logger, deps.LedgerReader, deps.MaxTransactionsLimit,
-				deps.DefaultTransactionsLimit, deps.NetworkPassphrase)),
+				deps.DefaultTransactionsLimit, deps.MaxResponseBytes, deps.NetworkPassphrase)),
 		spec(protocol.SendTransactionMethodName,
 			methods.NewSendTransactionHandler(deps.Daemon, deps.Logger, deps.LedgerReader, deps.NetworkPassphrase)),
 		spec(protocol.SimulateTransactionMethodName,
