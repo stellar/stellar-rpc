@@ -91,7 +91,7 @@ func getEventsV1(
 	// An end at or below the start is legal v1 input and an empty window.
 	// Served here: the pager's scopes are inclusive and never inverted.
 	if endLedger <= minLedger {
-		return v1Response(nil, endLedger, limit, lr), nil
+		return v1Response(nil, endLedger, limit, false, lr), nil
 	}
 	maxLedger := endLedger - 1
 	scope := query.EventScope{MinLedger: minLedger, MaxLedger: &maxLedger, Filters: filters}
@@ -125,15 +125,11 @@ func getEventsV1(
 			Message: "getEvents: the scan stopped before the request's window was covered",
 		}
 	}
-	events := make([]protocol.EventInfo, 0, len(page.Events))
-	for i := range page.Events {
-		info, err := eventInfo(&page.Events[i], req.Format)
-		if err != nil {
-			return zero, fmt.Errorf("could not parse event: %w", err)
-		}
-		events = append(events, info)
+	events, err := eventInfos(page.Events, req.Format, limits.MaxResponseBytes)
+	if err != nil {
+		return zero, fmt.Errorf("could not parse event: %w", err)
 	}
-	return v1Response(events, endLedger, limit, lr), nil
+	return v1Response(events, endLedger, limit, len(events) < len(page.Events), lr), nil
 }
 
 // v1ResumePoint maps the request's resolved start onto where the walk
@@ -158,14 +154,14 @@ func v1ResumePoint(start protocol.Cursor, fromCursor bool) (uint32, *query.Event
 	}
 }
 
-// v1Response mints the cursor the v1 way: a page that fills its limit hands
-// back its last event's id; a short page hands back the end of the scanned
-// window, so the next pull continues past it.
+// v1Response mints the cursor the v1 way: a page that fills its limit or is cut
+// at MaxResponseBytes hands back its last event's id; a short page hands back
+// the end of the scanned window, so the next pull continues past it.
 func v1Response(
-	events []protocol.EventInfo, endLedger uint32, limit uint, lr store.LedgerRange,
+	events []protocol.EventInfo, endLedger uint32, limit uint, cut bool, lr store.LedgerRange,
 ) protocol.GetEventsResponse {
 	var cursor string
-	if len(events) > 0 && uint(len(events)) == limit {
+	if len(events) > 0 && (cut || uint(len(events)) == limit) {
 		cursor = events[len(events)-1].ID
 	} else {
 		windowEnd := protocol.MaxCursor
@@ -238,11 +234,7 @@ func expandV1Filter(f *protocol.EventFilter) ([]event.Filter, bool, error) {
 	if len(f.Topics) > 0 {
 		shapes = make([]topicShape, 0, len(f.Topics))
 		for _, tf := range f.Topics {
-			shape, err := topicShapeOf(tf)
-			if err != nil {
-				return nil, false, err
-			}
-			shapes = append(shapes, shape)
+			shapes = append(shapes, topicShapeOf(tf))
 		}
 	}
 
@@ -271,7 +263,7 @@ type topicShape struct {
 	count  event.TopicCountFilter
 }
 
-func topicShapeOf(tf protocol.TopicFilter) (topicShape, error) {
+func topicShapeOf(tf protocol.TopicFilter) topicShape {
 	segs := tf
 	shape := topicShape{count: event.TopicCountFilter{Count: len(tf), Exact: true}}
 	if n := len(tf); n > 0 && tf[n-1].Wildcard != nil && *tf[n-1].Wildcard == protocol.WildCardZeroOrMore {
@@ -280,19 +272,11 @@ func topicShapeOf(tf protocol.TopicFilter) (topicShape, error) {
 		shape.count = event.TopicCountFilter{Count: len(segs)}
 	}
 	for i, s := range segs {
-		// "*" is any value, and the position still exists via the count.
-		// A segment with neither value nor wildcard is skipped the way the
-		// shared handler skips it, rather than dereferenced.
-		if s.Wildcard != nil || s.ScVal == nil {
-			continue
-		}
-		raw, err := s.ScVal.MarshalBinary()
-		if err != nil {
-			return topicShape{}, fmt.Errorf("failed to marshal segment: %w", err)
-		}
-		shape.topics[i] = raw
+		// "*" has no value, so it matches any topic; the count still
+		// requires the position.
+		shape.topics[i] = s.ScVal
 	}
-	return shape, nil
+	return shape
 }
 
 func isMatchAll(f *event.Filter) bool {

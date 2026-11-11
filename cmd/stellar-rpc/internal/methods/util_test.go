@@ -1,9 +1,17 @@
 package methods
 
 import (
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
 	"path"
+	"runtime"
+	"slices"
 	"testing"
 
+	"github.com/creachadair/jrpc2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -105,4 +113,61 @@ func NewTestDB(tb testing.TB) *sqlitedb.DB {
 		require.NoError(tb, dbConn.Close())
 	})
 	return dbConn
+}
+
+// nestedScMaps returns 1000 nested ScMaps that each declare 256 entries, cut
+// off at the innermost map's first entry. A decoder that reserves room for the
+// declared entries before reading them allocates about 90 KB per level.
+func nestedScMaps() []byte {
+	var b []byte
+	for range 1000 {
+		b = binary.BigEndian.AppendUint32(b, uint32(xdr.ScValTypeScvMap))
+		b = binary.BigEndian.AppendUint32(b, 1) // the map is present
+		b = binary.BigEndian.AppendUint32(b, 256)
+	}
+	return b
+}
+
+// hugeCountEnvelope returns the base64 XDR of invokeHostFunctionEnvelope with
+// nestedScMaps in place of its argument.
+func hugeCountEnvelope(t *testing.T) string {
+	envelope, err := invokeHostFunctionEnvelope(t).MarshalBinary()
+	require.NoError(t, err)
+	arg := xdr.TransactionEnvelopeView(envelope).MustV1().MustTx().MustOperations().MustAt(0).
+		MustBody().MustInvokeHostFunctionOp().MustHostFunction().MustInvokeContract().MustArgs().MustAt(0)
+	return base64.StdEncoding.EncodeToString(slices.Concat(envelope[:len(envelope)-len(arg)], nestedScMaps()))
+}
+
+// requireCheapRejection requires each call of f to allocate less than 256 KiB,
+// a small fraction of what decoding nestedScMaps reserves.
+func requireCheapRejection(t *testing.T, f func()) {
+	t.Helper()
+	const runs = 10
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	f()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range runs {
+		f()
+	}
+	runtime.ReadMemStats(&after)
+	require.Less(t, (after.TotalAlloc-before.TotalAlloc)/runs, uint64(256*1024))
+}
+
+func quietLogger() *log.Entry {
+	logger := log.New()
+	logger.SetOutput(io.Discard)
+	return logger
+}
+
+// jsonRPCRequest returns a request calling method with params.
+func jsonRPCRequest(t *testing.T, method string, params any) *jrpc2.Request {
+	t.Helper()
+	paramsJSON, err := json.Marshal(params)
+	require.NoError(t, err)
+	requests, err := jrpc2.ParseRequests(fmt.Appendf(nil,
+		`{"jsonrpc": "2.0", "id": 1, "method": %q, "params": %s}`, method, paramsJSON))
+	require.NoError(t, err)
+	require.Len(t, requests, 1)
+	return requests[0].ToRequest()
 }

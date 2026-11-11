@@ -7,7 +7,6 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
@@ -17,8 +16,8 @@ import (
 
 // HandlerDeps carries every input the shared internal/methods constructors take.
 // Each daemon fills it from its own config and wiring and hands it to
-// BuildHandlerSpecs, so the method table — which method runs which handler
-// with which decode limits — is written once instead of once per daemon.
+// BuildHandlerSpecs, so the table of which method runs which handler is
+// written once instead of once per daemon.
 type HandlerDeps struct {
 	Daemon          host.Daemon
 	Logger          *log.Entry
@@ -52,6 +51,10 @@ type HandlerDeps struct {
 	DefaultLedgersLimit      uint
 	MaxTransactionsLimit     uint
 	DefaultTransactionsLimit uint
+
+	// MaxResponseBytes caps the XDR or JSON in one getLedgerEntries, getLedgers
+	// or getTransactions response. Zero means no limit.
+	MaxResponseBytes uint
 }
 
 // MethodLimits is one method's serving limits: the request backlog cap and the
@@ -125,21 +128,24 @@ func BuildHandlerSpecs(deps HandlerDeps) []HandlerSpec {
 			methods.NewGetLatestLedgerHandler(deps.LedgerReader)),
 		spec(protocol.GetLedgersMethodName,
 			methods.NewGetLedgersHandler(deps.LedgerReader, deps.MaxLedgersLimit, deps.DefaultLedgersLimit,
-				deps.DataStoreLedgerReader, deps.Logger)),
+				deps.MaxResponseBytes, deps.DataStoreLedgerReader, deps.Logger)),
 		spec(protocol.GetLedgerEntriesMethodName,
 			methods.NewGetLedgerEntriesHandler(deps.Logger, deps.Daemon.FastCoreClient(), deps.LedgerReader,
-				xdr.DecodeOptions{MaxMemoryBytes: LedgerKeyDecodeMaxMemory})),
+				deps.MaxResponseBytes)),
 		spec(protocol.GetTransactionMethodName,
 			methods.NewGetTransactionHandler(deps.Logger, deps.TransactionReader, deps.LedgerReader)),
 		spec(protocol.GetTransactionsMethodName,
 			methods.NewGetTransactionsHandler(deps.Logger, deps.LedgerReader, deps.MaxTransactionsLimit,
-				deps.DefaultTransactionsLimit, deps.NetworkPassphrase)),
+				deps.DefaultTransactionsLimit, deps.MaxResponseBytes, deps.NetworkPassphrase)),
 		spec(protocol.SendTransactionMethodName,
-			methods.NewSendTransactionHandler(deps.Daemon, deps.Logger, deps.LedgerReader, deps.NetworkPassphrase,
-				xdr.DecodeOptions{MaxMemoryBytes: TransactionDecodeMaxMemory})),
-		spec(protocol.SimulateTransactionMethodName,
-			methods.NewSimulateTransactionHandler(deps.Logger, deps.LedgerReader, deps.Daemon.FastCoreClient(),
-				deps.PreflightGetter, xdr.DecodeOptions{MaxMemoryBytes: TransactionDecodeMaxMemory})),
+			methods.NewSendTransactionHandler(deps.Daemon, deps.Logger, deps.LedgerReader, deps.NetworkPassphrase)),
+		{
+			MethodName: protocol.SimulateTransactionMethodName,
+			Handler:    methods.NewSimulateTransactionHandler(deps.Logger, deps.LedgerReader, deps.PreflightGetter),
+			// The preflight pool runs one simulation per worker, and calls wait
+			// for room in its queue.
+			BoundsOwnConcurrency: true,
+		},
 		spec(protocol.GetFeeStatsMethodName,
 			methods.NewGetFeeStatsHandler(deps.FeeStats, deps.LedgerReader, deps.Logger)),
 	}

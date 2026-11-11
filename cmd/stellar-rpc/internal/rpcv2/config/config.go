@@ -62,33 +62,51 @@ type ServiceConfig struct {
 	// disables the admin server; it should never be reachable from the internet.
 	AdminEndpoint string `toml:"admin_endpoint"`
 
-	// The three keys below are the HTTP-layer gate wrapped around the WHOLE mux,
+	// The four keys below are the HTTP-layer gate wrapped around the WHOLE mux,
 	// exactly as in v1 (internal/jsonrpc): they always act, on every request, in
 	// ADDITION to the per-method limits — max_concurrent_requests bounds the SUM
 	// of in-flight requests across all methods, which no per-method limit can.
 	MaxConcurrentRequests            *uint          `toml:"max_concurrent_requests"`
 	MaxRequestExecutionDuration      *time.Duration `toml:"max_request_execution_duration"`
 	RequestExecutionWarningThreshold *time.Duration `toml:"request_execution_warning_threshold"`
+	// MaxRequestBatchSize is the most calls a JSON-RPC batch may hold. A larger
+	// batch is answered with one error, and none of its calls run.
+	MaxRequestBatchSize *uint `toml:"max_request_batch_size"`
+	// MaxJSONConversionBytes is the most JSON one XDR value may convert to in
+	// an xdrFormat "json" response. A larger value fails the request.
+	MaxJSONConversionBytes *uint `toml:"max_json_conversion_bytes"`
+	// MaxResponseBytes is the most XDR or JSON one response may carry.
+	// getLedgerEntries fails a larger response; getLedgers, getTransactions,
+	// getEvents and queryEvents end the page early. Zero, the default, means
+	// no limit.
+	MaxResponseBytes *uint `toml:"max_response_bytes"`
 
 	FeeStats  FeeStatsConfig  `toml:"fee_stats"`
 	Preflight PreflightConfig `toml:"preflight"`
 	Methods   MethodsConfig   `toml:"methods"`
 }
 
-// PreflightConfig is [service.preflight] — the worker pool that runs
-// simulateTransaction's preflights. It sits under [service] rather than under the
+// PreflightConfig is [service.preflight] — the pool of worker processes that
+// runs simulateTransaction's preflights. It sits under [service] rather than under the
 // simulateTransaction method table because the pool is sized once at startup,
 // not per request (the same reason [service.fee_stats] lives where it does).
 type PreflightConfig struct {
-	// WorkerCount is how many goroutines run preflights concurrently; >= 1.
-	// Default NumCPU.
+	// WorkerCount is how many worker processes run preflights concurrently; >= 1.
+	// Default GOMAXPROCS.
 	WorkerCount *uint `toml:"worker_count"`
 	// WorkerQueueSize is how many preflight requests may wait for a free worker
-	// before the pool starts rejecting them; >= 1. Default NumCPU.
+	// before the pool starts rejecting them; >= 1. Default the larger of
+	// GOMAXPROCS and MaxRequestBatchSize, since the calls of one batch start at
+	// once.
 	WorkerQueueSize *uint `toml:"worker_queue_size"`
-	// EnableDebug adds detailed diagnostics to preflight errors — expensive to
-	// produce, and v1 warns against it in production. Default true.
+	// EnableDebug includes diagnostic events in simulateTransaction responses.
+	// Default true.
 	EnableDebug *bool `toml:"enable_debug"`
+	// SimulationMemoryLimit is the most heap memory, in bytes, the simulation
+	// library may hold in a worker process. 0 (the default) means 8 times the
+	// network's per-transaction memory limit, and any other value must be at
+	// least 16000000. Plan for about this limit + 128 MiB per worker.
+	SimulationMemoryLimit *uint `toml:"simulation_memory_limit"`
 }
 
 // FeeStatsConfig is [service.fee_stats] — the sizes, in ledgers, of the two
@@ -385,7 +403,7 @@ type IngestionConfig struct {
 	// CoreHTTPPort.
 	CoreHTTPQueryPort *uint `toml:"core_http_query_port"`
 	// CoreHTTPQueryThreadPoolSize is how many threads core's query server uses.
-	// Default NumCPU.
+	// Default GOMAXPROCS.
 	CoreHTTPQueryThreadPoolSize *uint `toml:"core_http_query_thread_pool_size"`
 	// CoreHTTPQuerySnapshotLedgers is how many recent ledgers core's query server
 	// keeps snapshots for. Default 4; leave it alone unless you know what core
@@ -427,6 +445,12 @@ const (
 	DefaultMaxConcurrentRequests            uint          = 5000
 	DefaultMaxRequestExecutionDuration      time.Duration = 25 * time.Second
 	DefaultRequestExecutionWarningThreshold time.Duration = 5 * time.Second
+	DefaultMaxRequestBatchSize              uint          = 10
+	// DefaultMaxJSONConversionBytes is twice v1's 128 MiB, as the archive
+	// node's minimum RAM is twice v1's.
+	DefaultMaxJSONConversionBytes uint = 256 * 1024 * 1024
+	// DefaultMaxResponseBytes is no limit, as on v1.
+	DefaultMaxResponseBytes uint = 0
 
 	// DefaultMethodQueueLimit and the three below it are the compiled
 	// per-method defaults — the last tier of the methods cascade.
@@ -494,11 +518,13 @@ const (
 	MaxPort uint = 65535
 )
 
-// NumCPU is the default for the three keys v1 sizes by CPU count: the preflight
-// worker count and queue size, and core's query-server thread pool.
-func NumCPU() uint {
-	//nolint:gosec // runtime.NumCPU() is always non-negative and realistically well below uint limits
-	return uint(runtime.NumCPU())
+// UsableCPUs is the default for the three keys v1 sizes by CPU count: the
+// preflight worker count and queue size, and core's query-server thread pool.
+// It is GOMAXPROCS, the number of CPUs the process may use, which follows a
+// container's CPU limit.
+func UsableCPUs() uint {
+	//nolint:gosec // runtime.GOMAXPROCS(0) is always positive and realistically well below uint limits
+	return uint(runtime.GOMAXPROCS(0))
 }
 
 // LoadConfigWithFlags reads and parses the TOML config at path, with CLI
@@ -599,11 +625,15 @@ func (cfg Config) WithDefaults() Config {
 	fillUint(&svc.MaxConcurrentRequests, DefaultMaxConcurrentRequests)
 	fillDuration(&svc.MaxRequestExecutionDuration, DefaultMaxRequestExecutionDuration)
 	fillDuration(&svc.RequestExecutionWarningThreshold, DefaultRequestExecutionWarningThreshold)
+	fillUint(&svc.MaxRequestBatchSize, DefaultMaxRequestBatchSize)
+	fillUint(&svc.MaxJSONConversionBytes, DefaultMaxJSONConversionBytes)
+	fillUint(&svc.MaxResponseBytes, DefaultMaxResponseBytes)
 	fillUint32(&svc.FeeStats.ClassicFeeWindowLedgers, DefaultClassicFeeWindowLedgers)
 	fillUint32(&svc.FeeStats.SorobanInclusionFeeWindowLedgers, DefaultSorobanInclusionFeeWindowLedgers)
-	fillUint(&svc.Preflight.WorkerCount, NumCPU())
-	fillUint(&svc.Preflight.WorkerQueueSize, NumCPU())
+	fillUint(&svc.Preflight.WorkerCount, UsableCPUs())
+	fillUint(&svc.Preflight.WorkerQueueSize, max(UsableCPUs(), *svc.MaxRequestBatchSize))
 	fillBool(&svc.Preflight.EnableDebug, DefaultPreflightEnableDebug)
+	fillUint(&svc.Preflight.SimulationMemoryLimit, 0)
 
 	// The port fills FIRST, so setting only core_http_port moves core_url with it.
 	ing := &cfg.Ingestion
@@ -613,7 +643,7 @@ func (cfg Config) WithDefaults() Config {
 	}
 	fillDuration(&ing.CoreRequestTimeout, DefaultCoreRequestTimeout)
 	fillUint(&ing.CoreHTTPQueryPort, DefaultCoreHTTPQueryPort)
-	fillUint(&ing.CoreHTTPQueryThreadPoolSize, NumCPU())
+	fillUint(&ing.CoreHTTPQueryThreadPoolSize, UsableCPUs())
 	fillUint(&ing.CoreHTTPQuerySnapshotLedgers, DefaultCoreHTTPQuerySnapshotLedgers)
 
 	// The methods cascade. queue/dur fill one per-method field: an explicit

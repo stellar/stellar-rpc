@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"os"
 	"testing"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 )
 
 // Every test in this package needs the rpcv2 daemon. Default the harness
 // selector to it, and refuse to run against anything else.
 func TestMain(m *testing.M) {
+	preflight.RunIfWorker()
 	const envVar = "STELLAR_RPC_INTEGRATION_TESTS_DAEMON"
 	switch os.Getenv(envVar) {
 	case "":

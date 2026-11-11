@@ -620,7 +620,7 @@ func TestNewCaptiveCoreOpeners_OverridesCoreFileThreadPoolSize(t *testing.T) {
 	live, ok := core.live.(*captiveCoreOpener)
 	require.True(t, ok)
 	require.NotNil(t, live.config.Toml.QueryThreadPoolSize)
-	assert.Equal(t, config.NumCPU(), *live.config.Toml.QueryThreadPoolSize)
+	assert.Equal(t, config.UsableCPUs(), *live.config.Toml.QueryThreadPoolSize)
 	assert.Contains(t, logs.String(), keyCoreQueryThreadPoolSize)
 }
 

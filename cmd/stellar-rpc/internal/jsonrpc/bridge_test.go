@@ -8,8 +8,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ import (
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/support/http/mutil"
 	"github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
@@ -28,6 +31,8 @@ import (
 
 // unlimited lets requests run as long as their handlers take.
 var unlimited = durationLimits{limit: network.RequestDurationLimiterNoLimit, logger: log.DefaultLogger}
+
+const testMaxBatchSize = 10
 
 type counter struct{ n atomic.Int64 }
 
@@ -122,6 +127,8 @@ func bridgeCases() []bridgeCase {
 			`{"jsonrpc":"2.0","id":4,"method":"valErr"},`+
 			`{"jsonrpc":"2.0","id":5,"method":"raw"}]`),
 		call("batch of one", `[`+echo+`]`),
+		call("batch at the limit", `[`+strings.Repeat(echo+`,`, testMaxBatchSize-1)+echo+`]`),
+		call("batch over the limit", `[`+strings.Repeat(echo+`,`, testMaxBatchSize)+echo+`]`),
 		call("batch of notifications", `[{"jsonrpc":"2.0","method":"echo"},{"jsonrpc":"2.0","method":"nope"}]`),
 		call("batch with invalid entries", `[1,`+echo+`,"x"]`),
 		call("empty batch", `[]`),
@@ -135,7 +142,7 @@ func bridgeCases() []bridgeCase {
 		{name: "no content type", method: http.MethodPost, contentType: "", body: echo},
 		{name: "json-rpc content type", method: http.MethodPost, contentType: "application/json-rpc", body: echo},
 		{name: "charset utf-8", method: http.MethodPost, contentType: contentTypeJSON + "; charset=utf-8", body: echo},
-		{name: "charset UTF8", method: http.MethodPost, contentType: contentTypeJSON + "; charset=UTF8", body: echo},
+		{name: "charset utf8", method: http.MethodPost, contentType: contentTypeJSON + "; charset=utf8", body: echo},
 		{name: "charset latin1", method: http.MethodPost, contentType: contentTypeJSON + "; charset=latin1", body: echo},
 	}
 }
@@ -157,16 +164,36 @@ func postBridge(t *testing.T, h http.Handler, body string) *httptest.ResponseRec
 }
 
 // The bridge answers every request with the status, headers and body that
-// jhttp.Bridge, the transport it replaces, gives on upstream jrpc2.
+// jhttp.Bridge, the transport it replaces, gives on upstream jrpc2: stock
+// jhttp for a request its POST and content-type checks reject, and jhttp with
+// parseRequests as its ParseRequest hook, which turns those checks off, for
+// any other.
 func TestBridge_ParityWithJHTTP(t *testing.T) {
 	methods := bridgeMethods()
-	old := jhttp.NewBridge(methods, &jhttp.BridgeOptions{Server: &jrpc2.ServerOptions{DisableBuiltin: true}})
-	t.Cleanup(func() { _ = old.Close() })
-	b := newBridge(methods, unlimited)
+	server := &jrpc2.ServerOptions{DisableBuiltin: true}
+	stock := jhttp.NewBridge(methods, &jhttp.BridgeOptions{Server: server})
+	t.Cleanup(func() { _ = stock.Close() })
+	hooked := jhttp.NewBridge(methods, &jhttp.BridgeOptions{
+		Server: server,
+		ParseRequest: func(r *http.Request) ([]*jrpc2.ParsedRequest, error) {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				return nil, err
+			}
+			return parseRequests(body, testMaxBatchSize)
+		},
+	})
+	t.Cleanup(func() { _ = hooked.Close() })
+	b := newBridge(methods, testMaxBatchSize, unlimited)
 	t.Cleanup(b.Close)
 	for _, tc := range bridgeCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			want, got := serveBridge(t, old, tc), serveBridge(t, b, tc)
+			want := serveBridge(t, stock, tc)
+			if want.Code != http.StatusMethodNotAllowed && want.Code != http.StatusUnsupportedMediaType {
+				want = serveBridge(t, hooked, tc)
+				want.Header().Set("Accept-Post", contentTypeJSON) // the hook turns this header off too
+			}
+			got := serveBridge(t, b, tc)
 			require.Equal(t, want.Code, got.Code)
 			require.Equal(t, want.Header(), got.Header())
 			require.Equal(t, want.Body.String(), got.Body.String())
@@ -174,11 +201,73 @@ func TestBridge_ParityWithJHTTP(t *testing.T) {
 	}
 }
 
+// windowRecorder records how many bytes are written under each write deadline.
+type windowRecorder struct {
+	*httptest.ResponseRecorder
+
+	windows []int
+}
+
+func (r *windowRecorder) SetWriteDeadline(time.Time) error {
+	r.windows = append(r.windows, 0)
+	return nil
+}
+
+func (r *windowRecorder) Write(b []byte) (int, error) {
+	if len(r.windows) == 0 {
+		return 0, errors.New("write before any deadline")
+	}
+	r.windows[len(r.windows)-1] += len(b)
+	return r.ResponseRecorder.Write(b)
+}
+
+// The bridge moves the write deadline before each responseChunkSize bytes of
+// a response, however the response is split into parts.
+func TestBridge_WriteSetsADeadlinePerChunk(t *testing.T) {
+	result := json.RawMessage(`"` + strings.Repeat("x", 2*responseChunkSize-1) + `"`)
+	b := newBridge(handler.Map{"big": handler.New(func(context.Context) (any, error) { return result, nil })},
+		testMaxBatchSize, unlimited)
+	t.Cleanup(b.Close)
+	rec := &windowRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+	// The logging middleware wraps the writer, so the deadline has to reach through it.
+	b.ServeHTTP(mutil.WrapWriter(rec), newBridgeRequest(t, `{"jsonrpc":"2.0","id":1,"method":"big"}`))
+
+	require.Equal(t, `{"jsonrpc":"2.0","id":1,"result":`+string(result)+"}", rec.Body.String())
+	require.Equal(t, []int{responseChunkSize, responseChunkSize, rec.Body.Len() - 2*responseChunkSize}, rec.windows)
+}
+
+// A response gets its own write time however long the handlers ran, so a 504
+// sent after the server's write timeout still reaches the client.
+func TestBridge_TimeoutResponseMovesTheWriteDeadline(t *testing.T) {
+	logger, _ := testLogger()
+	limits := durationLimits{limit: time.Second / 20, warnings: &counter{}, timeouts: &counter{}, logger: logger}
+	b := newBridge(handler.Map{"slow": handler.New(func(ctx context.Context) (any, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})}, testMaxBatchSize, limits)
+	t.Cleanup(b.Close)
+	rec := &windowRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+	b.ServeHTTP(rec, newBridgeRequest(t, `{"jsonrpc":"2.0","id":1,"method":"slow"}`))
+
+	require.Equal(t, http.StatusGatewayTimeout, rec.Code)
+	require.Equal(t, []int{0}, rec.windows)
+}
+
+func newBridgeRequest(t *testing.T, body string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", contentTypeJSON)
+	return req
+}
+
 // A non-empty json.RawMessage result is written as is, with the Content-Length
 // to match.
 func TestBridge_RawResultPassthrough(t *testing.T) {
 	raw := json.RawMessage("{\n  \"pretty\": \"<kept>\"\n}")
-	b := newBridge(handler.Map{"raw": handler.New(func(context.Context) (any, error) { return raw, nil })}, unlimited)
+	b := newBridge(handler.Map{"raw": handler.New(func(context.Context) (any, error) { return raw, nil })},
+		testMaxBatchSize, unlimited)
 	t.Cleanup(b.Close)
 	rec := postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"raw"}`)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -193,7 +282,7 @@ func TestBridge_RequestContext(t *testing.T) {
 	b := newBridge(handler.Map{"m": handler.New(func(hctx context.Context) (any, error) {
 		disconnect()
 		return nil, hctx.Err()
-	})}, unlimited)
+	})}, testMaxBatchSize, unlimited)
 	t.Cleanup(b.Close)
 	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/",
 		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"m"}`))
@@ -217,7 +306,7 @@ func TestBridge_CloseDrains(t *testing.T) {
 		time.Sleep(50 * time.Millisecond) // unwinding takes a while
 		close(unwound)
 		return nil, hctx.Err()
-	})}, unlimited)
+	})}, testMaxBatchSize, unlimited)
 	served := make(chan *httptest.ResponseRecorder, 1)
 	go func() { served <- postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"slow"}`) }()
 	<-started
@@ -259,7 +348,7 @@ func TestBridge_DurationLimits(t *testing.T) {
 				case <-time.After(tc.run):
 					return 1, nil
 				}
-			})}, durationLimits{tc.warning, tc.limit, &warnings, &limits, logger})
+			})}, testMaxBatchSize, durationLimits{tc.warning, tc.limit, &warnings, &limits, logger})
 			t.Cleanup(b.Close)
 			rec := postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"slow"}`)
 			require.Equal(t, tc.wantCode, rec.Code)
@@ -289,7 +378,8 @@ func TestBridge_Panic(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			logger, hook := testLogger()
-			b := newBridge(methods, durationLimits{limit: network.RequestDurationLimiterNoLimit, logger: logger})
+			b := newBridge(methods, testMaxBatchSize,
+				durationLimits{limit: network.RequestDurationLimiterNoLimit, logger: logger})
 			t.Cleanup(b.Close)
 			rec := postBridge(t, b, tc.body)
 			require.Equal(t, http.StatusOK, rec.Code)
@@ -320,4 +410,52 @@ func TestNewBridge_UnboundedRequestContext(t *testing.T) {
 	b.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.JSONEq(t, `{"jsonrpc":"2.0","id":1,"result":{"deadline":false,"value":"planted"}}`, rec.Body.String())
+}
+
+// The bridge runs as many handlers at once as the CPUs the process may use.
+func TestBridge_HandlerSlotsFollowGOMAXPROCS(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(3))
+	b := newBridge(handler.Map{}, testMaxBatchSize, unlimited)
+	t.Cleanup(b.Close)
+	require.Equal(t, 3, b.MaxHandlers())
+}
+
+// A method that bounds its own concurrency runs while other calls hold every
+// handler slot.
+func TestBridge_UnslottedMethodRunsWhenAllSlotsAreTaken(t *testing.T) {
+	release := make(chan struct{})
+	var holding sync.WaitGroup
+	b := newBridge(handler.Map{
+		"slow": handler.New(func(context.Context) (any, error) {
+			holding.Done()
+			<-release
+			return 1, nil
+		}),
+		"own": handler.New(func(context.Context) (any, error) { return 2, nil }),
+	}, testMaxBatchSize, unlimited)
+	b.unslotted = map[string]bool{"own": true}
+	t.Cleanup(b.Close)
+
+	var done sync.WaitGroup
+	holding.Add(b.MaxHandlers())
+	for range b.MaxHandlers() {
+		done.Go(func() { postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"slow"}`) })
+	}
+	holding.Wait()
+	rec := postBridge(t, b, `{"jsonrpc":"2.0","id":2,"method":"own"}`)
+	close(release)
+	done.Wait()
+	require.JSONEq(t, `{"jsonrpc":"2.0","id":2,"result":2}`, rec.Body.String())
+}
+
+// A full preflight queue reaches the wire with its message alone.
+func TestBridge_PreflightQueueFullMessage(t *testing.T) {
+	b := newBridge(handler.Map{"m": handler.New(func(context.Context) (any, error) {
+		return nil, network.ErrPreflightQueueFull
+	})}, testMaxBatchSize, unlimited)
+	t.Cleanup(b.Close)
+	rec := postBridge(t, b, `{"jsonrpc":"2.0","id":1,"method":"m"}`)
+	require.JSONEq(t,
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"preflight queue full; retry later"}}`,
+		rec.Body.String())
 }

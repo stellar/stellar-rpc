@@ -132,6 +132,27 @@ func TestValidateFeeStatsRetentionWindow(t *testing.T) {
 	require.ErrorContains(t, o.Validate(o), "cannot exceed 1000 ledgers")
 }
 
+func TestValidateSimulationMemoryLimit(t *testing.T) {
+	var val uint64
+	o := &Option{
+		Name:      "preflight-simulation-memory-limit",
+		ConfigKey: &val,
+		Validate:  simulationMemoryLimitValidator,
+	}
+
+	// zero leaves the limit to the network
+	require.NoError(t, o.setValue(uint64(0)))
+	require.NoError(t, o.Validate(o))
+
+	// valid: the minimum
+	require.NoError(t, o.setValue(uint64(limits.MinSimulationMemoryLimit)))
+	require.NoError(t, o.Validate(o))
+
+	// invalid: below the minimum
+	require.NoError(t, o.setValue(uint64(limits.MinSimulationMemoryLimit-1)))
+	require.ErrorContains(t, o.Validate(o), "preflight-simulation-memory-limit must be 0 or at least 16000000 bytes")
+}
+
 func TestUnassignableField(t *testing.T) {
 	var co Option
 	var b bool

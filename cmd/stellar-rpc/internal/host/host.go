@@ -36,5 +36,7 @@ type CoreClient interface {
 }
 
 type FastCoreClient interface {
-	GetLedgerEntries(ctx context.Context, ledgerSeq uint32, keys ...xdr.LedgerKey) (proto.GetLedgerEntryResponse, error)
+	GetLedgerEntries(
+		ctx context.Context, ledgerSeq uint32, keys ...xdr.LedgerKeyView,
+	) (proto.GetLedgerEntryResponse, error)
 }

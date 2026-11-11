@@ -66,6 +66,19 @@ func TestGetLedgers_DefaultLimit(t *testing.T) {
 
 	// assert a single ledger info structure for sanity purposes
 	assert.Equal(t, expectedLedgerInfo, response.Ledgers[0])
+
+	// A byte limit ends the page early, in either format.
+	for _, format := range []string{protocol.FormatBase64, protocol.FormatJSON} {
+		request.Format = format
+		handler.maxResponseBytes = 0
+		page, err := handler.getLedgers(t.Context(), request)
+		require.NoError(t, err)
+		handler.maxResponseBytes = ledgerInfoBytes(page.Ledgers[0]) + ledgerInfoBytes(page.Ledgers[1])
+		page, err = handler.getLedgers(t.Context(), request)
+		require.NoError(t, err)
+		assert.Len(t, page.Ledgers, 2)
+		assert.Equal(t, "2", page.Cursor)
+	}
 }
 
 func TestGetLedgers_CustomLimit(t *testing.T) {

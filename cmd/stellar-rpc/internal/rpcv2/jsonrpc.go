@@ -22,6 +22,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
 // handlerParams carries everything newJSONRPCHandler composes into the method
@@ -65,6 +66,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		}
 	}
 
+	xdr2json.SetMaxOutputBytes(deref(cfg.Service.MaxJSONConversionBytes))
 	return jsonrpc.NewHandler(jsonrpc.Params{
 		Daemon:                p.daemon,
 		Logger:                p.logger,
@@ -72,6 +74,7 @@ func newJSONRPCHandler(cfg config.Config, p handlerParams) jsonrpc.Handler {
 		GlobalQueueLimit:      deref(cfg.Service.MaxConcurrentRequests),
 		GlobalDurationWarning: deref(cfg.Service.RequestExecutionWarningThreshold),
 		GlobalDurationLimit:   deref(cfg.Service.MaxRequestExecutionDuration),
+		MaxRequestBatchSize:   deref(cfg.Service.MaxRequestBatchSize),
 	})
 }
 
@@ -90,8 +93,9 @@ func buildHandlerSpecs(cfg config.Config, p handlerParams) []jsonrpc.HandlerSpec
 			FeeStats:          p.feeWindows,
 
 			GetEventsHandler: eventsapi.NewV1Handler(eventsapi.Limits{
-				MaxLimit:     deref(m.GetEvents.MaxItemsPerResponse),
-				DefaultLimit: deref(m.GetEvents.DefaultItemsPerResponse),
+				MaxLimit:         deref(m.GetEvents.MaxItemsPerResponse),
+				DefaultLimit:     deref(m.GetEvents.DefaultItemsPerResponse),
+				MaxResponseBytes: deref(cfg.Service.MaxResponseBytes),
 			}, p.logger),
 
 			// No DataStoreLedgerReader: getLedgers can fall back to a bulk
@@ -107,13 +111,15 @@ func buildHandlerSpecs(cfg config.Config, p handlerParams) []jsonrpc.HandlerSpec
 			DefaultLedgersLimit:      deref(m.GetLedgers.DefaultItemsPerResponse),
 			MaxTransactionsLimit:     deref(m.GetTransactions.MaxItemsPerResponse),
 			DefaultTransactionsLimit: deref(m.GetTransactions.DefaultItemsPerResponse),
+			MaxResponseBytes:         deref(cfg.Service.MaxResponseBytes),
 		})
 	specs = append(specs, jsonrpc.HandlerSpec{
 		MethodName: protocol.QueryEventsMethodName,
 		Handler: eventsapi.NewQueryEventsHandler(eventsapi.QueryEventsLimits{
 			Limits: eventsapi.Limits{
-				MaxLimit:     deref(m.QueryEvents.MaxItemsPerResponse),
-				DefaultLimit: deref(m.QueryEvents.DefaultItemsPerResponse),
+				MaxLimit:         deref(m.QueryEvents.MaxItemsPerResponse),
+				DefaultLimit:     deref(m.QueryEvents.DefaultItemsPerResponse),
+				MaxResponseBytes: deref(cfg.Service.MaxResponseBytes),
 			},
 			TermBudget: uint32(min(deref(m.QueryEvents.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
 		}, p.logger),

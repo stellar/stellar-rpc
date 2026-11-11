@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"errors"
 	"math"
 	"sync"
 	"time"
@@ -110,20 +111,13 @@ func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Reque
 			// warn
 			warn = true
 		case <-limitCh:
-			// limit
-			requestCtxCancel()
-			if q.limitCounter != nil {
-				q.limitCounter.Inc()
-			}
-			if q.logger != nil {
-				q.logger.Infof("Request processing for %s exceed limiting threshold of %v", req.Method(), q.limitThreshold)
-			}
-			if ctxErr := ctx.Err(); ctxErr == nil {
-				return nil, ErrRequestExceededProcessingLimitThreshold
-			} else {
-				return nil, ctxErr
-			}
+			return nil, q.limited(ctx, req)
 		case requestRes, ok := <-requestCompleted:
+			// A handler that ends with its deadline can get here before the
+			// limit's timer does.
+			if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
+				return nil, q.limited(ctx, req)
+			}
 			if warn {
 				if q.warningCounter != nil {
 					q.warningCounter.Inc()
@@ -142,7 +136,22 @@ func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Reque
 	}
 }
 
-// The three errors below are this repo's implementation-defined JSON-RPC
+// limited counts and logs a request that passed the limit, and returns its
+// error.
+func (q *RPCRequestDurationLimiter) limited(ctx context.Context, req *jrpc2.Request) error {
+	if q.limitCounter != nil {
+		q.limitCounter.Inc()
+	}
+	if q.logger != nil {
+		q.logger.Infof("Request processing for %s exceed limiting threshold of %v", req.Method(), q.limitThreshold)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return ErrRequestExceededProcessingLimitThreshold
+}
+
+// The errors below are this repo's implementation-defined JSON-RPC
 // codes, kept together so every -3200x code is defined in one place.
 
 var ErrRequestExceededProcessingLimitThreshold = jrpc2.Error{
@@ -153,4 +162,13 @@ var ErrRequestExceededProcessingLimitThreshold = jrpc2.Error{
 var ErrFailToProcessDueToInternalIssue = jrpc2.Error{
 	Code:    -32003, // internal error
 	Message: "request failed to process due to internal issue",
+}
+
+// ErrPreflightQueueFull fails a simulateTransaction call that finds every
+// preflight worker busy and no place left to wait for one. A client may retry.
+// It is a pointer so that the response's message is Message alone, without
+// the code that jrpc2.Error.Error adds.
+var ErrPreflightQueueFull = &jrpc2.Error{
+	Code:    -32004,
+	Message: "preflight queue full; retry later",
 }

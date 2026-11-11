@@ -11,6 +11,8 @@ import (
 
 	supporthttp "github.com/stellar/go-stellar-sdk/support/http"
 	"github.com/stellar/go-stellar-sdk/support/log"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/network"
 )
 
 // DefaultHTTPReadTimeout and DefaultHTTPIdleTimeout are the http.Server
@@ -24,6 +26,19 @@ const (
 	DefaultHTTPReadTimeout = 5 * time.Second
 	DefaultHTTPIdleTimeout = 2 * time.Minute
 )
+
+const responseWriteTime = 30 * time.Second // to deliver a response after the execution limit
+
+// WriteTimeout is the http.Server write timeout both daemons set on their
+// serving listeners: the request execution limit plus responseWriteTime, or 0
+// (no timeout) when the sum would overflow. The bridge moves the deadline
+// forward as it writes a response.
+func WriteTimeout(maxExecution time.Duration) time.Duration {
+	if maxExecution > network.RequestDurationLimiterNoLimit-responseWriteTime {
+		return 0
+	}
+	return maxExecution + responseWriteTime
+}
 
 // NewAdminMux is the operator-facing mux both daemons serve on their admin
 // endpoint: the pprof handlers plus Prometheus /metrics over the given

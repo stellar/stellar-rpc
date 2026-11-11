@@ -7,17 +7,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
-	"net"
 	"net/http"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/creachadair/jrpc2"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/stellar/go-stellar-sdk/support/log"
@@ -28,23 +30,39 @@ import (
 
 const contentTypeJSON = "application/json"
 
+// A response gets responseChunkTimeout for each responseChunkSize bytes, so a
+// client that stops reading is dropped without capping how long a large
+// response may take.
+const (
+	responseChunkSize    = 1 << 20
+	responseChunkTimeout = 30 * time.Second
+)
+
 var (
 	errBridgeClosed = errors.New("the bridge is closed")
+	errBusy         = errors.New("too many requests are running")
 	errEmptyMethod  = &jrpc2.Error{Code: jrpc2.InvalidRequest, Message: "empty method name"}
 	errNoSuchMethod = &jrpc2.Error{Code: jrpc2.MethodNotFound, Message: jrpc2.MethodNotFound.String()}
 )
 
 // Bridge serves JSON-RPC 2.0 over HTTP POST by calling an Assigner's handlers
-// directly, at most one per CPU. The zero value is not usable; build it with
-// NewBridge.
+// directly, at most GOMAXPROCS at once apart from the methods in unslotted.
+// The zero value is not usable; build it with NewBridge.
 type Bridge struct {
-	// Bridge keeps jhttp.Bridge's wire behavior (TestBridge_ParityWithJHTTP)
-	// but encodes each result once. It enforces the duration limit itself, so a
-	// response is never buffered to be swapped for a 504.
+	// Bridge keeps the wire behavior of jhttp.Bridge with parseRequests as its
+	// ParseRequest hook (TestBridge_ParityWithJHTTP), but encodes each result
+	// once. It enforces the duration limit itself, so a response is never
+	// buffered to be swapped for a 504.
 	methods     jrpc2.Assigner
 	sem         *semaphore.Weighted // bounds the handlers running at once, as jrpc2.Server does
 	maxHandlers int
-	limits      durationLimits
+	// unslotted are the methods that bound their own concurrency and run
+	// without one of sem's slots.
+	unslotted    map[string]bool
+	maxBatchSize uint
+	limits       durationLimits
+	// requests, when set, bounds the requests whose calls run at once.
+	requests *requestLimit
 
 	mu     sync.RWMutex // read-held while a request's handlers run
 	closed bool
@@ -60,22 +78,25 @@ type durationLimits struct {
 	logger             *log.Entry
 }
 
-// NewBridge returns a Bridge over methods with no request duration limit.
-// logger receives panic stacks. The caller must Close it.
+// NewBridge returns a Bridge over methods with no request duration limit and
+// no batch size limit. logger receives panic stacks. The caller must Close it.
 func NewBridge(methods jrpc2.Assigner, logger *log.Entry) *Bridge {
-	return newBridge(methods, durationLimits{limit: network.RequestDurationLimiterNoLimit, logger: logger})
+	return newBridge(methods, math.MaxUint, durationLimits{limit: network.RequestDurationLimiterNoLimit, logger: logger})
 }
 
-func newBridge(methods jrpc2.Assigner, limits durationLimits) *Bridge {
+// newBridge returns a Bridge that answers a batch of more than maxBatchSize
+// calls with a single error.
+func newBridge(methods jrpc2.Assigner, maxBatchSize uint, limits durationLimits) *Bridge {
 	ctx, cancel := context.WithCancel(context.Background())
-	maxHandlers := runtime.NumCPU()
+	maxHandlers := runtime.GOMAXPROCS(0)
 	return &Bridge{
-		methods:     methods,
-		sem:         semaphore.NewWeighted(int64(maxHandlers)),
-		maxHandlers: maxHandlers,
-		limits:      limits,
-		ctx:         ctx,
-		cancel:      cancel,
+		methods:      methods,
+		sem:          semaphore.NewWeighted(int64(maxHandlers)),
+		maxHandlers:  maxHandlers,
+		maxBatchSize: maxBatchSize,
+		limits:       limits,
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 }
 
@@ -104,7 +125,7 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "content-type must be application/json", http.StatusUnsupportedMediaType)
 		return
 	}
-	if cs, ok := params["charset"]; ok && cs != "utf-8" && cs != "utf8" {
+	if cs, ok := params["charset"]; ok && !strings.EqualFold(cs, "utf-8") && !strings.EqualFold(cs, "utf8") {
 		http.Error(w, "invalid content-type charset", http.StatusUnsupportedMediaType)
 		return
 	}
@@ -112,6 +133,14 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := b.limits.bound(r.Context())
 	defer cancel()
 	batch, rsps, err := b.serve(ctx, r)
+	// The handlers can outlast the server's WriteTimeout, so the response gets
+	// its own write time, which write extends as it goes.
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Now().Add(responseChunkTimeout))
+	if errors.Is(err, errBusy) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
 	if b.limits.timedOut(r, time.Since(start)) {
 		if r.Context().Err() == nil {
 			w.WriteHeader(http.StatusGatewayTimeout)
@@ -123,7 +152,7 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err == nil {
-		err = write(w, batch, rsps)
+		err = write(w, rc, batch, rsps)
 	}
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -137,7 +166,11 @@ func (b *Bridge) serve(ctx context.Context, r *http.Request) (bool, []*response,
 	if err != nil {
 		return false, nil, err
 	}
-	reqs, err := jrpc2.ParseRequests(body)
+	if !b.requests.acquire() {
+		return false, nil, errBusy
+	}
+	defer b.requests.release()
+	reqs, err := parseRequests(body, b.maxBatchSize)
 	if err != nil {
 		return false, nil, err
 	}
@@ -170,6 +203,45 @@ func (l durationLimits) timedOut(r *http.Request, elapsed time.Duration) bool {
 		l.logger.Infof("Request processing for %s exceed warning threshold of %v", r.URL.Path, l.warning)
 	}
 	return false
+}
+
+// requestLimit bounds the requests whose calls run at once, as network's HTTP
+// backlog limiter did, but counts a request only from when its body has been
+// read, so a client that sends its body slowly holds no slot.
+type requestLimit struct {
+	limit   uint64
+	running atomic.Uint64
+	logged  atomic.Bool // the limit was logged since a request last finished
+	gauge   prometheus.Gauge
+	logger  *log.Entry
+}
+
+// acquire counts a request, unless limit requests are running. A nil l has no
+// limit.
+func (l *requestLimit) acquire() bool {
+	if l == nil {
+		return true
+	}
+	if l.running.Add(1) > l.limit {
+		l.running.Add(^uint64(0))
+		if l.logged.CompareAndSwap(false, true) {
+			l.logger.Infof("Backlog queue limiter reached the queue limit of %d executing concurrent http requests.",
+				l.limit)
+		}
+		return false
+	}
+	l.gauge.Inc()
+	return true
+}
+
+// release stops counting a request that acquire counted.
+func (l *requestLimit) release() {
+	if l == nil {
+		return
+	}
+	l.running.Add(^uint64(0))
+	l.gauge.Dec()
+	l.logged.Store(false)
 }
 
 // recoverPanic answers 500 to a request whose serving panicked outside a
@@ -213,12 +285,17 @@ func (b *Bridge) run(ctx context.Context, reqs []*jrpc2.ParsedRequest) ([]*respo
 			rsps[i] = rsp
 			continue
 		}
-		if err := b.sem.Acquire(ctx, 1); err != nil {
-			rsps[i] = respond(pr, nil, err)
-			continue
+		slotted := !b.unslotted[pr.Method]
+		if slotted {
+			if err := b.sem.Acquire(ctx, 1); err != nil {
+				rsps[i] = respond(pr, nil, err)
+				continue
+			}
 		}
 		call := func() {
-			defer b.sem.Release(1)
+			if slotted {
+				defer b.sem.Release(1)
+			}
 			defer func() {
 				if p := recover(); p != nil { // answer just this call, as the duration limiter does
 					for _, line := range util.CallStack(p, pr.Method, "(*Bridge).run.func", 8) {
@@ -296,8 +373,8 @@ type response struct {
 
 // write writes rsps as the body of a 200 response, as an array if batch is
 // set. Results are written without copying.
-func write(w http.ResponseWriter, batch bool, rsps []*response) error {
-	parts := make(net.Buffers, 0, 3*len(rsps)+2)
+func write(w http.ResponseWriter, rc *http.ResponseController, batch bool, rsps []*response) error {
+	parts := make([][]byte, 0, 3*len(rsps)+2)
 	if batch {
 		parts = append(parts, []byte("["))
 	}
@@ -328,8 +405,29 @@ func write(w http.ResponseWriter, batch bool, rsps []*response) error {
 	w.Header().Set("Content-Type", contentTypeJSON)
 	w.Header().Set("Content-Length", strconv.Itoa(n))
 	w.WriteHeader(http.StatusOK)
-	_, _ = parts.WriteTo(w) // a write error means the client is gone
+	writeChunked(w, rc, parts)
 	return nil
+}
+
+// writeChunked writes parts to w. The deadline the caller just set on rc covers
+// the first responseChunkSize bytes, and writeChunked moves it before each
+// responseChunkSize bytes after that. It stops at the first write error, which
+// means the client is gone.
+func writeChunked(w io.Writer, rc *http.ResponseController, parts [][]byte) {
+	left := responseChunkSize // bytes the current deadline still covers
+	for _, p := range parts {
+		for len(p) > 0 {
+			if left == 0 {
+				_ = rc.SetWriteDeadline(time.Now().Add(responseChunkTimeout))
+				left = responseChunkSize
+			}
+			n := min(len(p), left)
+			if _, err := w.Write(p[:n]); err != nil {
+				return
+			}
+			p, left = p[n:], left-n
+		}
+	}
 }
 
 // escapeID HTML-escapes a request ID before it is echoed, as re-encoding the

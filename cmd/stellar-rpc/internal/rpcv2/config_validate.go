@@ -236,6 +236,12 @@ func validateService(svc config.ServiceConfig) error {
 	if *svc.MaxConcurrentRequests < 1 {
 		return errors.New("[service].max_concurrent_requests must be >= 1")
 	}
+	if *svc.MaxRequestBatchSize < 1 {
+		return errors.New("[service].max_request_batch_size must be >= 1")
+	}
+	if *svc.MaxJSONConversionBytes < 1 {
+		return errors.New("[service].max_json_conversion_bytes must be >= 1")
+	}
 	durations := []struct {
 		name string
 		d    time.Duration
@@ -312,7 +318,8 @@ func validatePreflight(p config.PreflightConfig) error {
 	if *p.WorkerQueueSize < 1 {
 		return errors.New("[service.preflight].worker_queue_size must be >= 1")
 	}
-	return nil
+	return limits.ValidateSimulationMemoryLimit(
+		"[service.preflight].simulation_memory_limit", uint64(*p.SimulationMemoryLimit))
 }
 
 func validatePaginatedMethods(m config.MethodsConfig) error {

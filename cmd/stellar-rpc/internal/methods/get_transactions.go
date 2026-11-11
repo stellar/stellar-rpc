@@ -22,6 +22,7 @@ type transactionsRPCHandler struct {
 	ledgerReader      store.LedgerReader
 	maxLimit          uint
 	defaultLimit      uint
+	maxResponseBytes  int // zero means no limit
 	logger            *log.Entry
 	networkPassphrase string
 }
@@ -86,7 +87,7 @@ func missingLedger(seq uint32) *jrpc2.Error {
 // base64- or JSON-encoded into txns; nothing that aliases raw outlives this call.
 func (h transactionsRPCHandler) processTransactionsInLedger(
 	raw []byte, start toid.ID,
-	txns *[]protocol.TransactionInfo, limit uint,
+	txns *[]protocol.TransactionInfo, limit uint, budget *PageBudget,
 	format string,
 ) (*toid.ID, bool, error) {
 	limitInt, err := strconv.Atoi(strconv.FormatUint(uint64(limit), 10))
@@ -139,6 +140,10 @@ func (h transactionsRPCHandler) processTransactionsInLedger(
 			}
 		}
 
+		if !budget.Fits(transactionInfoBytes(txInfo)) {
+			cursor.TransactionOrder-- // the last transaction returned
+			return cursor, true, nil
+		}
 		*txns = append(*txns, txInfo)
 		if len(*txns) >= limitInt {
 			return cursor, true, nil
@@ -239,6 +244,7 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 	// Iterate through each ledger and its transactions until limit or end range is reached.
 	// The latest ledger acts as the end ledger range for the request.
 	txns := make([]protocol.TransactionInfo, 0, limit)
+	budget := PageBudget{Limit: h.maxResponseBytes}
 	var done bool
 	cursor := toid.New(0, 0, 0)
 	if start.LedgerSequence < 0 {
@@ -261,7 +267,7 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 		if entry.Sequence != next {
 			return protocol.GetTransactionsResponse{}, missingLedger(next)
 		}
-		cursor, done, err = h.processTransactionsInLedger(entry.Raw, start, &txns, limit, request.Format)
+		cursor, done, err = h.processTransactionsInLedger(entry.Raw, start, &txns, limit, &budget, request.Format)
 		if err != nil {
 			return protocol.GetTransactionsResponse{}, err
 		}
@@ -293,12 +299,13 @@ func (h transactionsRPCHandler) getTransactionsByLedgerSequence(ctx context.Cont
 }
 
 func NewGetTransactionsHandler(logger *log.Entry, ledgerReader store.LedgerReader, maxLimit,
-	defaultLimit uint, networkPassphrase string,
+	defaultLimit, maxResponseBytes uint, networkPassphrase string,
 ) jrpc2.Handler {
 	transactionsHandler := transactionsRPCHandler{
 		ledgerReader:      ledgerReader,
 		maxLimit:          maxLimit,
 		defaultLimit:      defaultLimit,
+		maxResponseBytes:  ByteLimit(maxResponseBytes),
 		logger:            logger,
 		networkPassphrase: networkPassphrase,
 	}

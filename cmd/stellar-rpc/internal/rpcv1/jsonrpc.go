@@ -11,6 +11,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv1/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/xdr2json"
 )
 
 // Handler is the HTTP handler which serves the Soroban JSON RPC responses
@@ -42,7 +43,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			DataStoreLedgerReader: params.DataStoreLedgerReader,
 
 			GetEventsHandler: methods.NewGetEventsHandler(params.Logger, params.EventReader,
-				cfg.MaxEventsLimit, cfg.DefaultEventsLimit),
+				cfg.MaxEventsLimit, cfg.DefaultEventsLimit, cfg.MaxResponseBytes),
 
 			NetworkPassphrase:       cfg.NetworkPassphrase,
 			FriendbotURL:            cfg.FriendbotURL,
@@ -53,6 +54,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 			DefaultLedgersLimit:      cfg.DefaultLedgersLimit,
 			MaxTransactionsLimit:     cfg.MaxTransactionsLimit,
 			DefaultTransactionsLimit: cfg.DefaultTransactionsLimit,
+			MaxResponseBytes:         cfg.MaxResponseBytes,
 		})
 	specs = jsonrpc.LimitsByMethod{
 		protocol.GetHealthMethodName: {
@@ -105,6 +107,7 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		},
 	}.Apply(specs)
 
+	xdr2json.SetMaxOutputBytes(cfg.MaxJSONConversionBytes)
 	return jsonrpc.NewHandler(jsonrpc.Params{
 		Daemon:                params.Daemon,
 		Logger:                params.Logger,
@@ -112,5 +115,6 @@ func NewJSONRPCHandler(cfg *config.Config, params HandlerParams) Handler {
 		GlobalQueueLimit:      cfg.RequestBacklogGlobalQueueLimit,
 		GlobalDurationWarning: cfg.RequestExecutionWarningThreshold,
 		GlobalDurationLimit:   cfg.MaxRequestExecutionDuration,
+		MaxRequestBatchSize:   cfg.MaxRequestBatchSize,
 	})
 }
