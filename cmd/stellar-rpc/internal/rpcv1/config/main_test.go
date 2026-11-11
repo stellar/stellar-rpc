@@ -54,7 +54,22 @@ func TestConfigLoadDefaults(t *testing.T) {
 
 	// Check that the defaults are set
 	assert.Equal(t, defaultHTTPEndpoint, cfg.Endpoint)
-	assert.Equal(t, uint(runtime.NumCPU()), cfg.PreflightWorkerCount)
+	assert.Equal(t, uint(runtime.GOMAXPROCS(0)), cfg.PreflightWorkerCount)
+}
+
+// The concurrency defaults follow GOMAXPROCS, the CPUs the process may use,
+// which can be fewer than the machine has.
+func TestConfigConcurrencyDefaultsFollowGOMAXPROCS(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(3))
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte("MAX_REQUEST_BATCH_SIZE = 1\n"), 0o600))
+	cfg := Config{}
+	require.NoError(t, cfg.SetValues(func(key string) (string, bool) {
+		return path, key == "SOROBAN_RPC_CONFIG_PATH"
+	}))
+	assert.Equal(t, uint(3), cfg.PreflightWorkerCount)
+	assert.Equal(t, uint(3), cfg.PreflightWorkerQueueSize)
+	assert.Equal(t, uint16(3), cfg.CaptiveCoreHTTPQueryThreadPoolSize)
 }
 
 // The preflight queue holds a whole batch of simulations by default.
@@ -65,7 +80,7 @@ func TestConfigPreflightQueueHoldsABatch(t *testing.T) {
 		env  map[string]string
 		want uint
 	}{
-		{env: nil, want: max(uint(runtime.NumCPU()), 10)},
+		{env: nil, want: max(uint(runtime.GOMAXPROCS(0)), 10)},
 		{env: map[string]string{"SOROBAN_RPC_CONFIG_PATH": path}, want: 500},
 		{env: map[string]string{"SOROBAN_RPC_CONFIG_PATH": path, "PREFLIGHT_WORKER_QUEUE_SIZE": "2"}, want: 2},
 	} {

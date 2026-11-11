@@ -171,9 +171,9 @@ soroban_inclusion_fee_window_ledgers = 50
 # The simulateTransaction worker pool.
 [service.preflight]
 # Concurrent preflights, and how many more may wait for a worker before new
-# requests are rejected. The worker count defaults to the CPU count, and the
-# queue to the larger of the CPU count and max_request_batch_size, since the
-# calls of one batch start at once.
+# requests are rejected. The worker count defaults to the number of CPUs the
+# process may use, and the queue to the larger of that and
+# max_request_batch_size, since the calls of one batch start at once.
 #worker_count = 8
 #worker_queue_size = 10
 # Diagnostic events in simulateTransaction responses. The default is true, but
@@ -255,8 +255,8 @@ core_http_query_port = 11628
 #core_url = "http://localhost:11626"
 # Timeout for each request to either server.
 core_request_timeout = "2s"
-# Query server threads (default: the CPU count), and how many recent ledgers
-# it keeps snapshots of.
+# Query server threads (default: the number of CPUs the process may use), and
+# how many recent ledgers it keeps snapshots of.
 #core_http_query_thread_pool_size = 8
 core_http_query_snapshot_ledgers = 4
 

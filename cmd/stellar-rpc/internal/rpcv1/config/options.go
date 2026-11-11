@@ -37,10 +37,11 @@ func (cfg *Config) options() Options {
 		return *cfg.optionsCache
 	}
 	defaultStellarCoreBinaryPath, _ := exec.LookPath("stellar-core")
-	//nolint:gosec // runtime.NumCPU() is always non-negative and realistically well below uint limits
-	defaultUintCPU := uint(runtime.NumCPU())
-	//nolint:gosec // runtime.NumCPU() is always non-negative and realistically well below uint16 limits
-	defaultUint16CPU := uint16(runtime.NumCPU())
+	// The number of CPUs the process may use, which follows a container's CPU limit.
+	//nolint:gosec // runtime.GOMAXPROCS(0) is always positive and realistically well below uint limits
+	defaultUintCPU := uint(runtime.GOMAXPROCS(0))
+	//nolint:gosec // runtime.GOMAXPROCS(0) is always positive and realistically well below uint16 limits
+	defaultUint16CPU := uint16(runtime.GOMAXPROCS(0))
 	cfg.optionsCache = &Options{
 		{
 			Name: "config-path",
@@ -401,14 +402,14 @@ func (cfg *Config) options() Options {
 		},
 		{
 			Name:         "preflight-worker-count",
-			Usage:        "Number of worker processes used to compute preflights for the simulateTransaction endpoint. Defaults to the number of CPUs.",
+			Usage:        "Number of worker processes used to compute preflights for the simulateTransaction endpoint. Defaults to the number of CPUs the process may use (GOMAXPROCS).",
 			ConfigKey:    &cfg.PreflightWorkerCount,
 			DefaultValue: defaultUintCPU,
 			Validate:     positive,
 		},
 		{
 			Name:         "preflight-worker-queue-size",
-			Usage:        "Maximum number of outstanding preflight requests for the simulateTransaction endpoint. 0, the default, means the larger of the number of CPUs and MAX_REQUEST_BATCH_SIZE, since the calls of one batch start at once.",
+			Usage:        "Maximum number of outstanding preflight requests for the simulateTransaction endpoint. 0, the default, means the larger of the number of CPUs the process may use (GOMAXPROCS) and MAX_REQUEST_BATCH_SIZE, since the calls of one batch start at once.",
 			ConfigKey:    &cfg.PreflightWorkerQueueSize,
 			DefaultValue: uint(0),
 			Validate:     positive,

@@ -46,8 +46,8 @@ var (
 )
 
 // Bridge serves JSON-RPC 2.0 over HTTP POST by calling an Assigner's handlers
-// directly, at most one per CPU apart from the methods in unslotted. The zero
-// value is not usable; build it with NewBridge.
+// directly, at most GOMAXPROCS at once apart from the methods in unslotted.
+// The zero value is not usable; build it with NewBridge.
 type Bridge struct {
 	// Bridge keeps the wire behavior of jhttp.Bridge with parseRequests as its
 	// ParseRequest hook (TestBridge_ParityWithJHTTP), but encodes each result
@@ -88,7 +88,7 @@ func NewBridge(methods jrpc2.Assigner, logger *log.Entry) *Bridge {
 // calls with a single error.
 func newBridge(methods jrpc2.Assigner, maxBatchSize uint, limits durationLimits) *Bridge {
 	ctx, cancel := context.WithCancel(context.Background())
-	maxHandlers := runtime.NumCPU()
+	maxHandlers := runtime.GOMAXPROCS(0)
 	return &Bridge{
 		methods:      methods,
 		sem:          semaphore.NewWeighted(int64(maxHandlers)),

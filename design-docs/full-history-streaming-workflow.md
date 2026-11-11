@@ -85,8 +85,8 @@ Every TOML leaf is also settable from the command line:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `worker_count` | uint | `NumCPU` | Concurrent preflights; >= 1. |
-| `worker_queue_size` | uint | `NumCPU` | Requests that may wait for a free worker; >= 1. |
+| `worker_count` | uint | `GOMAXPROCS` | Concurrent preflights; >= 1. |
+| `worker_queue_size` | uint | `GOMAXPROCS` | Requests that may wait for a free worker; >= 1. |
 | `simulation_memory_limit` | uint | `0` | Most heap memory, in bytes, the simulation library may hold in a worker; 0 means 8 times the network's per-transaction memory limit, and any other value must be at least 16000000. Plan for about this limit + 128 MiB per worker. |
 | `enable_debug` | bool | `true` | Diagnostic events in simulateTransaction responses. |
 
@@ -143,7 +143,7 @@ Every TOML leaf is also settable from the command line:
 | `core_url` | string | `http://localhost:{core_http_port}` | Where transactions are submitted; set it only if core's admin server is not on localhost. |
 | `core_request_timeout` | duration | `"2s"` | Timeout for requests to either core server. |
 | `core_http_query_port` | uint | `11628` | Core's query port, serving ledger-entry reads for getLedgerEntries and preflight. |
-| `core_http_query_thread_pool_size` | uint | `NumCPU` | Threads core's query server uses. |
+| `core_http_query_thread_pool_size` | uint | `GOMAXPROCS` | Threads core's query server uses. |
 | `core_http_query_snapshot_ledgers` | uint | `4` | Recent ledgers core's query server keeps snapshots of. |
 
 - The `core_*` keys are written into the **live** ingestion core's config only. A no-lake backfill runs one bounded-replay core per chunk in parallel, so fixed ports there would collide; nothing queries a backfill core.

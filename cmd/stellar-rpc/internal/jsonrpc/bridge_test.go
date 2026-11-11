@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -409,6 +410,14 @@ func TestNewBridge_UnboundedRequestContext(t *testing.T) {
 	b.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.JSONEq(t, `{"jsonrpc":"2.0","id":1,"result":{"deadline":false,"value":"planted"}}`, rec.Body.String())
+}
+
+// The bridge runs as many handlers at once as the CPUs the process may use.
+func TestBridge_HandlerSlotsFollowGOMAXPROCS(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(3))
+	b := newBridge(handler.Map{}, testMaxBatchSize, unlimited)
+	t.Cleanup(b.Close)
+	require.Equal(t, 3, b.MaxHandlers())
 }
 
 // A method that bounds its own concurrency runs while other calls hold every

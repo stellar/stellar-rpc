@@ -247,8 +247,8 @@ func TestParseConfig_PreflightDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	p := cfg.Service.Preflight
-	assert.Equal(t, NumCPU(), *p.WorkerCount)
-	assert.Equal(t, max(NumCPU(), DefaultMaxRequestBatchSize), *p.WorkerQueueSize)
+	assert.Equal(t, UsableCPUs(), *p.WorkerCount)
+	assert.Equal(t, max(UsableCPUs(), DefaultMaxRequestBatchSize), *p.WorkerQueueSize)
 	assert.True(t, *p.EnableDebug)
 }
 
@@ -260,6 +260,21 @@ max_request_batch_size = 500
 `))
 	require.NoError(t, err)
 	assert.Equal(t, uint(500), *cfg.Service.Preflight.WorkerQueueSize)
+}
+
+// The concurrency defaults follow GOMAXPROCS, the CPUs the process may use,
+// which can be fewer than the machine has.
+func TestParseConfig_ConcurrencyDefaultsFollowGOMAXPROCS(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(3))
+	cfg, err := ParseConfig([]byte(minimalValidConfig + `
+[service]
+max_request_batch_size = 1
+`))
+	require.NoError(t, err)
+
+	assert.Equal(t, uint(3), *cfg.Service.Preflight.WorkerCount)
+	assert.Equal(t, uint(3), *cfg.Service.Preflight.WorkerQueueSize)
+	assert.Equal(t, uint(3), *cfg.Ingestion.CoreHTTPQueryThreadPoolSize)
 }
 
 func TestParseConfig_PreflightExplicitValues(t *testing.T) {
@@ -286,7 +301,7 @@ func TestParseConfig_CoreHTTPDefaults(t *testing.T) {
 	assert.Equal(t, "http://localhost:11626", ing.CoreURL)
 	assert.Equal(t, DefaultCoreRequestTimeout, *ing.CoreRequestTimeout)
 	assert.Equal(t, DefaultCoreHTTPQueryPort, *ing.CoreHTTPQueryPort)
-	assert.Equal(t, NumCPU(), *ing.CoreHTTPQueryThreadPoolSize)
+	assert.Equal(t, UsableCPUs(), *ing.CoreHTTPQueryThreadPoolSize)
 	assert.Equal(t, DefaultCoreHTTPQuerySnapshotLedgers, *ing.CoreHTTPQuerySnapshotLedgers)
 }
 

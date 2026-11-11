@@ -33,7 +33,7 @@ import (
 // (MinLedger/MaxLedger report it). The span must fit the 3-byte payload.
 //
 // The .bin files are k-way merged (cold_merge.go) and fed single-pass to
-// streamhash. By default the block build uses runtime.NumCPU()/2 workers
+// streamhash. By default the block build uses runtime.GOMAXPROCS(0)/2 workers
 // (~2.7x over single-threaded); caller opts override. Removes the partial
 // output on error, and honors ctx cancellation.
 //
@@ -104,20 +104,21 @@ func BuildColdIndex(
 }
 
 // defaultBuildWorkers is the streamhash block-build parallelism used when
-// the caller doesn't override it. NumCPU/2 — see maxMergeLeaves for the
+// the caller doesn't override it. GOMAXPROCS/2 — see maxMergeLeaves for the
 // joint (leaves, workers) sweep that picked it.
 func defaultBuildWorkers() int {
-	return max(1, runtime.NumCPU()/2)
+	return max(1, runtime.GOMAXPROCS(0)/2)
 }
 
 // maxMergeLeaves caps the leaf merge goroutines (= peak concurrent O_DIRECT
-// reads). NumCPU/2 pairs with defaultBuildWorkers (also NumCPU/2): together
-// they fill NumCPU cores without oversubscription, which a cold Linux NVMe
-// sweep over 382M real keys found is the joint end-to-end optimum — the
-// builder (the e2e gate) saturates at NumCPU/2 workers, and more leaves only
-// steal its cores (~+18% e2e at NumCPU/2 vs NumCPU). Capped at the file count.
+// reads). GOMAXPROCS/2 pairs with defaultBuildWorkers (also GOMAXPROCS/2):
+// together they fill the process's CPUs without oversubscription, which a
+// cold Linux NVMe sweep over 382M real keys found is the joint end-to-end
+// optimum — the builder (the e2e gate) saturates at half the CPUs, and more
+// leaves only steal its cores (~+18% e2e at half the CPUs vs all of them).
+// Capped at the file count.
 func maxMergeLeaves() int {
-	return max(1, runtime.NumCPU()/2)
+	return max(1, runtime.GOMAXPROCS(0)/2)
 }
 
 // scanAndValidate sums the per-file header counts, cross-checking each against
