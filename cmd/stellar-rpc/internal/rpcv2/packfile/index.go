@@ -104,6 +104,16 @@ func (x *index) groupFlags(g int) uint8 { return x.dir[g*dirEntryLen+dirFlags] }
 
 func (x *index) hasCounts(g int) bool { return x.groupFlags(g)&groupHasCounts != 0 }
 
+// impliedLastCount is how many items group g's last record holds when the
+// group has no counts: the item limit, or for the pack's last record the
+// items left when every record before it is full.
+func (x *index) impliedLastCount(g int) int {
+	if g < x.groupCount-1 {
+		return x.perRecord
+	}
+	return x.items - (x.records-1)*x.perRecord
+}
+
 // parseIndex checks the section's CRC and directory against the trailer.
 // The checks keep every group's records inside [0, dataEnd) and its items
 // inside [0, items) whatever the other groups hold, so a read can trust a
@@ -231,10 +241,7 @@ func (t *groupTable) loadItems(x *index, g int, column []byte) error {
 			first += int(c)
 		}
 	} else {
-		last := x.perRecord
-		if g == x.groupCount-1 {
-			last = x.items - (x.records-1)*x.perRecord
-		}
+		last := x.impliedLastCount(g)
 		if last < 1 || last > x.perRecord {
 			return fmt.Errorf("%w: index group %d: record %d holds %d items", ErrCorrupt, g, n-1, last)
 		}
