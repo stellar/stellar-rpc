@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/network"
 )
 
@@ -53,6 +56,47 @@ func TestConfigLoadDefaults(t *testing.T) {
 	// Check that the defaults are set
 	assert.Equal(t, defaultHTTPEndpoint, cfg.Endpoint)
 	assert.Equal(t, uint(runtime.NumCPU()), cfg.PreflightWorkerCount)
+}
+
+func TestConfigBufferedStorageBackendDefaults(t *testing.T) {
+	const datastoreToml = `
+SERVE_LEDGERS_FROM_DATASTORE = true
+
+[datastore_config]
+type = "GCS"
+
+[datastore_config.params]
+destination_bucket_path = "bucket/ledgers"
+`
+	for _, tc := range []struct {
+		toml string
+		want ledgerbackend.BufferedStorageBackendConfig
+	}{
+		{
+			toml: datastoreToml,
+			want: ledgerbackend.BufferedStorageBackendConfig{BufferSize: 100, NumWorkers: 10},
+		},
+		{
+			toml: datastoreToml + "\n[buffered_storage_backend_config]\nbuffer_size = 50\n",
+			want: ledgerbackend.BufferedStorageBackendConfig{BufferSize: 50, NumWorkers: 10},
+		},
+		{
+			toml: datastoreToml + "\n[buffered_storage_backend_config]\nbuffer_size = 5\n",
+			want: ledgerbackend.BufferedStorageBackendConfig{BufferSize: 5, NumWorkers: 5},
+		},
+	} {
+		path := filepath.Join(t.TempDir(), "config.toml")
+		require.NoError(t, os.WriteFile(path, []byte(tc.toml), 0o600))
+		var cfg Config
+		require.NoError(t, cfg.SetValues(func(key string) (string, bool) {
+			if key == "SOROBAN_RPC_CONFIG_PATH" {
+				return path, true
+			}
+			return "", false
+		}))
+		require.True(t, cfg.ServeLedgersFromDatastore)
+		assert.Equal(t, tc.want, cfg.BufferedStorageBackendConfig, tc.toml)
+	}
 }
 
 func TestConfigExtendedUserAgent(t *testing.T) {
