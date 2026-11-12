@@ -168,7 +168,7 @@ func TestIndexDirectoryChecks(t *testing.T) {
 		{"group past the records", put64(field(2, dirFirstByte), dataEnd+1)},
 		{"group shorter than a column", put32(field(1, dirEnd), x.groupEnd(0)+minColumnLen-1)},
 		{"groups short of the region", put32(field(2, dirEnd), x.groupEnd(2)-1)},
-		{"group short of its records", put32(field(2, dirFirstItem), 2*groupSize*perRecord-1)},
+		{"group short of an item per record", put32(field(2, dirFirstItem), groupSize*perRecord+groupSize-1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := bytes.Clone(section)
@@ -181,15 +181,26 @@ func TestIndexDirectoryChecks(t *testing.T) {
 	}
 
 	t.Run("item count", func(t *testing.T) {
-		// The last record holds 1 to perRecord items.
-		for _, n := range []int{records * perRecord, records*perRecord - perRecord + 1} {
+		// The last group's records hold 1 to perRecord items each.
+		first := 2 * groupSize * perRecord
+		for _, n := range []int{first + groupSize*perRecord, first + groupSize} {
 			_, err := parseIndex(section, records, n, perRecord, dataEnd)
 			require.NoError(t, err, "%d items", n)
 		}
-		for _, n := range []int{records*perRecord + 1, records*perRecord - perRecord} {
+		for _, n := range []int{first + groupSize*perRecord + 1, first + groupSize - 1} {
 			_, err := parseIndex(section, records, n, perRecord, dataEnd)
 			require.ErrorIs(t, err, ErrCorrupt, "%d items", n)
 		}
+	})
+
+	t.Run("counted group shorter than two columns", func(t *testing.T) {
+		offsets := variedOffsets(groupSize + 1)
+		s, err := encodeIndex(offsets, fullCounts(groupSize+1, perRecord), perRecord)
+		require.NoError(t, err)
+		s[len(s)-4-dirEntryLen+dirFlags] = groupHasCounts
+		reseal(s)
+		_, err = parseIndex(s, groupSize+1, (groupSize+1)*perRecord, perRecord, offsets[groupSize+1])
+		require.ErrorIs(t, err, ErrCorrupt)
 	})
 
 	t.Run("empty", func(t *testing.T) {
@@ -202,7 +213,8 @@ func TestIndexDirectoryChecks(t *testing.T) {
 	})
 }
 
-// Counts that break the item limit or the directory fail at open or at decode.
+// Counts that break the item limit or the directory fail at open, or when a
+// read decodes a group they affect.
 func TestIndexCountChecks(t *testing.T) {
 	records := 3 * groupSize
 	offsets := variedOffsets(records)
@@ -236,19 +248,19 @@ func TestIndexCountChecks(t *testing.T) {
 		counts    []uint32
 		mutate    func([]byte) // applied under a recomputed CRC
 		extra     int          // items the trailer claims beyond the counts
-		badGroup  int          // -1: Open fails; otherwise only loading this group fails
+		bad       []int        // the groups whose load fails; nil when Open fails
 	}{
-		{"counts with one item per record", 1, counts(1, nil), setFlags(1, groupHasCounts), 0, -1},
-		{"no counts without an item limit", 0, uneven, setFlags(1, 0), 0, -1},
-		{"counted group short of an item per record", 2, shortLast, nil, -groupSize, -1},
-		{"counted group over the item limit", 2, shortLast, nil, 2, -1},
-		{"uncounted group after a counted one", 2, counts(2, map[int]uint32{5: 1}), shiftFirstItem(2, 1), 0, -1},
-		{"zero count", 2, counts(2, map[int]uint32{groupSize + 3: 0}), nil, 0, 1},
-		{"count over the item limit", 2, counts(2, map[int]uint32{groupSize + 3: 3, groupSize + 4: 1}), nil, 0, 1},
-		{"counts short of the next group", 2, shortLast, nil, 1, 2},
-		{"flag without a count column", 2, counts(2, nil), setFlags(0, groupHasCounts), 0, 0},
-		{"uncounted last group after a counted one", 2, counts(2, map[int]uint32{groupSize + 3: 1}), setFlags(2, 0), 0, -1},
-		{"count column without the flag", 2, shortLast, setFlags(2, 0), 0, 2},
+		{"group short of an item per record", 2, shortLast, nil, -groupSize, nil},
+		{"group over the item limit", 2, shortLast, nil, 2, nil},
+		{"zero count", 2, counts(2, map[int]uint32{groupSize + 3: 0}), nil, 0, []int{1}},
+		{"count over the item limit", 2, counts(2, map[int]uint32{groupSize + 3: 3, groupSize + 4: 1}), nil, 0, []int{1}},
+		{"counts short of the next group", 2, shortLast, nil, 1, []int{2}},
+		{"flag without a count column", 2, counts(2, nil), setFlags(0, groupHasCounts), 0, []int{0}},
+		{"count column without the flag", 2, shortLast, setFlags(2, 0), 0, []int{2}},
+		{"no counts without an item limit", 0, uneven, setFlags(1, 0), 0, []int{1}},
+		{"full records short of the next group", 2, counts(2, map[int]uint32{5: 1}), shiftFirstItem(1, 1), 0, []int{0, 1}},
+		{"full last group before its first item", 2, counts(2, nil), shiftFirstItem(2, -1), -1, []int{1, 2}},
+		{"full records short of the item count", 2, counts(2, nil), nil, -2, []int{2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			section, err := encodeIndex(offsets, tc.counts, tc.perRecord)
@@ -258,7 +270,7 @@ func TestIndexCountChecks(t *testing.T) {
 				reseal(section)
 			}
 			x, err := parseIndex(section, records, itemCount(tc.counts)+tc.extra, tc.perRecord, dataEnd)
-			if tc.badGroup < 0 {
+			if tc.bad == nil {
 				require.ErrorIs(t, err, ErrCorrupt)
 				require.NotErrorIs(t, err, ErrChecksum)
 				return
@@ -266,7 +278,7 @@ func TestIndexCountChecks(t *testing.T) {
 			require.NoError(t, err)
 			var tab groupTable
 			for g := range x.groupCount {
-				if err := tab.load(&x, g); g == tc.badGroup {
+				if err := tab.load(&x, g); slices.Contains(tc.bad, g) {
 					require.ErrorIs(t, err, ErrCorrupt, "group %d", g)
 				} else {
 					require.NoError(t, err, "group %d", g)

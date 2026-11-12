@@ -1,10 +1,11 @@
 package packfile
 
-// The index section is [groups][directory][CRC32C]. For each group of
-// groupSize records, groups holds one intpack FOR group of their byte sizes,
-// after one of their item counts when the group has groupHasCounts, and the
-// directory one entry. Open checks the CRC and the directory and decodes no
-// group; a read decodes the groups it touches.
+// The index section is [groups][directory][CRC32C], with one index group per
+// groupSize records. A group's bytes hold its records' byte sizes as an
+// intpack FOR group, preceded by their item counts when the group has
+// groupHasCounts. The directory has one entry per group. Open checks the CRC
+// and the directory and decodes no group; a read decodes the groups it
+// touches.
 
 import (
 	"encoding/binary"
@@ -21,11 +22,10 @@ const (
 	groupSize = 128 // records per index group
 	// minColumnLen is the smallest FOR group: one packed byte and the 5-byte footer.
 	minColumnLen = 6
-	// groupHasCounts marks a group with a count column. A group needs one
-	// when the pack has no item limit, or when one of its records other than
-	// the pack's last holds fewer items than the limit. The last group also
-	// needs one when the group before it has one, so that its own decode
-	// checks its first item.
+	// groupHasCounts marks a group that stores its records' item counts. A
+	// group without them has full records: each holds the item limit, except
+	// the pack's last, which holds the items left when every record before it
+	// is full. With no item limit no record is full, so every group has counts.
 	groupHasCounts uint8 = 1 << 0
 	// knownGroupFlags holds every directory flag; any other bit is corrupt.
 	knownGroupFlags = groupHasCounts
@@ -102,12 +102,15 @@ func (x *index) groupFirstItem(g int) int {
 
 func (x *index) groupFlags(g int) uint8 { return x.dir[g*dirEntryLen+dirFlags] }
 
+func (x *index) hasCounts(g int) bool { return x.groupFlags(g)&groupHasCounts != 0 }
+
 // parseIndex checks the section's CRC and directory against the trailer.
 // The checks keep every group's records inside [0, dataEnd) and its items
 // inside [0, items) whatever the other groups hold, so a read can trust a
-// group without decoding the rest.
+// group's bounds without decoding the rest. A group's counts are checked
+// when a read decodes it.
 //
-//nolint:cyclop,gocognit // one check per layout rule; splitting hurts readability
+//nolint:cyclop // one check per layout rule; splitting hurts readability
 func parseIndex(section []byte, records, items, perRecord int, dataEnd int64) (index, error) {
 	if len(section) < 4 {
 		return index{}, fmt.Errorf("%w: index too small (%d bytes)", ErrCorrupt, len(section))
@@ -133,45 +136,30 @@ func parseIndex(section []byte, records, items, perRecord int, dataEnd int64) (i
 	if groupCount > 0 && x.groupFirstItem(0) != 0 {
 		return index{}, fmt.Errorf("%w: index group 0 starts at item %d", ErrCorrupt, x.groupFirstItem(0))
 	}
-	prevEnd, prevByte, item := 0, int64(0), 0
+	prevEnd, prevByte := 0, int64(0)
 	for g := range groupCount {
+		if f := x.groupFlags(g); f&^knownGroupFlags != 0 {
+			return index{}, fmt.Errorf("%w: index group %d has unknown flags %#x", ErrCorrupt, g, f)
+		}
+		columns := 1
+		if x.hasCounts(g) {
+			columns = 2
+		}
 		end := x.groupEnd(g)
-		if end-prevEnd < minColumnLen {
+		if end-prevEnd < columns*minColumnLen {
 			return index{}, fmt.Errorf("%w: index group %d spans [%d, %d)", ErrCorrupt, g, prevEnd, end)
 		}
 		first := x.groupFirstByte(g)
 		if first < prevByte || first > dataEnd || (g == 0 && first != 0) {
 			return index{}, fmt.Errorf("%w: index group %d starts at byte %d", ErrCorrupt, g, first)
 		}
-		flags := x.groupFlags(g)
-		if flags&^knownGroupFlags != 0 {
-			return index{}, fmt.Errorf("%w: index group %d has unknown flags %#x", ErrCorrupt, g, flags)
-		}
-		hasCounts := flags&groupHasCounts != 0
-		lastAfterCounts := g > 0 && g == groupCount-1 && x.groupFlags(g-1)&groupHasCounts != 0
-		if (hasCounts && perRecord == 1) || (!hasCounts && (perRecord == 0 || lastAfterCounts)) {
-			return index{}, fmt.Errorf("%w: index group %d has flags %#x with %d items per record",
-				ErrCorrupt, g, flags, perRecord)
-		}
-		// A record holds 1 to perRecord items (at least 1 with no limit), and
-		// exactly perRecord in a group without counts, except the pack's last.
-		next := x.groupFirstItem(g + 1)
-		n := x.groupRecords(g)
-		span, full := next-item, n*perRecord
-		var ok bool
-		switch {
-		case hasCounts:
-			ok = span >= n && (perRecord == 0 || span <= full)
-		case g == groupCount-1:
-			ok = span > full-perRecord && span <= full
-		default:
-			ok = span == full
-		}
-		if !ok {
+		// A record holds at least one item, and at most perRecord.
+		n, span := x.groupRecords(g), x.groupFirstItem(g+1)-x.groupFirstItem(g)
+		if span < n || (perRecord > 0 && span > n*perRecord) {
 			return index{}, fmt.Errorf("%w: index group %d holds %d items in %d records of up to %d",
 				ErrCorrupt, g, span, n, perRecord)
 		}
-		prevEnd, prevByte, item = end, first, next
+		prevEnd, prevByte = end, first
 	}
 	if prevEnd != len(x.groups) {
 		return index{}, fmt.Errorf("%w: index groups end at %d of %d bytes", ErrCorrupt, prevEnd, len(x.groups))
@@ -201,7 +189,7 @@ func (t *groupTable) load(x *index, g int) error {
 	t.n = 0
 	n := x.groupRecords(g)
 	blob := x.groups[x.groupEnd(g-1):x.groupEnd(g)]
-	sizes, consumed, err := intpack.DecodeGroup(blob, n, t.sizes[:0])
+	sizes, used, err := intpack.DecodeGroup(blob, n, t.sizes[:0])
 	if err != nil {
 		return fmt.Errorf("%w: index group %d: %w", ErrCorrupt, g, err)
 	}
@@ -215,15 +203,26 @@ func (t *groupTable) load(x *index, g int) error {
 		return fmt.Errorf("%w: index group %d: records end at byte %d, next group starts at %d",
 			ErrCorrupt, g, off, next)
 	}
-	rest := blob[:len(blob)-consumed]
+	if err := t.loadItems(x, g, blob[:len(blob)-used]); err != nil {
+		return err
+	}
+	t.g, t.n = g, n
+	return nil
+}
+
+// loadItems fills t.first for group g from its counts, stored in column (the
+// group's bytes before its sizes) or implied by full records, and checks
+// that its items end where the next group's start.
+func (t *groupTable) loadItems(x *index, g int, column []byte) error {
+	n := x.groupRecords(g)
 	first := x.groupFirstItem(g)
-	if x.groupFlags(g)&groupHasCounts != 0 {
+	if x.hasCounts(g) {
 		// The sizes are summed into off, so their scratch is free.
-		counts, used, err := intpack.DecodeGroup(rest, n, t.sizes[:0])
+		counts, used, err := intpack.DecodeGroup(column, n, t.sizes[:0])
 		if err != nil {
 			return fmt.Errorf("%w: index group %d counts: %w", ErrCorrupt, g, err)
 		}
-		rest = rest[:len(rest)-used]
+		column = column[:len(column)-used]
 		for i, c := range counts {
 			if c == 0 || (x.perRecord > 0 && int(c) > x.perRecord) {
 				return fmt.Errorf("%w: index group %d: record %d holds %d items", ErrCorrupt, g, i, c)
@@ -231,20 +230,27 @@ func (t *groupTable) load(x *index, g int) error {
 			t.first[i] = first
 			first += int(c)
 		}
-		if next := x.groupFirstItem(g + 1); first != next {
-			return fmt.Errorf("%w: index group %d: items end at %d, next group starts at %d",
-				ErrCorrupt, g, first, next)
-		}
 	} else {
+		last := x.perRecord
+		if g == x.groupCount-1 {
+			last = x.items - (x.records-1)*x.perRecord
+		}
+		if last < 1 || last > x.perRecord {
+			return fmt.Errorf("%w: index group %d: record %d holds %d items", ErrCorrupt, g, n-1, last)
+		}
 		for i := range n {
 			t.first[i] = first + i*x.perRecord
 		}
+		first = t.first[n-1] + last
 	}
-	if len(rest) != 0 {
-		return fmt.Errorf("%w: index group %d has %d unconsumed bytes", ErrCorrupt, g, len(rest))
+	if len(column) != 0 {
+		return fmt.Errorf("%w: index group %d has %d unconsumed bytes", ErrCorrupt, g, len(column))
 	}
-	t.first[n] = x.groupFirstItem(g + 1)
-	t.g, t.n = g, n
+	if next := x.groupFirstItem(g + 1); first != next {
+		return fmt.Errorf("%w: index group %d: items end at %d, next group starts at %d",
+			ErrCorrupt, g, first, next)
+	}
+	t.first[n] = first
 	return nil
 }
 
@@ -292,10 +298,11 @@ func encodeIndex(offsets []int64, counts []uint32, perRecord int) ([]byte, error
 	var section []byte
 	dir := make([]byte, groupCount*dirEntryLen)
 	sizes := make([]uint32, 0, groupSize)
-	firstItem, prevCounted := 0, false
+	firstItem := 0
 	for g := range groupCount {
 		base, end := g*groupSize, min((g+1)*groupSize, records)
-		counted := perRecord == 0 || (g == groupCount-1 && prevCounted)
+		// The pack's last record needs a count unless every record before it is full.
+		counted := perRecord == 0 || (end == records && firstItem != base*perRecord)
 		sizes = sizes[:0]
 		groupItems := 0
 		for j := base; j < end; j++ {
@@ -323,7 +330,7 @@ func encodeIndex(offsets []int64, counts []uint32, perRecord int) ([]byte, error
 		binary.LittleEndian.PutUint32(e[dirEnd:], uint32(len(section)))        //nolint:gosec // Finish checks the index size
 		binary.LittleEndian.PutUint32(e[dirFirstItem:], uint32(firstItem))
 		e[dirFlags] = flags
-		firstItem, prevCounted = firstItem+groupItems, counted
+		firstItem += groupItems
 	}
 	section = append(section, dir...)
 	return binary.LittleEndian.AppendUint32(section, crc32c(section)), nil

@@ -94,7 +94,8 @@ func TestByteLimitCounts(t *testing.T) {
 		items[groupSize*perRecord+10] = make([]byte, 95) // a record of its own in group 1
 		path := writePackfile(t, limited, items)
 		x := openIndex(t, path)
-		assert.Equal(t, []uint8{0, groupHasCounts, 0, 0}, groupFlags(x))
+		// The last group follows a short record, so its last record needs a count.
+		assert.Equal(t, []uint8{0, groupHasCounts, 0, groupHasCounts}, groupFlags(x))
 		assert.Equal(t, 1, recordCounts(t, x)[groupSize+5])
 		r := Open(path, ReaderOptions{})
 		defer r.Close()

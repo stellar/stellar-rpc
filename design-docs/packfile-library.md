@@ -419,7 +419,13 @@ crc32c      u32 over the groups and the directory
 
 A file with 20KB records uses ~15-bit values whether the file is 500MB or 50GB, because the values are record sizes, not file offsets.
 
-A group's records hold `ItemsPerRecord` items each, except the pack's last, so their item counts follow from the directory. A group in which the byte limit closed a record early, or any group when `ItemsPerRecord` is 0, stores the counts in a second FOR group in front of the sizes and sets the flag. The last group also has counts when the group before it does, so that its own decode checks its first item against the item count. The sizes end the group's bytes and are decoded first, so one `end` per group locates both. A pack of one item per record never has counts.
+Most groups store no item counts. Their records are full: each holds `ItemsPerRecord` items, except the pack's last record, which holds the items left over. A group stores its records' counts, in a second FOR group in front of the sizes, and sets the flag when:
+
+- one of its records other than the pack's last is short, because the byte limit closed it early;
+- it is the last group and a record anywhere before the pack's last is short;
+- `ItemsPerRecord` is 0.
+
+A pack of one item per record never has counts. The sizes end the group's bytes and are decoded first, so one `end` per group locates both.
 
 On open, the reader checks the CRC and the directory and decodes no group. A read decodes the index group of each record it touches into its workspace, which keeps it until a lookup moves to another group. Resolving item `i`:
 
@@ -569,13 +575,25 @@ The `Checksum` at offset 40 covers `trailer[0:40]`.
 
 ### Integrity
 
-**Index checksum:** CRC32C of the offset index's groups and directory, verified on open. Open also checks the directory: group ends ascend and fill the groups region, group first bytes ascend from 0 and stay within the records, and first items start at 0 and give each group's records 1 to `itemsPerRecord` items each, exactly `itemsPerRecord` but for the pack's last record when the group has no counts. Only the count flag may be set, never with one item per record and always with no item limit, and the last group must have it when the group before it does. These keep each group's records inside the records region, and its items inside the item count, without decoding the other groups. A read checks a group when it decodes it: the sizes must sum to the next group's first byte, or to `indexBase` after the last group, and the counts, each 1 to `itemsPerRecord`, to the next group's first item. A group that fails is `ErrCorrupt` for the reads that touch it.
+**Index checksum:** CRC32C of the offset index's groups and directory, verified on open. Open also checks the directory, without decoding any group:
+
+- only the count flag may be set;
+- group ends ascend, fill the groups region, and leave each group room for its columns;
+- group first bytes ascend from 0 and stay within the records;
+- first items start at 0 and give each group's records 1 to `itemsPerRecord` items each.
+
+These keep each group's records inside the records region, and its items inside the item count, whatever the other groups hold. A read checks a group when it decodes it:
+
+- its sizes sum to the next group's first byte, or to `indexBase` after the last group;
+- its counts, stored or implied by full records, are each 1 to `itemsPerRecord` and sum to the next group's first item.
+
+A group that fails is `ErrCorrupt` for the reads that touch it. The checks guarantee bounds, not which item a position names; that rests on the directory's first items, which the CRC covers. Changing one first item fails open, or the decode of both groups beside it. Shifting two neighboring first items by the same amount can pass for the group between them.
 
 **Trailer checksum:** CRC32C of `trailer[0:40]` protects all structural fields, including `appDataCRC`.
 
 **App data checksum:** CRC32C of the app-data section, stored in the trailer and verified on open, unconditionally. The section is opaque to the library, so nothing here can check it structurally, and a consumer's own decoder cannot tell plausible corruption from real data. An artifact built before this fails to open and gets rebuilt.
 
-**Trailer validation:** On open: flags against `knownFlags`, and `totalItems` against the directory, which lets a record hold fewer than `itemsPerRecord` items only in a group with counts or as the pack's last record. `itemsPerRecord` 0 means no item limit.
+**Trailer validation:** On open, flags are checked against `knownFlags`, and `totalItems` must give the last group's records 1 to `itemsPerRecord` items each. The last group's decode checks it exactly. `itemsPerRecord` 0 means no item limit.
 
 **Record checksum:** Each multi-item record carries a CRC32C in its last four bytes, verified on every record read, before the payload is passed to the decoder. `WriterOptions.RecordChecksum` selects whether it covers the item size index alone or the whole record including the payload; the trailer records which. See [Records](#records).
 
@@ -583,7 +601,7 @@ The `Checksum` at offset 40 covers `trailer[0:40]`.
 
 **Last group:** If `recordCount` is not a multiple of 128, the last index group holds the remaining records. Its FOR group encodes only their sizes, and its directory entry is like any other.
 
-**Last record:** The pack's last record may hold fewer than `ItemsPerRecord` items, and its group needs no count column for that.
+**Last record:** The pack's last record may hold fewer than `ItemsPerRecord` items. Its group needs no count column for that, as long as every record before it is full.
 
 **Zero items:** Valid. No records. Index section is just 4 bytes (CRC32C of empty payload).
 
