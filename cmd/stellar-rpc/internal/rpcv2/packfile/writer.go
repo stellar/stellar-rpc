@@ -1,7 +1,7 @@
-// Package packfile implements an immutable, append-only file format with O(1)
-// positional access. Items are accumulated into fixed-size records, each
-// optionally passed through a caller-supplied encoder and indexed by a
-// compact FOR-encoded offset table.
+// Package packfile implements an immutable, append-only file format with
+// positional access in one read per record. Items are accumulated into
+// records, each optionally passed through a caller-supplied encoder and
+// indexed by a compact FOR-encoded offset table.
 package packfile
 
 import (
@@ -15,8 +15,6 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/intpack"
 )
-
-const defaultItemsPerRecord = 128
 
 // recordCRCLen is the width of the CRC32C at the tail of a record.
 const recordCRCLen = 4
@@ -52,9 +50,16 @@ const (
 
 // WriterOptions configures how the packfile is written.
 type WriterOptions struct {
-	// ItemsPerRecord is the number of items per record. 0 defaults to 128.
-	// Maximum value: math.MaxUint32 (stored as uint32 in the trailer).
+	// ItemsPerRecord is the most items a record holds. 0 means no item limit
+	// and is valid only with MaxRecordBytes. Maximum value: math.MaxUint32
+	// (stored as uint32 in the trailer).
 	ItemsPerRecord int
+
+	// MaxRecordBytes, when > 0, caps a record's item bytes before encoding:
+	// an item that would take the record past the cap starts the next
+	// record, so only a record of one item can exceed it. Invalid with
+	// ItemsPerRecord 1.
+	MaxRecordBytes int
 
 	// Format is a caller-assigned identifier written to the trailer.
 	Format Format
@@ -120,12 +125,13 @@ func encodeForIndex(sizes []uint32) []byte {
 }
 
 // sealRecord assembles a record from its encoded-or-raw payload and its FOR
-// group (nil for a single-item record) and appends the trailing CRC32C.
+// group (nil in a pack of one item per record) and appends the trailing
+// CRC32C.
 //
 // wide selects what the checksum covers. Widened, it covers every preceding
 // byte, so it protects the payload; otherwise it covers the FOR group alone,
-// and a single-item record has nothing to write. Both land at the same offset
-// with the same width, which is why widening costs a multi-item record
+// and a record without one has nothing to write. Both land at the same offset
+// with the same width, which is why widening costs a record with a FOR group
 // nothing, and the trailer's flagRecordChecksum tells the reader which range
 // to check.
 //
@@ -196,9 +202,9 @@ func decodeForIndex(data []byte, n int, dst []uint32, wide bool) ([]uint32, []by
 }
 
 // Writer builds a packfile with item-level semantics. Items are accumulated
-// into records of itemsPerRecord items each; each record is optionally passed
-// through a caller-supplied encoder before being written with an offset
-// index.
+// into records, closed by ItemsPerRecord and MaxRecordBytes; each record is
+// optionally passed through a caller-supplied encoder before being written
+// with an offset index.
 //
 // A Writer must be used by a single goroutine; concurrent AppendItem, Finish,
 // or Close calls from multiple goroutines are not safe. Internally, a
@@ -210,6 +216,7 @@ type Writer struct {
 	path         string
 	pos          int64
 	offsets      []int64
+	counts       []uint32 // items in each record, in record order
 	bytesPerSync int64
 	lastSyncPos  int64
 
@@ -218,6 +225,7 @@ type Writer struct {
 	sizes            []uint32
 	total            int
 	itemsPerRecord   int
+	maxRecordBytes   int
 	format           Format
 	newRecordEncoder func() RecordEncoder
 	recordChecksum   bool
@@ -294,21 +302,20 @@ func (w *Writer) getRecordBuf(need int) []byte {
 //nolint:funcorder // paired with getRecordBuf
 func (w *Writer) putRecordBuf(b []byte) { w.recordBufPool.Put(&b) }
 
-// resolveItemsPerRecord returns the effective record size from opts, defaulting
-// to 128 if zero. Returns an error if negative or larger than uint32 max (the
-// on-disk trailer stores it as uint32).
-func resolveItemsPerRecord(opts WriterOptions) (int, error) {
-	rs := opts.ItemsPerRecord
-	if rs == 0 {
-		return defaultItemsPerRecord, nil
+func checkRecordLimits(opts WriterOptions) error {
+	switch {
+	case opts.ItemsPerRecord < 0:
+		return fmt.Errorf("packfile: ItemsPerRecord must be non-negative, got %d", opts.ItemsPerRecord)
+	case uint64(opts.ItemsPerRecord) > math.MaxUint32:
+		return fmt.Errorf("packfile: ItemsPerRecord %d exceeds uint32 max", opts.ItemsPerRecord)
+	case opts.MaxRecordBytes < 0:
+		return fmt.Errorf("packfile: MaxRecordBytes must be non-negative, got %d", opts.MaxRecordBytes)
+	case opts.ItemsPerRecord == 0 && opts.MaxRecordBytes == 0:
+		return errors.New("packfile: no record limit: set ItemsPerRecord, MaxRecordBytes or both")
+	case opts.ItemsPerRecord == 1 && opts.MaxRecordBytes > 0:
+		return errors.New("packfile: MaxRecordBytes has no effect with ItemsPerRecord 1")
 	}
-	if rs < 0 {
-		return 0, fmt.Errorf("packfile: ItemsPerRecord must be non-negative, got %d", rs)
-	}
-	if uint64(rs) > math.MaxUint32 {
-		return 0, fmt.Errorf("packfile: ItemsPerRecord %d exceeds uint32 max", rs)
-	}
-	return rs, nil
+	return nil
 }
 
 // Create starts writing a new packfile at path. By default, fails if the
@@ -325,8 +332,7 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 		return nil, fmt.Errorf("packfile: unknown RecordChecksum %d", opts.RecordChecksum)
 	}
 
-	itemsPerRecord, err := resolveItemsPerRecord(opts)
-	if err != nil {
+	if err := checkRecordLimits(opts); err != nil {
 		return nil, err
 	}
 
@@ -342,7 +348,8 @@ func Create(path string, opts WriterOptions) (*Writer, error) {
 	w := &Writer{
 		file:             f,
 		path:             path,
-		itemsPerRecord:   itemsPerRecord,
+		itemsPerRecord:   opts.ItemsPerRecord,
+		maxRecordBytes:   opts.MaxRecordBytes,
 		concurrency:      opts.Concurrency,
 		format:           opts.Format,
 		newRecordEncoder: opts.NewRecordEncoder,
@@ -462,7 +469,8 @@ func (w *Writer) abortPipeline(err error) {
 // concatenated into one item. An item may be zero bytes: AppendItem([]byte{})
 // records an empty item, while AppendItem() (no arguments) is a no-op. Parts
 // are copied; the caller may reuse the argument slices after AppendItem
-// returns. Flushes a record when ItemsPerRecord items accumulate.
+// returns. Flushes a record before an item that would leave it over
+// MaxRecordBytes, and when ItemsPerRecord items accumulate.
 func (w *Writer) AppendItem(parts ...[]byte) error {
 	if err := w.loadErr(); err != nil {
 		return err
@@ -482,6 +490,11 @@ func (w *Writer) AppendItem(parts ...[]byte) error {
 		return fmt.Errorf("packfile: item size %d exceeds uint32 max", total)
 	}
 
+	if w.maxRecordBytes > 0 && len(w.sizes) > 0 && len(w.buf)+total > w.maxRecordBytes {
+		if err := w.flush(); err != nil {
+			return w.recordErr(err)
+		}
+	}
 	for _, p := range parts {
 		w.buf = append(w.buf, p...)
 	}
@@ -520,14 +533,16 @@ func (w *Writer) writeRecord(data []byte) error {
 	return nil
 }
 
-// buildRecord extracts the current payload buffer and (for itemsPerRecord>1)
-// encodes the FOR index. Payload is allocated with spare capacity for forIndex
-// so callers can append without reallocation.
+// buildRecord extracts the current payload buffer and encodes the FOR index.
+// The record shape follows the pack's item limit, not the record's count:
+// only a pack of one item per record omits the FOR index. Payload is
+// allocated with spare capacity for forIndex so callers can append without
+// reallocation.
 //
 //nolint:funcorder // helper for flush / recordWorker
 func (w *Writer) buildRecord() ([]byte, []byte) {
 	var forIndex []byte
-	if w.itemsPerRecord > 1 {
+	if w.itemsPerRecord != 1 {
 		forIndex = encodeForIndex(w.sizes)
 	}
 	// Borrow a buffer pre-sized for w.buf + forIndex + the CRC32C sealRecord
@@ -553,6 +568,7 @@ func (w *Writer) buildRecord() ([]byte, []byte) {
 //
 //nolint:funcorder // internal helper chains into recordWorker / writeRecord
 func (w *Writer) flush() error {
+	w.counts = append(w.counts, uint32(len(w.sizes))) //nolint:gosec // at most the item count, which Finish caps at uint32
 	payload, forIndex := w.buildRecord()
 	if w.workCh == nil {
 		return w.writeRecord(sealRecord(payload, forIndex, w.recordChecksum))
@@ -592,7 +608,7 @@ func (w *Writer) Finish(appData []byte) error {
 
 	w.offsets = append(w.offsets, w.pos)
 
-	indexBytes, err := encodeIndex(w.offsets, w.itemsPerRecord)
+	indexBytes, err := encodeIndex(w.offsets, w.counts, w.itemsPerRecord)
 	if err != nil {
 		return w.recordErr(err)
 	}
@@ -654,7 +670,7 @@ func (w *Writer) writeTrailer(indexSize, appDataSize, appDataCRC uint32) error {
 		//nolint:gosec // bounded by len(offsets)
 		RecordCount: uint32(len(w.offsets) - 1),
 		TotalItems:  uint32(w.total), //nolint:gosec // bounds-checked by Finish
-		//nolint:gosec // validated in resolveItemsPerRecord
+		//nolint:gosec // validated in checkRecordLimits
 		ItemsPerRecord:    uint32(w.itemsPerRecord),
 		IndexForGroupSize: uint16(groupSize),
 		IndexSize:         indexSize,
