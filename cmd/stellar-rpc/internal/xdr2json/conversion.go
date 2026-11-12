@@ -7,11 +7,11 @@ package xdr2json
 #include <stdlib.h>
 #include <string.h>
 #include "../../lib/xdr2json.h"
-#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-pc-windows-gnu/release-with-panic-unwind/ -lxdr2json -lntdll -static -lws2_32 -lbcrypt -luserenv
-#cgo darwin,amd64  LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-apple-darwin/release-with-panic-unwind/ -lxdr2json -ldl -lm
-#cgo darwin,arm64  LDFLAGS: -L${SRCDIR}/../../../../target/aarch64-apple-darwin/release-with-panic-unwind/ -lxdr2json -ldl -lm
-#cgo linux,amd64   LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-unknown-linux-gnu/release-with-panic-unwind/ -lxdr2json -ldl -lm
-#cgo linux,arm64   LDFLAGS: -L${SRCDIR}/../../../../target/aarch64-unknown-linux-gnu/release-with-panic-unwind/ -lxdr2json -ldl -lm
+#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-pc-windows-gnu/cgo-libs/ -lxdr2json -lntdll -static -lws2_32 -lbcrypt -luserenv
+#cgo darwin,amd64  LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-apple-darwin/cgo-libs/ -lxdr2json -ldl -lm
+#cgo darwin,arm64  LDFLAGS: -L${SRCDIR}/../../../../target/aarch64-apple-darwin/cgo-libs/ -lxdr2json -ldl -lm
+#cgo linux,amd64   LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-unknown-linux-gnu/cgo-libs/ -lxdr2json -ldl -lm
+#cgo linux,arm64   LDFLAGS: -L${SRCDIR}/../../../../target/aarch64-unknown-linux-gnu/cgo-libs/ -lxdr2json -ldl -lm
 */
 import "C"
 
