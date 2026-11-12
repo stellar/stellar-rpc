@@ -28,7 +28,7 @@ type gatheredMetrics struct {
 	rejections     map[string]float64
 	distinctTerms  histogramTotals
 	returnedEvents histogramTotals
-	// scannedLedgers is keyed by the page label.
+	// scannedLedgers is keyed by the stop label.
 	scannedLedgers map[string]histogramTotals
 }
 
@@ -63,6 +63,14 @@ func gatherQueryEventsMetrics(t *testing.T, registry *prometheus.Registry) gathe
 	return got
 }
 
+// noScans is the scanned-ledgers series before any page: every stop label,
+// with no samples.
+func noScans() map[string]histogramTotals {
+	return map[string]histogramTotals{
+		stopPageFilled: {}, stopWindowEdge: {}, stopEndOfRange: {}, stopTip: {}, stopOldestReached: {},
+	}
+}
+
 func TestMetrics_EveryLabelExportsAtZero(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	NewMetrics(registry, "test_ns")
@@ -74,7 +82,7 @@ func TestMetrics_EveryLabelExportsAtZero(t *testing.T) {
 		protocol.ErrorReasonLedgerOutOfRange: 0,
 		protocol.ErrorReasonCursorMalformed:  0,
 	}, got.rejections)
-	assert.Equal(t, map[string]histogramTotals{pageEmpty: {}, pagePartial: {}, pageFull: {}}, got.scannedLedgers)
+	assert.Equal(t, noScans(), got.scannedLedgers)
 	assert.Zero(t, got.distinctTerms.samples)
 	assert.Zero(t, got.returnedEvents.samples)
 }
@@ -167,6 +175,11 @@ func TestQueryEvents_RecordsTermsAndRejections(t *testing.T) {
 				wantPages = 1
 			}
 			assert.Equal(t, wantPages, got.returnedEvents.samples)
+			var scans uint64
+			for _, series := range got.scannedLedgers {
+				scans += series.samples
+			}
+			assert.Equal(t, wantPages, scans)
 			if tc.wantTerms < 0 {
 				assert.Zero(t, got.distinctTerms.samples)
 				return
@@ -185,23 +198,29 @@ func TestQueryEvents_RecordsPages(t *testing.T) {
 	cases := []struct {
 		name string
 		req  protocol.QueryEventsRequest
-		// wantPage is the page label the scan is recorded under; empty
-		// means the page did not scan, so no scan is recorded.
-		wantPage    string
+		// wantStop is the stop label the page is recorded under.
+		wantStop string
+		// wantEvents is the event count sampled; -1 means the page did
+		// not scan, so it has no event sample.
 		wantEvents  float64
 		wantScanned float64
 	}{
 		{
 			name:     "ascending, under the limit",
 			req:      protocol.QueryEventsRequest{MinLedger: first, MaxLedger: first + 2},
-			wantPage: pagePartial, wantEvents: 3, wantScanned: 3,
+			wantStop: stopEndOfRange, wantEvents: 3, wantScanned: 3,
 		},
 		{
 			name: "descending, under the limit",
 			req: protocol.QueryEventsRequest{
 				MinLedger: first, MaxLedger: first + 2, Order: protocol.OrderDescending,
 			},
-			wantPage: pagePartial, wantEvents: 3, wantScanned: 3,
+			wantStop: stopEndOfRange, wantEvents: 3, wantScanned: 3,
+		},
+		{
+			name:     "ascending, no upper bound",
+			req:      protocol.QueryEventsRequest{MinLedger: first},
+			wantStop: stopTip, wantEvents: 3, wantScanned: 3,
 		},
 		{
 			name: "a scan that matches nothing",
@@ -209,17 +228,19 @@ func TestQueryEvents_RecordsPages(t *testing.T) {
 				MinLedger: first, MaxLedger: first + 2,
 				Filters: []protocol.QueryEventsFilter{{Topic0: requestTopic(t, noSuchTopic)}},
 			},
-			wantPage: pageEmpty, wantEvents: 0, wantScanned: 3,
+			wantStop: stopEndOfRange, wantEvents: 0, wantScanned: 3,
 		},
 		{
+			// The pager reads the next match, which is in the second ledger.
 			name:     "a page that fills",
 			req:      protocol.QueryEventsRequest{MinLedger: first, MaxLedger: first + 2, Limit: &limitTwo},
-			wantPage: pageFull, wantEvents: 2, wantScanned: 1,
+			wantStop: stopPageFilled, wantEvents: 2, wantScanned: 2,
 		},
 		{
 			// The handler answers this one without the pager.
-			name: "a range with no ledgers",
-			req:  protocol.QueryEventsRequest{MaxLedger: 1, Order: protocol.OrderDescending},
+			name:     "a range with no ledgers",
+			req:      protocol.QueryEventsRequest{MaxLedger: 1, Order: protocol.OrderDescending},
+			wantStop: stopEndOfRange, wantEvents: -1, wantScanned: 0,
 		},
 	}
 	for _, tc := range cases {
@@ -232,11 +253,11 @@ func TestQueryEvents_RecordsPages(t *testing.T) {
 
 			got := gatherQueryEventsMetrics(t, registry)
 			wantEvents := histogramTotals{}
-			wantScans := map[string]histogramTotals{pageEmpty: {}, pagePartial: {}, pageFull: {}}
-			if tc.wantPage != "" {
+			if tc.wantEvents >= 0 {
 				wantEvents = histogramTotals{samples: 1, sum: tc.wantEvents}
-				wantScans[tc.wantPage] = histogramTotals{samples: 1, sum: tc.wantScanned}
 			}
+			wantScans := noScans()
+			wantScans[tc.wantStop] = histogramTotals{samples: 1, sum: tc.wantScanned}
 			assert.Equal(t, wantEvents, got.returnedEvents)
 			assert.Equal(t, wantScans, got.scannedLedgers)
 		})
@@ -244,8 +265,9 @@ func TestQueryEvents_RecordsPages(t *testing.T) {
 }
 
 // A client at the tip polls with its cursor. Those pages wait for
-// ledgers and scan nothing, so only the first page records a scan.
-func TestQueryEvents_PollsAtTheTipRecordNoScan(t *testing.T) {
+// ledgers and scan nothing. Each one is a 0 sample under the tip label,
+// and none is in the event counts.
+func TestQueryEvents_PollsAtTheTipRecordZeroScans(t *testing.T) {
 	ctx, first := seedView(t)
 	registry := prometheus.NewRegistry()
 	metrics := NewMetrics(registry, "test_ns")
@@ -263,9 +285,49 @@ func TestQueryEvents_PollsAtTheTipRecordNoScan(t *testing.T) {
 
 	got := gatherQueryEventsMetrics(t, registry)
 	assert.Equal(t, histogramTotals{samples: 1, sum: 3}, got.returnedEvents)
-	assert.Equal(t, map[string]histogramTotals{
-		pageEmpty: {}, pagePartial: {samples: 1, sum: 3}, pageFull: {},
-	}, got.scannedLedgers)
+	wantScans := noScans()
+	wantScans[stopTip] = histogramTotals{samples: 4, sum: 3}
+	assert.Equal(t, wantScans, got.scannedLedgers)
+	// The polls continue one query, so its terms are one sample.
+	assert.Equal(t, uint64(1), got.distinctTerms.samples)
+}
+
+// The duration limiter cancels the context when it answers the client. A
+// page that finishes after that is not recorded. This page does not use
+// the pager, so the canceled context still gets a response.
+func TestQueryEvents_PageAfterCancelIsNotRecorded(t *testing.T) {
+	ctx, _ := seedView(t)
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+	registry := prometheus.NewRegistry()
+	metrics := NewMetrics(registry, "test_ns")
+
+	_, err := queryEvents(ctx, testLimits(), metrics, rpcv2test.SilentLogger(),
+		&protocol.QueryEventsRequest{MaxLedger: 1, Order: protocol.OrderDescending})
+	require.NoError(t, err)
+
+	got := gatherQueryEventsMetrics(t, registry)
+	assert.Equal(t, noScans(), got.scannedLedgers)
+	assert.Zero(t, got.returnedEvents.samples)
+}
+
+// The pager's status gives each stop reason but one. A page that still has
+// more is a window edge only when the pager says so, even when it is full.
+func TestStopReason(t *testing.T) {
+	for name, tc := range map[string]struct {
+		page query.EventPage
+		want string
+	}{
+		"page filled":    {query.EventPage{Status: query.ScanHasMore}, stopPageFilled},
+		"window edge":    {query.EventPage{Status: query.ScanHasMore, WindowEdge: true}, stopWindowEdge},
+		"end of range":   {query.EventPage{Status: query.ScanComplete}, stopEndOfRange},
+		"tip":            {query.EventPage{Status: query.ScanWaitingForLedgers}, stopTip},
+		"oldest reached": {query.EventPage{Status: query.ScanOldestReached}, stopOldestReached},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, stopReason(&tc.page))
+		})
+	}
 }
 
 // scansPerRequest runs one query to its end with a limit of 1 and returns
@@ -299,9 +361,7 @@ func scansPerRequest(ctx context.Context, t *testing.T, req protocol.QueryEvents
 
 // The seeded ledgers hold 2, 1 and 0 events, so with a limit of 1 the first
 // ledger takes two requests. It is in both requests' counts: the first one
-// stopped inside it, the second one finished it. This also pins what the
-// count relies on: the pager sets a Position only on a page that stopped
-// inside a ledger.
+// stopped inside it, the second one finished it.
 func TestQueryEvents_ASplitLedgerCountsInBothRequests(t *testing.T) {
 	ctx, first := seedView(t)
 	cases := []struct {
@@ -320,18 +380,21 @@ func TestQueryEvents_ASplitLedgerCountsInBothRequests(t *testing.T) {
 			want: []float64{1, 1},
 		},
 		{
-			// The last request finishes the second ledger and the empty third.
+			// The second request finishes the first ledger and reads the next
+			// match in the second. The last one reads the second and the
+			// empty third.
 			name: "ascending, all three ledgers",
 			req:  protocol.QueryEventsRequest{MinLedger: first, MaxLedger: first + 2},
-			want: []float64{1, 1, 2},
+			want: []float64{1, 2, 2},
 		},
 		{
-			// The first request finishes the empty third ledger and the second.
+			// The first request reads the empty third ledger, the second, and
+			// the next match in the first.
 			name: "descending, all three ledgers",
 			req: protocol.QueryEventsRequest{
 				MinLedger: first, MaxLedger: first + 2, Order: protocol.OrderDescending,
 			},
-			want: []float64{2, 1, 1},
+			want: []float64{3, 1, 1},
 		},
 	}
 	for _, tc := range cases {
@@ -339,22 +402,4 @@ func TestQueryEvents_ASplitLedgerCountsInBothRequests(t *testing.T) {
 			assert.Equal(t, tc.want, scansPerRequest(ctx, t, tc.req))
 		})
 	}
-}
-
-// A page that waits returns its cursor unchanged. When that cursor came from
-// a page that stopped inside a ledger, it still has that page's Position,
-// but this page read nothing.
-func TestObservePage_UnchangedCursorWithAPositionIsNotAScan(t *testing.T) {
-	registry := prometheus.NewRegistry()
-	metrics := NewMetrics(registry, "test_ns")
-	cursor := query.EventCursor{
-		Scope:    query.EventScope{MinLedger: 10},
-		Position: &query.EventPosition{Ledger: 12},
-	}
-
-	metrics.observePage(&cursor, &query.EventPage{Next: cursor, Status: query.ScanWaitingForLedgers}, 100)
-
-	got := gatherQueryEventsMetrics(t, registry)
-	assert.Zero(t, got.returnedEvents.samples)
-	assert.Equal(t, map[string]histogramTotals{pageEmpty: {}, pagePartial: {}, pageFull: {}}, got.scannedLedgers)
 }

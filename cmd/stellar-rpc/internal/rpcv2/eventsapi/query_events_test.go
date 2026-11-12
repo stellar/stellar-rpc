@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -390,49 +389,4 @@ func TestQueryEvents_LimitOverTheOperatorCapIsRejected(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, resp.Events, 2)
 	})
-}
-
-func TestResponseScannedLedger(t *testing.T) {
-	maxAt := func(v uint32) *uint32 { return &v }
-	cases := []struct {
-		name   string
-		cursor query.EventCursor
-		want   uint32
-	}{
-		{
-			name:   "a set watermark is reported as is",
-			cursor: query.EventCursor{Scope: query.EventScope{MinLedger: 10}, ScannedLedger: 12},
-			want:   12,
-		},
-		{
-			name:   "ascending with nothing covered is the ledger below the range",
-			cursor: query.EventCursor{Scope: query.EventScope{MinLedger: 10}},
-			want:   9,
-		},
-		{
-			name: "descending with nothing covered is the ledger above the range",
-			cursor: query.EventCursor{
-				Scope: query.EventScope{MinLedger: 10, MaxLedger: maxAt(20), Dir: query.Descending},
-			},
-			want: 21,
-		},
-		{
-			name: "descending from the highest ledger number saturates",
-			cursor: query.EventCursor{
-				Scope: query.EventScope{MinLedger: 10, MaxLedger: maxAt(math.MaxUint32), Dir: query.Descending},
-			},
-			want: math.MaxUint32,
-		},
-		{
-			// No request reaches this: a scope never starts below genesis.
-			name:   "ascending from ledger 0 saturates",
-			cursor: query.EventCursor{Scope: query.EventScope{}},
-			want:   0,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, responseScannedLedger(&tc.cursor))
-		})
-	}
 }

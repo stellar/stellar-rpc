@@ -357,11 +357,35 @@ func TestQueryEvents_ChunkSeamFullChunk(t *testing.T) {
 		assert.Equal(t, ScanHasMore, page.Status)
 		assert.Equal(t, lo+2, page.Next.ScannedLedger,
 			"the finished part's watermark survives the page break at the seam")
+		assert.Equal(t, uint32(3), page.LedgersRead, "a fill at the seam reads chunk 5's part only")
 		page = d.next()
 		assert.Equal(t, []string{"x3", "y1", "x4"}, labels(t, page.Events))
 		assert.Equal(t, ScanComplete, page.Status)
 		assert.Nil(t, page.Next.Position, "the watermark passed the last delivery")
+		assert.Equal(t, uint32(2), page.LedgersRead)
 	})
+
+	// The walk finishes one chunk and fills in the next one. The count
+	// goes through the next match's ledger, not the finished chunk's end.
+	for _, tc := range []struct {
+		name  string
+		dir   Direction
+		limit int
+		want  []string
+	}{
+		{"ascending", Ascending, 5, []string{"x0", "x1", "y0", "x2", "x3"}},
+		{"descending", Descending, 4, []string{"x4", "y1", "x3", "x2"}},
+	} {
+		t.Run("ledgers read, next match in the second chunk/"+tc.name, func(t *testing.T) {
+			d := &pageDriver{
+				t: t, r: r, limit: tc.limit,
+				cursor: EventCursor{Scope: EventScope{MinLedger: lo, MaxLedger: &maxL, Dir: tc.dir}},
+			}
+			page := d.next()
+			require.Equal(t, tc.want, labels(t, page.Events))
+			assert.Equal(t, uint32(4), page.LedgersRead)
+		})
+	}
 
 	// ScanOldestReached is a per-node stop, not a scope stop: a node
 	// with deeper retention (the full-chunk registry) resumes the same
@@ -380,6 +404,7 @@ func TestQueryEvents_ChunkSeamFullChunk(t *testing.T) {
 		assert.Equal(t, []string{"x4", "y1", "x3"}, labels(t, page.Events))
 		require.Equal(t, ScanOldestReached, page.Status)
 		require.Equal(t, f6, page.Next.ScannedLedger, "covered down to the shallow node's floor")
+		assert.Equal(t, uint32(2), page.LedgersRead, "the window stops at the floor")
 
 		d.r = r
 		all, status := d.drain()
@@ -505,6 +530,7 @@ func TestQueryEvents_OldestReachedDescending(t *testing.T) {
 	assert.Equal(t, ScanOldestReached, page.Status,
 		"bounds extend below the retention floor")
 	assert.Equal(t, f, page.Next.ScannedLedger)
+	assert.Equal(t, uint32(4), page.LedgersRead, "the window stops at the floor")
 
 	// A re-pull of the cursor the floor page minted stays OldestReached:
 	// empty page, bookmarks unmoved, never an out-of-range error.
@@ -513,6 +539,7 @@ func TestQueryEvents_OldestReachedDescending(t *testing.T) {
 	assert.Empty(t, page.Events)
 	assert.Equal(t, ScanOldestReached, page.Status)
 	assert.Equal(t, before, d.cursor)
+	assert.Zero(t, page.LedgersRead)
 }
 
 // TestQueryEvents_BelowFloorByDirection pins the proposal's asymmetry
@@ -1175,6 +1202,86 @@ func TestQueryEventsFrom_CostDoesNotGrowWithDepth(t *testing.T) {
 			assert.Less(t, r.payloadsRead, room*2,
 				"reads should track the page, not the depth: a prefix scan would read %d here",
 				int(depth)+room+1)
+		})
+	}
+}
+
+// LedgersRead counts from the leading edge of the window through the ledger
+// the walk stopped at. A walk that saw the next match stopped at that
+// match's ledger, which can be the last served ledger or a later one.
+func TestQueryEvents_LedgersRead(t *testing.T) {
+	r, _, f := singleChunkFixture(t) // f: a0 a1 b0, f+1: none, f+2: a2, f+3: b1 a3
+	maxL := f + 3
+	asc := EventScope{MinLedger: f, MaxLedger: &maxL}
+	desc := EventScope{MinLedger: f, MaxLedger: &maxL, Dir: Descending}
+
+	for name, tc := range map[string]struct {
+		cursor EventCursor
+		limit  int
+		want   uint32
+	}{
+		"ascending, the walk reaches the end":                     {EventCursor{Scope: asc}, 10, 4},
+		"ascending, stops inside the first ledger":                {EventCursor{Scope: asc}, 2, 1},
+		"ascending, fills at a ledger end, next match 2 further":  {EventCursor{Scope: asc}, 3, 3},
+		"descending, the walk reaches the end":                    {EventCursor{Scope: desc}, 10, 4},
+		"descending, stops inside the first ledger":               {EventCursor{Scope: desc}, 1, 1},
+		"descending, fills at a ledger end, next match 1 further": {EventCursor{Scope: desc}, 2, 2},
+		"descending, fills at a ledger end, next match 2 further": {EventCursor{Scope: desc}, 3, 4},
+		"a page that waits reads nothing": {
+			EventCursor{Scope: EventScope{MinLedger: f + 4}}, 10, 0,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			view, err := r.NewReadView()
+			require.NoError(t, err)
+			defer view.Release()
+			page, err := view.QueryEvents(t.Context(), tc.cursor, tc.limit)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, page.LedgersRead)
+		})
+	}
+
+	t.Run("a resume from an event id starts at its ledger", func(t *testing.T) {
+		view, err := r.NewReadView()
+		require.NoError(t, err)
+		defer view.Release()
+		page, err := view.QueryEventsFrom(t.Context(), asc, &EventID{Ledger: f + 2}, 10)
+		require.NoError(t, err)
+		assert.Equal(t, uint32(2), page.LedgersRead)
+	})
+}
+
+// A page that reads its whole scan window, with scope left past it, stopped
+// at the window edge. That holds for a full page too: the handler cannot
+// tell it from a page that filled by its event count.
+func TestQueryEvents_WindowEdge(t *testing.T) {
+	r, _, f := singleChunkFixture(t) // f: a0 a1 b0, f+1: none, f+2: a2, f+3: b1 a3
+	r.maxScanLedgers = 2
+	maxL := f + 3
+	asc := EventScope{MinLedger: f, MaxLedger: &maxL}
+	lastTwo := EventScope{MinLedger: f + 2, MaxLedger: &maxL}
+
+	for name, tc := range map[string]struct {
+		scope EventScope
+		limit int
+		want  bool
+	}{
+		"the window ends before the scope":         {asc, 10, true},
+		"the window ends, and the page is full":    {asc, 3, true},
+		"the page fills inside the window":         {asc, 2, false},
+		"the scope ends inside the window":         {lastTwo, 10, false},
+		"the scope ends there, and the page fills": {lastTwo, 1, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			view, err := r.NewReadView()
+			require.NoError(t, err)
+			defer view.Release()
+			page, err := view.QueryEvents(t.Context(), EventCursor{Scope: tc.scope}, tc.limit)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, page.WindowEdge)
+			if tc.want {
+				assert.Equal(t, ScanHasMore, page.Status)
+			}
 		})
 	}
 }

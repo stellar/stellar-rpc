@@ -73,6 +73,14 @@ type EventPage struct {
 	Events []event.Payload
 	Next   EventCursor
 	Status ScanStatus
+	// LedgersRead is the number of ledgers the walk read: from the leading
+	// edge of its window through the ledger it stopped at. A walk that
+	// saw the next match stopped at that match's ledger. Zero for a page
+	// that did not walk.
+	LedgersRead uint32
+	// WindowEdge is set when the walk read its whole scan window and the
+	// scope continues past it. A ScanHasMore page without it filled.
+	WindowEdge bool
 }
 
 // QueryEvents advances cursor by one page of at most limit events.
@@ -596,7 +604,28 @@ func (a *ReadView) assemblePage(
 		// A truncated window is never terminal: scope remains beyond it.
 		status = terminalStatus(&cursor.Scope, desc, a.OldestLedger(), a.LatestLedger())
 	}
-	return &EventPage{Events: walk.events, Next: next, Status: status}
+	return &EventPage{
+		Events: walk.events, Next: next, Status: status,
+		LedgersRead: ledgersRead(walk, clo, chi, desc),
+		WindowEdge:  walk.finished && truncated,
+	}
+}
+
+// ledgersRead counts the ledgers from the window's leading edge through the
+// ledger the walk stopped at: the next match's ledger when the walk saw
+// one, else the last ledger the walk covered.
+func ledgersRead(walk walkResult, clo, chi uint32, desc bool) uint32 {
+	stop := walk.coveredThrough
+	if walk.nextUnserved != nil {
+		stop = walk.nextUnserved
+	}
+	if stop == nil {
+		return 0
+	}
+	if desc {
+		return chi - *stop + 1
+	}
+	return *stop - clo + 1
 }
 
 // watermark derives the last fully covered ledger from the walk's

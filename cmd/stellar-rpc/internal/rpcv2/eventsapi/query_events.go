@@ -159,20 +159,22 @@ func serve(
 	}
 	// Checked on the cursor path too: a cursor carries the filters and is
 	// not signed, so a hand-built one could ask for any number of lookups.
-	// Recorded here, so the metric has the requests that the budget check
-	// and the scan reject, but not the requests that requestCursor rejects.
+	// Sampled before the budget check, so the metric has the requests
+	// that the check rejects. A cursor continues a query, so only the
+	// first request is a sample.
 	terms := event.CountDistinctTerms(cursor.Scope.Filters)
-	metrics.observeDistinctTerms(terms)
+	if req.Cursor == "" {
+		metrics.observeDistinctTerms(terms)
+	}
 	if err := checkTermBudget(terms, limits.TermBudget); err != nil {
 		return protocol.QueryEventsResponse{}, err
 	}
 	// A range with no ledgers in it is finished before it starts. Only a
 	// below-genesis max produces one; the pager would call it inverted.
+	var page *query.EventPage
 	if s := &cursor.Scope; s.MaxLedger != nil && s.MinLedger > *s.MaxLedger {
-		return response(&query.EventPage{Next: cursor, Status: query.ScanComplete}, req.Format, oldest, latest)
-	}
-	page, err := view.QueryEvents(ctx, cursor, limit)
-	if err != nil {
+		page = &query.EventPage{Next: cursor, Status: query.ScanComplete}
+	} else if page, err = view.QueryEvents(ctx, cursor, limit); err != nil {
 		return protocol.QueryEventsResponse{}, err
 	}
 	resp, err := response(page, req.Format, oldest, latest)
@@ -182,7 +184,7 @@ func serve(
 	// The duration limiter answers the client at its limit and leaves this
 	// handler running. A page that finishes after that was never received.
 	if ctx.Err() == nil {
-		metrics.observePage(&cursor, page, limit)
+		metrics.observePage(page)
 	}
 	return resp, nil
 }
@@ -252,18 +254,6 @@ func validateCursorFilters(filters []event.Filter) error {
 	return nil
 }
 
-// termBudgetError is a request over the term budget. Its own type, so
-// responseError knows the rejection by what failed. On the wire it is an
-// invalid_params error.
-type termBudgetError struct {
-	used, budget uint32
-}
-
-func (e *termBudgetError) Error() string {
-	return fmt.Sprintf("query needs %d distinct index terms, but this node allows %d;"+
-		" split it into narrower queries", e.used, e.budget)
-}
-
 // checkTermBudget reports both numbers on rejection. A client needs them
 // to see how far over it is and split the query.
 func checkTermBudget(terms int, budget uint32) error {
@@ -271,7 +261,15 @@ func checkTermBudget(terms int, budget uint32) error {
 	if used <= budget {
 		return nil
 	}
-	return &termBudgetError{used: used, budget: budget}
+	return &protocol.InvalidParamsError{
+		Message: fmt.Sprintf("query needs %d distinct index terms, but this node allows %d;"+
+			" split it into narrower queries", used, budget),
+		Data: protocol.InvalidParamsErrorData{
+			Reason:     protocol.ErrorReasonInvalidParams,
+			TermsUsed:  used,
+			TermBudget: budget,
+		},
+	}
 }
 
 // response carries a cursor on every page but the last: an absent cursor is
@@ -303,24 +301,21 @@ func response(
 	return resp, nil
 }
 
-// scanWatermark is the last ledger a cursor's scan has covered. A cursor
-// uses 0 for "nothing covered yet", which is the ledger just outside the
-// scope's leading edge. Signed, so that edge cannot wrap.
-func scanWatermark(cursor *query.EventCursor) int64 {
-	if cursor.ScannedLedger != 0 {
-		return int64(cursor.ScannedLedger)
-	}
-	if cursor.Scope.Dir == query.Descending {
-		return int64(*cursor.Scope.MaxLedger) + 1
-	}
-	return int64(cursor.Scope.MinLedger) - 1
-}
-
-// responseScannedLedger is the watermark for the wire. It saturates at both
-// ends, so the ledger just outside a scope's edge cannot wrap around and
-// claim the whole range.
+// responseScannedLedger translates the cursor's watermark for the wire. A
+// cursor uses 0 to mean "nothing covered yet". On the wire that 0 would
+// claim the whole range, so report the ledger just outside it instead.
 func responseScannedLedger(next *query.EventCursor) uint32 {
-	return uint32(min(max(scanWatermark(next), 0), math.MaxUint32)) //nolint:gosec // clamped at both ends
+	if next.ScannedLedger != 0 {
+		return next.ScannedLedger
+	}
+	if next.Scope.Dir == query.Descending {
+		// Saturate, so a scope topped at MaxUint32 cannot wrap to 0.
+		if *next.Scope.MaxLedger == math.MaxUint32 {
+			return math.MaxUint32
+		}
+		return *next.Scope.MaxLedger + 1
+	}
+	return next.Scope.MinLedger - 1
 }
 
 // responseError maps the pager's and the SDK's errors onto the three
@@ -328,18 +323,15 @@ func responseScannedLedger(next *query.EventCursor) uint32 {
 // would otherwise code a plain error as SystemError. It also counts each
 // rejection, since this is where a failure gets its reason.
 func responseError(err error, oldest, latest uint32, metrics *Metrics, logger *supportlog.Entry) error {
-	var overBudget *termBudgetError
-	if errors.As(err, &overBudget) {
-		metrics.countRejection(reasonTermBudgetExceeded)
-		return jrpcError(overBudget.Error(), protocol.InvalidParamsErrorData{
-			Reason:     protocol.ErrorReasonInvalidParams,
-			TermsUsed:  overBudget.used,
-			TermBudget: overBudget.budget,
-		})
-	}
 	var invalid *protocol.InvalidParamsError
 	if errors.As(err, &invalid) {
-		metrics.countRejection(protocol.ErrorReasonInvalidParams)
+		// Only a term-budget rejection carries the term count. On the
+		// wire it is an invalid_params error like the others.
+		reason := protocol.ErrorReasonInvalidParams
+		if invalid.Data.TermsUsed != 0 {
+			reason = reasonTermBudgetExceeded
+		}
+		metrics.countRejection(reason)
 		return jrpcError(invalid.Message, invalid.Data)
 	}
 	var outOfRange *query.RangeError

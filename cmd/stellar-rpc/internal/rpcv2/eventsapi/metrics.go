@@ -21,13 +21,14 @@ const reasonTermBudgetExceeded = "term_budget_exceeded"
 //nolint:gochecknoglobals // fixed bucket layout, read-only
 var distinctTermsBuckets = []float64{0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 30, 50}
 
-// Page labels for the scanned-ledgers histogram: how full the page that
-// the scan produced is. An empty page over many ledgers is the expensive
-// query that finds nothing.
+// Stop labels for the scanned-ledgers histogram: why the page stopped.
+// The window_edge share shows how often query.MaxScanLedgers ends a page.
 const (
-	pageEmpty   = "empty"
-	pagePartial = "partial"
-	pageFull    = "full"
+	stopPageFilled    = "page_filled"
+	stopWindowEdge    = "window_edge"
+	stopEndOfRange    = "end_of_range"
+	stopTip           = "tip"
+	stopOldestReached = "oldest_reached"
 )
 
 // returnedEventsBuckets end at protocol.QueryEventsMaxLimit.
@@ -36,9 +37,10 @@ const (
 var returnedEventsBuckets = []float64{0, 1, 10, 50, 100, 250, 500, protocol.QueryEventsMaxLimit}
 
 // scannedLedgersBuckets end at query.MaxScanLedgers, the most one page scans.
+// The 0 bucket holds the pages that scan nothing, such as polls at the tip.
 //
 //nolint:gochecknoglobals // fixed bucket layout, read-only
-var scannedLedgersBuckets = []float64{1, 10, 100, 500, 1000, 2500, 5000, float64(query.MaxScanLedgers)}
+var scannedLedgersBuckets = []float64{0, 1, 10, 100, 500, 1000, 2500, 5000, float64(query.MaxScanLedgers)}
 
 // Metrics are the queryEvents request metrics. A nil *Metrics records
 // nothing, which is what a server with no registry passes.
@@ -56,7 +58,8 @@ func NewMetrics(registry *prometheus.Registry, namespace string) *Metrics {
 		distinctTerms: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: metricsSubsystem,
 			Name: "distinct_terms",
-			Help: "Distinct index terms named by the filters of one queryEvents request. " +
+			Help: "Distinct index terms named by the filters of one queryEvents query. " +
+				"A request with a cursor continues a query and is not counted. " +
 				"Includes requests that the term budget rejects.",
 			Buckets: distinctTermsBuckets,
 		}),
@@ -78,10 +81,12 @@ func NewMetrics(registry *prometheus.Registry, namespace string) *Metrics {
 			Namespace: namespace, Subsystem: metricsSubsystem,
 			Name: "scanned_ledgers",
 			Help: "Ledgers scanned by one queryEvents page. " +
-				"The page label shows how full the page is: empty, partial or full. " +
-				"Pages that scan nothing are not counted.",
+				"The stop label shows why the page stopped. " +
+				"A page that scans nothing counts as 0. " +
+				"A page that fills counts through the ledger of the next match, " +
+				"so two pages can count the same ledger.",
 			Buckets: scannedLedgersBuckets,
-		}, []string{"page"}),
+		}, []string{"stop"}),
 	}
 	// Every reason exports from the start, at zero, so a rate over one is
 	// never an absent series.
@@ -93,8 +98,10 @@ func NewMetrics(registry *prometheus.Registry, namespace string) *Metrics {
 	} {
 		m.rejections.WithLabelValues(reason)
 	}
-	for _, page := range []string{pageEmpty, pagePartial, pageFull} {
-		m.scannedLedgers.WithLabelValues(page)
+	for _, stop := range []string{
+		stopPageFilled, stopWindowEdge, stopEndOfRange, stopTip, stopOldestReached,
+	} {
+		m.scannedLedgers.WithLabelValues(stop)
 	}
 	registry.MustRegister(m.distinctTerms, m.rejections, m.returnedEvents, m.scannedLedgers)
 	return m
@@ -114,34 +121,34 @@ func (m *Metrics) countRejection(reason string) {
 	m.rejections.WithLabelValues(reason).Inc()
 }
 
-// observePage records one served page that scanned: its event count and
-// the ledgers it read.
-func (m *Metrics) observePage(start *query.EventCursor, page *query.EventPage, limit int) {
+// observePage records one served page: the ledgers it read and, when it
+// read any, its event count.
+func (m *Metrics) observePage(page *query.EventPage) {
 	if m == nil {
 		return
 	}
-	events := len(page.Events)
-	// Ledgers the page finished.
-	read := scanWatermark(&page.Next) - scanWatermark(start)
-	if start.Scope.Dir == query.Descending {
-		read = -read
+	m.scannedLedgers.WithLabelValues(stopReason(page)).Observe(float64(page.LedgersRead))
+	// The event count has no label, so polls at the tip would hide the
+	// pages that scanned.
+	if page.LedgersRead != 0 {
+		m.returnedEvents.Observe(float64(len(page.Events)))
 	}
-	// Add the ledger the page stopped inside. The events check is needed:
-	// a waiting page returns its cursor unchanged, with an old Position.
-	if events > 0 && page.Next.Position != nil {
-		read++
+}
+
+// stopReason is why the page stopped. The pager's status gives every
+// reason but one: ScanHasMore is a page that filled or a window that ended.
+func stopReason(page *query.EventPage) string {
+	switch page.Status {
+	case query.ScanComplete:
+		return stopEndOfRange
+	case query.ScanWaitingForLedgers:
+		return stopTip
+	case query.ScanOldestReached:
+		return stopOldestReached
+	case query.ScanHasMore:
 	}
-	// Skip pages that read nothing, such as polls at the tip.
-	if read <= 0 {
-		return
+	if page.WindowEdge {
+		return stopWindowEdge
 	}
-	fill := pagePartial
-	switch {
-	case events == 0:
-		fill = pageEmpty
-	case events >= limit:
-		fill = pageFull
-	}
-	m.returnedEvents.Observe(float64(events))
-	m.scannedLedgers.WithLabelValues(fill).Observe(float64(read))
+	return stopPageFilled
 }
