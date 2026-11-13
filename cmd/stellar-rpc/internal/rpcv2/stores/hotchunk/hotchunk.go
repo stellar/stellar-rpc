@@ -78,6 +78,12 @@ func dbTuning() rocksdb.Tuning {
 		// ungraceful-shutdown recovery (kernel panic, power loss, OOM
 		// kill).
 		MaxTotalWalSizeMB: 1024,
+
+		// Each ledger commit fsyncs the WAL; without writeback as they
+		// go, a memtable flush's dirty pages land in front of that
+		// fsync, and the commit waits for them.
+		BytesPerSyncMB:    1,
+		WALBytesPerSyncMB: 1,
 	}
 }
 
