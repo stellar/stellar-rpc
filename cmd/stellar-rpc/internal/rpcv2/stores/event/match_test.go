@@ -53,13 +53,15 @@ type countingReader struct {
 
 	lookupKeysCalls int
 	totalKeys       int
+	windows         []IDRange
 }
 
 func (c *countingReader) LookupKeys(
 	ctx context.Context, keys []TermKey, window IDRange,
-) ([]*roaring.Bitmap, IDRange, error) {
+) ([]*roaring.Bitmap, Coverage, error) {
 	c.lookupKeysCalls++
 	c.totalKeys += len(keys)
+	c.windows = append(c.windows, window)
 	return c.Reader.LookupKeys(ctx, keys, window)
 }
 
