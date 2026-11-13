@@ -27,10 +27,10 @@ import (
 )
 
 // BuildColdIndex builds one cold txhash index from inputs (the per-chunk
-// .bin files for the index) into outputPath. [minLedger, maxLedger] is the
-// index's ledger coverage: minLedger anchors the per-key payload (so the
-// reader recovers absolute seqs) and every entry must fall within it
-// (MinLedger/MaxLedger report it). The span must fit the 3-byte payload.
+// .bin files for the index) into outputPath. minLedger is the first ledger of
+// the index's window, which every .bin entry's payload counts from (so the
+// reader recovers absolute seqs), and maxLedger the last ledger it covers
+// (MinLedger/MaxLedger report them). The span must fit the 3-byte payload.
 //
 // The .bin files are k-way merged (cold_merge.go) and fed single-pass to
 // streamhash. By default the block build uses runtime.NumCPU()/2 workers
@@ -165,14 +165,14 @@ func scanBinHeader(path string) (uint64, [stores.SecretLen]byte, error) {
 	if err != nil {
 		return 0, secret, fmt.Errorf("txhash: stat %s: %w", path, err)
 	}
-	var hdr [coldBinHeaderSize]byte
+	var hdr [coldBinPrefixSize]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		return 0, secret, fmt.Errorf("txhash: read header of %s: %w", path, err)
 	}
 	if err := checkBinPrelude(path, hdr[:]); err != nil {
 		return 0, secret, err
 	}
-	copy(secret[:], hdr[coldBinPreludeSize+coldBinCountSize:])
+	copy(secret[:], hdr[coldBinSecretOffset:])
 	count, err := coldBinCount(path, fi.Size(),
 		binary.LittleEndian.Uint64(hdr[coldBinPreludeSize:coldBinPreludeSize+coldBinCountSize]))
 	return count, secret, err

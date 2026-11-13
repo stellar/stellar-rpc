@@ -115,8 +115,9 @@ func makeFixtureEntries(n int) []fixtureEntry {
 // writeBinFile writes entries to a per-chunk .bin file in the input format
 // BuildColdIndex consumes: each stored key is the secret-keyed routing key of
 // the entry's hash prefix (mirroring ingest-time keying), sorted ascending
-// (the per-file ordering the build's merge requires).
-func writeBinFile(t *testing.T, path string, entries []fixtureEntry, secret [stores.SecretLen]byte) {
+// (the per-file ordering the build's merge requires), with payloads counted
+// from base.
+func writeBinFile(t *testing.T, path string, entries []fixtureEntry, secret [stores.SecretLen]byte, base uint32) {
 	t.Helper()
 	keyed := make([]ColdEntry, len(entries))
 	for i, e := range entries {
@@ -125,16 +126,19 @@ func writeBinFile(t *testing.T, path string, entries []fixtureEntry, secret [sto
 	sort.Slice(keyed, func(i, j int) bool {
 		return bytes.Compare(keyed[i].Key[:], keyed[j].Key[:]) < 0
 	})
-	require.NoError(t, WriteColdBin(path, secret, keyed))
+	require.NoError(t, WriteColdBin(path, secret, 0, base, keyed))
 }
 
 // rawBinHeader hand-builds a syntactically valid .bin header (magic, version,
-// zero secret) claiming count entries, for corrupt-file fixtures.
+// payload size, zero secret) claiming count entries, for corrupt-file fixtures.
 func rawBinHeader(count uint64) [coldBinHeaderSize]byte {
 	var hdr [coldBinHeaderSize]byte
-	copy(hdr[:4], coldBinMagic)
-	hdr[4] = coldBinVersion
+	binary.LittleEndian.PutUint32(hdr[:4], coldBinMagic)
+	binary.LittleEndian.PutUint16(hdr[4:6], coldBinVersion)
+	hdr[6] = ColdPayloadSize
 	binary.LittleEndian.PutUint64(hdr[coldBinPreludeSize:], count)
+	binary.LittleEndian.PutUint32(hdr[16:20], coldBinMetadataSize)
+	hdr[20] = 1
 	return hdr
 }
 
@@ -151,14 +155,16 @@ func writeFixtureBins(t *testing.T, dir string, entries []fixtureEntry) []string
 func writeFixtureBinsKeyed(t *testing.T, dir string, entries []fixtureEntry, secret [stores.SecretLen]byte) []string {
 	t.Helper()
 	byChunk := make(map[chunk.ID][]fixtureEntry)
+	base := entries[0].seq // the builds index from the lowest seq
 	for _, e := range entries {
 		c := chunk.IDFromLedger(e.seq)
 		byChunk[c] = append(byChunk[c], e)
+		base = min(base, e.seq)
 	}
 	inputs := make([]string, 0, len(byChunk))
 	for c, es := range byChunk {
 		p := filepath.Join(dir, c.String()+".bin")
-		writeBinFile(t, p, es, secret)
+		writeBinFile(t, p, es, secret, base)
 		inputs = append(inputs, p)
 	}
 	return inputs
@@ -292,7 +298,7 @@ func TestBuildColdIndex_AllEmptyInputs(t *testing.T) {
 	inputs := make([]string, 0, len(chunks))
 	for _, c := range chunks {
 		p := filepath.Join(dir, c.String()+".bin")
-		writeBinFile(t, p, nil, testSecret())
+		writeBinFile(t, p, nil, testSecret(), fixtureMinLedger())
 		inputs = append(inputs, p)
 	}
 	idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
@@ -311,20 +317,19 @@ func TestBuildColdIndex_MissingInputErrors(t *testing.T) {
 }
 
 func TestBuildColdIndex_SeqOutsideCoverageErrors(t *testing.T) {
-	// An entry outside [minLedger, maxLedger] must be rejected — below would
-	// underflow the payload, above would break the coverage claim — and
-	// leave no partial index behind.
+	// An entry past maxLedger must be rejected, since it would break the
+	// coverage claim, and leave no partial index behind. (WriteColdBin
+	// refuses one below the payload base.)
 	for _, tc := range []struct {
 		name string
 		seq  uint32
 	}{
-		{"below min", fixtureMinLedger() - 1},
 		{"above max", fixtureMaxLedger() + 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			p := filepath.Join(dir, "00000004.bin")
-			writeBinFile(t, p, []fixtureEntry{{hash: randHash(testRNG(1)), seq: tc.seq}}, testSecret())
+			writeBinFile(t, p, []fixtureEntry{{hash: randHash(testRNG(1)), seq: tc.seq}}, testSecret(), fixtureMinLedger())
 			idxPath := filepath.Join(dir, indexFileName(fixtureBaseChunk))
 			err := BuildColdIndex(context.Background(), []string{p}, idxPath,
 				fixtureMinLedger(), fixtureMaxLedger())
@@ -343,7 +348,7 @@ func TestBuildColdIndex_CoverageSpanExceedsBudgetErrors(t *testing.T) {
 	overflowSeq := minLedger + uint32(coldPayloadMax) + 1
 	entries := []fixtureEntry{{hash: randHash(testRNG(2)), seq: overflowSeq}}
 	p := filepath.Join(dir, "99999999.bin")
-	writeBinFile(t, p, entries, testSecret())
+	writeBinFile(t, p, entries, testSecret(), overflowSeq)
 
 	idxPath := filepath.Join(dir, indexFileName(0))
 	err := BuildColdIndex(
