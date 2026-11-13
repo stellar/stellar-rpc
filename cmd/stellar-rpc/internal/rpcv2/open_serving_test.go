@@ -15,7 +15,7 @@ import (
 // RocksDB's lock refuses while another handle holds it open.
 func requireHotDBClosed(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	t.Helper()
-	db, err := hotchunk.OpenReadyWrite(geometry.HotReady, cat.Layout().HotChunkPath(c), c, silentLogger())
+	db, err := hotchunk.OpenReadyWrite(geometry.HotReady, cat.Layout().HotChunkPath(c), c, cat.Secret(), silentLogger())
 	require.NoError(t, err, "chunk %s's hot DB is still open", c)
 	require.NoError(t, db.Close())
 }

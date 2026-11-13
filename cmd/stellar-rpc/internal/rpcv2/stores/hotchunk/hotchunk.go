@@ -101,8 +101,10 @@ func config(path string, logger *supportlog.Entry, readOnly, mustExist bool) roc
 // Open opens (or creates) the chunk's shared multi-CF hot DB read-WRITE
 // (ingestion's handle for a NEW chunk) and composes the three facades over it. On
 // any facade-construction failure the shared store is closed before returning.
-func Open(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, false, false)
+// catalogSecret is the catalog's secret, from which the events index derives the
+// chunk's cold index secret; every opener takes it.
+func Open(path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry) (*DB, error) {
+	return open(path, chunkID, catalogSecret, logger, false, false)
 }
 
 // OpenExisting opens an EXISTING hot DB read-WRITE with create-if-missing OFF —
@@ -110,8 +112,8 @@ func Open(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) 
 // A missing or gutted DB fails the open instead of silently fabricating a fresh
 // empty one (the "never auto-heal" rule); the caller treats that failure as an
 // ordinary run-failing error.
-func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, false, true)
+func OpenExisting(path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry) (*DB, error) {
+	return open(path, chunkID, catalogSecret, logger, false, true)
 }
 
 // OpenReadOnly opens an EXISTING hot DB read-only — the freeze source's view AND
@@ -124,27 +126,32 @@ func OpenExisting(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB,
 // A read-only open is a LEDGERS-ONLY view: it composes the ledger + txhash facades
 // but SKIPS the events facade, because both read-only callers (freeze re-derives the
 // cold artifacts from raw LCMs via Source(); the startup refiner reads only
-// MaxCommittedSeq()) touch the ledgers CF alone and never the events mirror/offsets.
-// Composing the events facade would run the event store's unconditional warmup — a full
-// index-CF scan plus bitmap/offsets rebuild — discarded unread at Close (#834). The
-// skip is enforced structurally: a read-only DB has no events facade, so Events()
-// panics and IngestLedger errors rather than serving a cold, unwarmed surface.
-func OpenReadOnly(path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return open(path, chunkID, logger, true, false)
+// MaxCommittedSeq()) touch the ledgers CF alone and never the events index/offsets.
+// Composing the events facade would run the event store's unconditional warmup —
+// indexing the unsealed events again plus the offsets rebuild — discarded unread at
+// Close (#834). The skip is enforced structurally: a read-only DB has no events
+// facade, so Events() panics and IngestLedger errors rather than serving a cold,
+// unwarmed surface.
+func OpenReadOnly(path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry) (*DB, error) {
+	return open(path, chunkID, catalogSecret, logger, true, false)
 }
 
 // OpenReadyWrite opens a "ready" chunk's hot DB read-WRITE — ingestion's handle
 // for a resumed chunk (OpenExisting underneath). openReady enforces the ready-open
 // rule.
-func OpenReadyWrite(state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return openReady(state, path, chunkID, logger, false)
+func OpenReadyWrite(
+	state geometry.HotState, path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry,
+) (*DB, error) {
+	return openReady(state, path, chunkID, catalogSecret, logger, false)
 }
 
 // OpenReadyView opens a "ready" chunk's hot DB read-only — the freeze source's
 // and the last-committed refiner's view (OpenReadOnly underneath). openReady
 // enforces the ready-open rule.
-func OpenReadyView(state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry) (*DB, error) {
-	return openReady(state, path, chunkID, logger, true)
+func OpenReadyView(
+	state geometry.HotState, path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry,
+) (*DB, error) {
+	return openReady(state, path, chunkID, catalogSecret, logger, true)
 }
 
 // openReady is the single enforcement site for the "ready key ⇒ must-exist,
@@ -155,7 +162,8 @@ func OpenReadyView(state geometry.HotState, path string, chunkID chunk.ID, logge
 // the open — never auto-healed into a fresh empty one — wrapped in the uniform
 // won't-open error so every ready-open site reports it identically.
 func openReady(
-	state geometry.HotState, path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly bool,
+	state geometry.HotState, path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry,
+	readOnly bool,
 ) (*DB, error) {
 	if state != geometry.HotReady {
 		return nil, fmt.Errorf(
@@ -165,14 +173,16 @@ func openReady(
 	if readOnly {
 		openFn = OpenReadOnly
 	}
-	db, err := openFn(path, chunkID, logger)
+	db, err := openFn(path, chunkID, catalogSecret, logger)
 	if err != nil {
 		return nil, fmt.Errorf("chunk %s is %q but its hot DB won't open: %w", chunkID, geometry.HotReady, err)
 	}
 	return db, nil
 }
 
-func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mustExist bool) (*DB, error) {
+func open(
+	path string, chunkID chunk.ID, catalogSecret [32]byte, logger *supportlog.Entry, readOnly, mustExist bool,
+) (*DB, error) {
 	if path == "" {
 		return nil, stores.ErrInvalidConfig
 	}
@@ -197,7 +207,7 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mus
 	if readOnly {
 		return db, nil
 	}
-	es, err := event.NewWithStore(store, chunkID)
+	es, err := event.NewWithStore(store, chunkID, catalogSecret)
 	if err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("compose events facade for chunk %s: %w", chunkID, err)
@@ -223,8 +233,9 @@ func (d *DB) Txhash() *txhash.HotStore { return d.txhash }
 //
 // Panics on a read-only DB: OpenReadOnly composes a ledgers-only view with no
 // events facade (#834), so reaching for events there is a programming error — a
-// caller that needs a warmed events surface must open read-WRITE (or #772 must
-// add a warmed read-only variant), never silently read a cold, unwarmed store.
+// caller that needs a warmed events surface must open read-WRITE (warmup may
+// seal a slab, so a read-only variant would need #772 to settle how), never
+// silently read a cold, unwarmed store.
 func (d *DB) Events() *event.HotStore {
 	if d.events == nil {
 		panic(fmt.Sprintf("hotchunk: Events() on read-only chunk %s: no events facade (ledgers-only view)", d.chunkID))
@@ -270,9 +281,11 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 //   - PhaseLedgers/PhaseTxhash/PhaseEvents: each facade's queue-into-batch step;
 //   - PhaseCommit: the RocksDB batch write (WAL append + fsync + memtable) = the
 //     whole Batch call minus the three queue steps — the fsync wait pprof can't see.
-//   - PhaseApply: the post-commit in-memory mirror/offsets apply (the events
-//     copy-on-write bitmap clones). It runs only after the batch is durable, so it
-//     is emitted on the success path only and Failed is never PhaseApply.
+//   - PhaseApply: the post-commit index/offsets apply (appending the ledger's
+//     postings in memory, and at a slab boundary waiting for the previous
+//     slab's seal). It runs only after the batch is durable. It fails only
+//     when the events index could not seal a slab; the ledger is committed,
+//     and the next open indexes it again.
 type Phase uint8
 
 const (
@@ -329,7 +342,7 @@ type LedgerReport struct {
 
 // IngestLedger commits ONE ledger as a SINGLE atomic synced WriteBatch across all
 // hot CFs (decision (a)): queue ledgers, txhash, and events rows into one
-// BatchWriter, commit once, and only then apply the events in-memory mirror/offsets
+// BatchWriter, commit once, and only then apply the events in-memory index/offsets
 // update.
 //
 // txParts is the caller's ExtractLedgerTxParts output for lcmView. The walk
@@ -396,10 +409,6 @@ func (d *DB) IngestLedger(
 		return rep, fmt.Errorf("shape events seq %d: %w", seq, err)
 	}
 	rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
-	// Per-type write volume lives on the write phases (emitted on success).
-	rep.Phases[PhaseLedgers].Items = 1
-	rep.Phases[PhaseTxhash].Items = len(txEntries)
-	rep.Phases[PhaseEvents].Items = len(payloads)
 
 	// The events facade validates + marshals inside the batch callback (so a
 	// rejected ledger never leaves committed rows) and returns the post-commit
@@ -407,7 +416,7 @@ func (d *DB) IngestLedger(
 	// never a duplicate — the hook is always non-nil on success. Each facade's queue
 	// step is timed individually; Commit (below) is the whole Batch minus those —
 	// the RocksDB write (WAL append + fsync + memtable).
-	var applyEvents func()
+	var applyEvents func() error
 	// A batch error not attributed to a specific queue step below is the commit
 	// itself (the RocksDB write); a queue-step error narrows Failed to its phase.
 	failed := PhaseCommit
@@ -451,12 +460,20 @@ func (d *DB) IngestLedger(
 		return rep, fmt.Errorf("commit ledger %d to chunk %s: %w", seq, d.chunkID, cerr)
 	}
 
-	// Batch is durable — now and only now apply the events mirror/offsets update.
-	// PhaseApply times this post-commit in-memory work (the events mirror's
-	// copy-on-write bitmap clones), which otherwise lands in no phase.
+	// The batch is durable: the write phases now carry what landed.
+	rep.Phases[PhaseLedgers].Items = 1
+	rep.Phases[PhaseTxhash].Items = len(txEntries)
+	rep.Phases[PhaseEvents].Items = len(payloads)
+
+	// Now and only now apply the events index/offsets update. PhaseApply times
+	// this post-commit work, which otherwise lands in no phase.
 	applyStart := time.Now()
-	applyEvents()
+	err = applyEvents()
 	rep.Phases[PhaseApply].Dur = time.Since(applyStart)
+	if err != nil {
+		rep.Failed = PhaseApply
+		return rep, fmt.Errorf("apply ledger %d to chunk %s: %w", seq, d.chunkID, err)
+	}
 	return rep, nil
 }
 
