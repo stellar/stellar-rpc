@@ -9,7 +9,7 @@ inputs:
     description: 'Target Go architecture (used for native lib cache keys when cross-compiling)'
     required: false
     default: ''
-  internal-go-modules-app-id:
+  internal-go-modules-client-id:
     description: 'See ../internal-go-modules'
     required: false
   internal-go-modules-private-key:
@@ -123,7 +123,7 @@ runs:
 
     - uses: ./.github/actions/internal-go-modules
       with:
-        app-id: ${{ inputs.internal-go-modules-app-id }}
+        client-id: ${{ inputs.internal-go-modules-client-id }}
         private-key: ${{ inputs.internal-go-modules-private-key }}
 
     # Build grocksdb with clean_link for every go command in the job (build,

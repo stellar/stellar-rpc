@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -78,10 +77,8 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 	warningCounter := TestingCounter{}
 	limitCounter := TestingCounter{}
 	logCounter := makeTestLogCounter()
-	inflight := new(sync.WaitGroup)
 	*hoistFunction = MakeJrpcRequestDurationLimiter(
 		longExecutingHandler,
-		inflight,
 		time.Second/20,
 		time.Second/10,
 		&warningCounter,
@@ -105,8 +102,7 @@ func TestJRPCRequestDurationLimiter_Limiting(t *testing.T) {
 	require.Zero(t, warningCounter.count)
 	require.Equal(t, int64(1), limitCounter.count)
 	require.Equal(t, [7]int{0, 0, 0, 0, 1, 0, 0}, logCounter.writtenLogEntries)
-	inflight.Wait()
-	require.True(t, returned.Load(), "inflight did not wait for the handler")
+	require.True(t, returned.Load(), "the limiter did not wait for the handler")
 	shutdown()
 }
 
@@ -130,7 +126,6 @@ func TestJRPCRequestDurationLimiter_NoLimiting(t *testing.T) {
 	logCounter := makeTestLogCounter()
 	*hoistFunction = MakeJrpcRequestDurationLimiter(
 		longExecutingHandler,
-		new(sync.WaitGroup),
 		time.Second*5,
 		time.Second*10,
 		&warningCounter,
@@ -174,7 +169,6 @@ func TestJRPCRequestDurationLimiter_NoLimiting_Warn(t *testing.T) {
 	logCounter := makeTestLogCounter()
 	*hoistFunction = MakeJrpcRequestDurationLimiter(
 		longExecutingHandler,
-		new(sync.WaitGroup),
 		time.Second/10,
 		time.Second*10,
 		&warningCounter,

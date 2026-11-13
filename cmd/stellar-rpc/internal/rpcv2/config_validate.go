@@ -229,12 +229,31 @@ func validateBSB(bsb config.BSBConfig) error {
 	return nil
 }
 
+// validateByteLimits checks the [service] byte caps: the conversion cap is
+// set, and the total, when set, is at least each of the other two.
+func validateByteLimits(svc config.ServiceConfig) error {
+	if *svc.MaxJSONConversionBytes < 1 {
+		return errors.New("[service].max_json_conversion_bytes must be >= 1")
+	}
+	total := *svc.MaxTotalResponseBytes
+	if total > 0 && total < max(*svc.MaxResponseBytes, *svc.MaxJSONConversionBytes) {
+		return errors.New("[service].max_total_response_bytes must be >= max_response_bytes and max_json_conversion_bytes")
+	}
+	return nil
+}
+
 // validateService form-validates the [service] section. It runs AFTER
 // WithDefaults, so every pointer is non-nil and the checks cover all three
 // tiers of the methods cascade (an explicit zero at any tier lands here).
 func validateService(svc config.ServiceConfig) error {
 	if *svc.MaxConcurrentRequests < 1 {
 		return errors.New("[service].max_concurrent_requests must be >= 1")
+	}
+	if *svc.MaxRequestBatchSize < 1 {
+		return errors.New("[service].max_request_batch_size must be >= 1")
+	}
+	if err := validateByteLimits(svc); err != nil {
+		return err
 	}
 	durations := []struct {
 		name string
@@ -312,7 +331,8 @@ func validatePreflight(p config.PreflightConfig) error {
 	if *p.WorkerQueueSize < 1 {
 		return errors.New("[service.preflight].worker_queue_size must be >= 1")
 	}
-	return nil
+	return limits.ValidateSimulationMemoryLimit(
+		"[service.preflight].simulation_memory_limit", uint64(*p.SimulationMemoryLimit))
 }
 
 func validatePaginatedMethods(m config.MethodsConfig) error {

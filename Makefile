@@ -62,6 +62,15 @@ endif
 # (libpreflight.a is put at target/release-with-panic-unwind/ when not cross compiling)
 CARGO_BUILD_TARGET ?= $(shell rustc -vV | sed -n 's|host: ||p')
 
+# Since Go 1.26.11 and 1.27.4, cgo rejects any library under a -L directory
+# that holds LLVM bitcode, and Rust's prebuilt standard library puts bitcode in
+# every Rust static library. So build-libs copies the two libraries cgo links
+# into their own directory without the bitcode, which only an LTO link uses.
+RUST_LIBS_DIR = target/$(CARGO_BUILD_TARGET)/cgo-libs
+LLVM_OBJCOPY ?= $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's|host: ||p')/bin/llvm-objcopy
+STRIP_BITCODE = $(LLVM_OBJCOPY) --remove-section=.llvmbc --remove-section=.llvmcmd \
+	--remove-section=__LLVM,__bitcode --remove-section=__LLVM,__cmdline
+
 # unchanged name: the Jenkins packager, apt packaging, and Dockerfile.release consume it
 STELLAR_RPC_BINARY := stellar-rpc
 
@@ -76,7 +85,7 @@ RPCV2 ?= false
 # go-sqlite3's bundled SQLite sets no -O of its own.
 ZSTD_HOME ?= $(HOME)/.zstd
 ROCKSDB_HOME ?= $(HOME)/.rocksdb
-override CGO_CPPFLAGS := -I$(ZSTD_HOME)/include -I$(ROCKSDB_HOME)/include $(CGO_CPPFLAGS)
+override CGO_CPPFLAGS := -I$(ZSTD_HOME)/include -I$(ROCKSDB_HOME)/include $(CGO_CPPFLAGS) -DSQLITE_MAX_LENGTH=2147483647
 override CGO_LDFLAGS := -L$(ZSTD_HOME)/lib -L$(ROCKSDB_HOME)/lib $(CGO_LDFLAGS)
 export CGO_CPPFLAGS CGO_LDFLAGS
 
@@ -96,6 +105,9 @@ build-libs: Cargo.lock
 	cargo build --target $(CARGO_BUILD_TARGET) --profile release-with-panic-unwind && \
 	cd ../xdr2json && \
 	cargo build --target $(CARGO_BUILD_TARGET) --profile release-with-panic-unwind
+	mkdir -p $(RUST_LIBS_DIR)
+	$(STRIP_BITCODE) target/$(CARGO_BUILD_TARGET)/release-with-panic-unwind/libpreflight.a $(RUST_LIBS_DIR)/libpreflight.a
+	$(STRIP_BITCODE) target/$(CARGO_BUILD_TARGET)/release-with-panic-unwind/libxdr2json.a $(RUST_LIBS_DIR)/libxdr2json.a
 
 check: rust-check go-check
 

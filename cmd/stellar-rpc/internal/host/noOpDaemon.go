@@ -53,11 +53,11 @@ func (s noOpCoreClient) Info(context.Context) (*proto.InfoResponse, error) {
 }
 
 func (s noOpCoreClient) SubmitTransaction(context.Context, string) (*proto.TXResponse, error) {
-	return &proto.TXResponse{Status: proto.PreflightStatusOk}, nil
+	return &proto.TXResponse{Status: proto.TXStatusPending}, nil
 }
 
 func (s noOpCoreClient) GetLedgerEntries(context.Context,
-	uint32, ...xdr.LedgerKey,
+	uint32, ...xdr.LedgerKeyView,
 ) (proto.GetLedgerEntryResponse, error) {
 	return proto.GetLedgerEntryResponse{}, nil
 }

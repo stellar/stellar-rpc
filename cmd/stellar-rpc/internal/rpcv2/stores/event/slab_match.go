@@ -1,7 +1,7 @@
 package event
 
 // slab_match.go produces the candidate ids behind Matches. One stepper walks
-// one stage of the window (see stage1Request) one slab at a time, 65536 ids,
+// one stage of the window (see stageRequest) one slab at a time, 65536 ids,
 // the span of one roaring container, and the whole filter algebra is
 // evaluated inside each slab. Direction is only the walk order: ascending
 // walks slabs low to high and reads each result forward, descending walks
@@ -14,10 +14,10 @@ package event
 // the bound helpers below).
 //
 // The term bitmaps come from the Reader.LookupKeys call this stage was looked
-// up by and are held for its walk. They answer for the stage's ids and no
-// others, which is why the stepper's window is the stage: the bounds proved
-// from them die with it. They are read-only and may be snapshots shared with
-// other readers. FastAnd reads its arguments and returns fresh containers,
+// up by and are held for its walk. They answer for the stage's ids, which is
+// why the stepper's window is the stage: the bounds it proves from them die
+// with it. They are read-only and may be snapshots shared with other
+// readers. FastAnd reads its arguments and returns fresh containers,
 // which roaring_contract_test.go pins against the pinned roaring version; the
 // only bitmaps this file mutates are the ones it builds for a slab and the
 // results FastAnd hands back. Each lookup being a point-in-time image, ids
@@ -97,8 +97,8 @@ func (p slabPlan) eval(slab *roaring.Bitmap, ops []*roaring.Bitmap) *roaring.Bit
 //
 // Descending mirrors this with PreviousValue and the min and max swapped.
 // The post-filter only drops candidates, so a bound proved on the index
-// bounds the stream, and a bound proved from this stage's bitmaps bounds
-// this stage only. NextValue and PreviousValue are inclusive of the target,
+// bounds the stream, and a bound proved from a split term's bitmap bounds
+// its stage only. NextValue and PreviousValue are inclusive of the target,
 // return -1 for none, and do not write the bitmap they search;
 // roaring_contract_test.go pins all three properties.
 

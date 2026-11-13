@@ -301,7 +301,7 @@ func TestQueryHotCommandRecordsRun(t *testing.T) {
 	assert.NotContains(t, record.Settings, "fixedReadRange")
 	assert.Equal(t, protocol.FormatJSON, record.Settings["format"])
 	assert.Equal(t, tierHot, record.Settings["tier"])
-	assert.Equal(t, strconv.Itoa(runtime.NumCPU()), record.Settings["handlerConcurrency"])
+	assert.Equal(t, strconv.Itoa(runtime.GOMAXPROCS(0)), record.Settings["handlerConcurrency"])
 	assert.Equal(t, "existing-cache", record.Settings["cacheScenario"])
 	assert.Equal(t, "0", rows[0]["warmup_planned"])
 	assert.Equal(t, "off", record.Settings["pageCacheEviction"])

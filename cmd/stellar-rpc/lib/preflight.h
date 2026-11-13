@@ -72,3 +72,16 @@ extern ledger_entry_and_ttl_t SnapshotSourceGet(uintptr_t handle, xdr_t ledger_k
 void free_preflight_result(preflight_result_t *result);
 
 extern void FreeGoLedgerEntryAndTTL(ledger_entry_and_ttl_t ledger_entry_and_ttl);
+
+// Starts counting the heap the Rust libraries hold in this process, and limits
+// it: to bytes from now on, or when bytes is 0, to 8 times the per-transaction
+// memory limit of the ledger each simulation reads. An allocation past the
+// limit ends the process with exit_code.
+void preflight_limit_memory(uint64_t bytes, int exit_code);
+// The heap limit in force, or 0 when there is none.
+uint64_t preflight_memory_limit(void);
+// Restarts the measurement preflight_memory_peak returns.
+void preflight_reset_memory_peak(void);
+// The most heap the Rust libraries held since the last
+// preflight_reset_memory_peak.
+uint64_t preflight_memory_peak(void);

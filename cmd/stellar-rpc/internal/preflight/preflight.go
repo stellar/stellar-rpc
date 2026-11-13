@@ -6,14 +6,14 @@ package preflight
 #include <stdlib.h>
 // This assumes that the Rust compiler should be using a -gnu target (i.e. MinGW compiler) in Windows
 // (I (fons) am not even sure if CGo supports MSVC, see https://github.com/golang/go/issues/20982)
-#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-pc-windows-gnu/release-with-panic-unwind/ -lpreflight -lntdll -static -lws2_32 -lbcrypt -luserenv
+#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-pc-windows-gnu/cgo-libs/ -lpreflight -lntdll -static -lws2_32 -lbcrypt -luserenv
 // You cannot compile with -static in macOS (and it's not worth it in Linux, at least with glibc)
-#cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-apple-darwin/release-with-panic-unwind/ -lpreflight -ldl -lm
-#cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/../../../../target/aarch64-apple-darwin/release-with-panic-unwind/ -lpreflight -ldl -lm
+#cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-apple-darwin/cgo-libs/ -lpreflight -ldl -lm
+#cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/../../../../target/aarch64-apple-darwin/cgo-libs/ -lpreflight -ldl -lm
 // In Linux, at least for now, we will be dynamically linking glibc. See https://github.com/2opremio/soroban-go-rust-preflight-poc/issues/3 for details
 // I (fons) did try linking statically against musl but it caused problems catching (unwinding) Rust panics.
-#cgo linux,amd64 LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-unknown-linux-gnu/release-with-panic-unwind/ -lpreflight -ldl -lm
-#cgo linux,arm64 LDFLAGS: -L${SRCDIR}/../../../../target/aarch64-unknown-linux-gnu/release-with-panic-unwind/ -lpreflight -ldl -lm
+#cgo linux,amd64 LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-unknown-linux-gnu/cgo-libs/ -lpreflight -ldl -lm
+#cgo linux,arm64 LDFLAGS: -L${SRCDIR}/../../../../target/aarch64-unknown-linux-gnu/cgo-libs/ -lpreflight -ldl -lm
 */
 import "C"
 
@@ -35,6 +35,9 @@ type snapshotSourceHandle struct {
 	ledgerEntryGetter ledgerentries.LedgerEntryGetter
 	ctx               context.Context //nolint:containedctx
 	logger            *log.Entry
+	// err is the first failed read. The library takes a failed read for a
+	// missing entry, so the simulation's result cannot be used.
+	err error
 }
 
 // Current base reserve is 0.5XLM (in stroops)
@@ -45,43 +48,32 @@ const defaultBaseReserve = 5_000_000
 //
 //export SnapshotSourceGet
 func SnapshotSourceGet(handle C.uintptr_t, cLedgerKey C.xdr_t) C.ledger_entry_and_ttl_t {
-	h, ok := cgo.Handle(handle).Value().(snapshotSourceHandle)
+	h, ok := cgo.Handle(handle).Value().(*snapshotSourceHandle)
 	if !ok {
-		panic("invalid handle type: expected snapshotSourceHandle")
+		panic("invalid handle type: expected *snapshotSourceHandle")
 	}
-	ledgerKeyXDR := GoXDR(cLedgerKey)
-	var ledgerKey xdr.LedgerKey
-	if err := xdr.SafeUnmarshal(ledgerKeyXDR, &ledgerKey); err != nil {
-		h.logger.WithError(err).Error("SnapshotSourceGet(): SafeUnmarshal() failed")
+	if h.err != nil {
 		return C.ledger_entry_and_ttl_t{}
 	}
-	entries, _, err := h.ledgerEntryGetter.GetLedgerEntries(h.ctx, []xdr.LedgerKey{ledgerKey})
+	entries, _, err := h.ledgerEntryGetter.GetLedgerEntries(h.ctx, []xdr.LedgerKeyView{GoXDR(cLedgerKey)})
+	if err == nil && len(entries) > 1 {
+		err = errors.New("GetLedgerEntries() returned more than one entry")
+	}
 	if err != nil {
-		// a canceled request is not a fault
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		h.err = err
+		// a read that timed out is not a fault
+		if !errors.Is(err, context.DeadlineExceeded) {
 			h.logger.WithError(err).Error("SnapshotSourceGet(): GetLedgerEntries() failed")
 		}
-		return C.ledger_entry_and_ttl_t{}
-	}
-	if len(entries) > 1 {
-		h.logger.WithError(err).Error("SnapshotSourceGet(): GetLedgerEntries() returned more than one entry")
 		return C.ledger_entry_and_ttl_t{}
 	}
 	if len(entries) == 0 {
 		return C.ledger_entry_and_ttl_t{}
 	}
-	out, err := entries[0].Entry.MarshalBinary()
-	if err != nil {
-		h.logger.WithError(err).Error("SnapshotSourceGet(): MarshalBinary() failed")
-		return C.ledger_entry_and_ttl_t{}
-	}
 
 	result := C.ledger_entry_and_ttl_t{
-		entry: C.xdr_t{
-			xdr: (*C.uchar)(C.CBytes(out)),
-			len: C.size_t(len(out)),
-		},
-		ttl: -1, // missing TTL
+		entry: CXDR(entries[0].Entry),
+		ttl:   -1, // missing TTL
 	}
 	if entries[0].LiveUntilLedgerSeq != nil {
 		result.ttl = C.int64_t(*entries[0].LiveUntilLedgerSeq)
@@ -100,9 +92,9 @@ func FreeGoLedgerEntryAndTTL(leTTL C.ledger_entry_and_ttl_t) {
 
 type Parameters struct {
 	Logger            *log.Entry
-	SourceAccount     xdr.AccountId
-	OpBody            xdr.OperationBody
-	Footprint         xdr.LedgerFootprint
+	SourceAccount     xdr.AccountIdView
+	OpBody            xdr.OperationBodyView
+	Footprint         xdr.LedgerFootprintView
 	NetworkPassphrase string
 	LedgerEntryGetter ledgerentries.LedgerEntryGetter
 	LedgerSeq         uint32
@@ -165,13 +157,17 @@ func GoXDRDiffVector(xdrDiffVector C.xdr_diff_vector_t) []XDRDiff {
 }
 
 func GetPreflight(ctx context.Context, params Parameters) (Preflight, error) {
-	switch params.OpBody.Type {
+	opType, err := params.OpBody.Type()
+	if err != nil {
+		return Preflight{}, err
+	}
+	switch opType {
 	case xdr.OperationTypeInvokeHostFunction:
 		return getInvokeHostFunctionPreflight(ctx, params)
 	case xdr.OperationTypeExtendFootprintTtl, xdr.OperationTypeRestoreFootprint:
 		return getFootprintTTLPreflight(ctx, params)
 	default:
-		return Preflight{}, fmt.Errorf("unsupported operation type: %s", params.OpBody.Type.String())
+		return Preflight{}, fmt.Errorf("unsupported operation type: %s", opType.String())
 	}
 }
 
@@ -191,19 +187,11 @@ func freeLedgerInfo(ledgerInfo C.ledger_info_t) {
 }
 
 func getFootprintTTLPreflight(ctx context.Context, params Parameters) (Preflight, error) {
-	opBodyXDR, err := params.OpBody.MarshalBinary()
-	if err != nil {
-		return Preflight{}, err
-	}
-	opBodyCXDR := CXDR(opBodyXDR)
+	opBodyCXDR := CXDR(params.OpBody)
 	defer FreeGoXDR(opBodyCXDR)
-	footprintXDR, err := params.Footprint.MarshalBinary()
-	if err != nil {
-		return Preflight{}, fmt.Errorf("cannot marshal footprint: %w", err)
-	}
-	footprintCXDR := CXDR(footprintXDR)
+	footprintCXDR := CXDR(params.Footprint)
 	defer FreeGoXDR(footprintCXDR)
-	ssh := snapshotSourceHandle{
+	ssh := &snapshotSourceHandle{
 		ledgerEntryGetter: params.LedgerEntryGetter,
 		ctx:               ctx,
 		logger:            params.Logger,
@@ -221,23 +209,21 @@ func getFootprintTTLPreflight(ctx context.Context, params Parameters) (Preflight
 		ledgerInfo,
 	)
 
-	return GoPreflight(res), nil
+	return preflightResult(GoPreflight(res), ssh, params.LedgerSeq)
 }
 
 func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Preflight, error) {
-	invokeHostFunctionXDR, err := params.OpBody.MustInvokeHostFunctionOp().MarshalBinary()
+	invokeHostFunctionXDR, err := xdr.Try(func() []byte {
+		return params.OpBody.MustInvokeHostFunctionOp().MustRaw()
+	})
 	if err != nil {
 		return Preflight{}, err
 	}
 	invokeHostFunctionCXDR := CXDR(invokeHostFunctionXDR)
 	defer FreeGoXDR(invokeHostFunctionCXDR)
-	sourceAccountXDR, err := params.SourceAccount.MarshalBinary()
-	if err != nil {
-		return Preflight{}, err
-	}
-	sourceAccountCXDR := CXDR(sourceAccountXDR)
+	sourceAccountCXDR := CXDR(params.SourceAccount)
 	defer FreeGoXDR(sourceAccountCXDR)
-	ssh := snapshotSourceHandle{
+	ssh := &snapshotSourceHandle{
 		ledgerEntryGetter: params.LedgerEntryGetter,
 		ctx:               ctx,
 		logger:            params.Logger,
@@ -276,7 +262,16 @@ func getInvokeHostFunctionPreflight(ctx context.Context, params Parameters) (Pre
 		C.bool(params.UseUpgradedAuth),
 	)
 
-	return GoPreflight(res), nil
+	return preflightResult(GoPreflight(res), ssh, params.LedgerSeq)
+}
+
+// preflightResult discards the result of a simulation that had a failed read,
+// whether or not the simulation itself failed.
+func preflightResult(preflight Preflight, ssh *snapshotSourceHandle, ledgerSeq uint32) (Preflight, error) {
+	if ssh.err != nil {
+		return Preflight{}, fmt.Errorf("could not read the ledger state at ledger %d: %w", ledgerSeq, ssh.err)
+	}
+	return preflight, nil
 }
 
 func GoPreflight(result *C.preflight_result_t) Preflight {

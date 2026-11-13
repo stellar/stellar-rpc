@@ -7,18 +7,21 @@ package xdr2json
 #include <stdlib.h>
 #include <string.h>
 #include "../../lib/xdr2json.h"
-#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-pc-windows-gnu/release-with-panic-unwind/ -lxdr2json -lntdll -static -lws2_32 -lbcrypt -luserenv
-#cgo darwin,amd64  LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-apple-darwin/release-with-panic-unwind/ -lxdr2json -ldl -lm
-#cgo darwin,arm64  LDFLAGS: -L${SRCDIR}/../../../../target/aarch64-apple-darwin/release-with-panic-unwind/ -lxdr2json -ldl -lm
-#cgo linux,amd64   LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-unknown-linux-gnu/release-with-panic-unwind/ -lxdr2json -ldl -lm
-#cgo linux,arm64   LDFLAGS: -L${SRCDIR}/../../../../target/aarch64-unknown-linux-gnu/release-with-panic-unwind/ -lxdr2json -ldl -lm
+#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-pc-windows-gnu/cgo-libs/ -lxdr2json -lntdll -static -lws2_32 -lbcrypt -luserenv
+#cgo darwin,amd64  LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-apple-darwin/cgo-libs/ -lxdr2json -ldl -lm
+#cgo darwin,arm64  LDFLAGS: -L${SRCDIR}/../../../../target/aarch64-apple-darwin/cgo-libs/ -lxdr2json -ldl -lm
+#cgo linux,amd64   LDFLAGS: -L${SRCDIR}/../../../../target/x86_64-unknown-linux-gnu/cgo-libs/ -lxdr2json -ldl -lm
+#cgo linux,arm64   LDFLAGS: -L${SRCDIR}/../../../../target/aarch64-unknown-linux-gnu/cgo-libs/ -lxdr2json -ldl -lm
 */
 import "C"
 
 import (
+	"bytes"
 	"encoding"
 	"encoding/json"
+	"math"
 	"reflect"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/pkg/errors"
@@ -28,19 +31,15 @@ import (
 // and returns the raw JSON-formatted serialization of that object.
 // It can be unmarshalled to a proper JSON structure, but the raw bytes are
 // returned to avoid unnecessary round-trips. If there is an
-// error, it returns an empty string.
+// error, it returns an empty string. It fails if the JSON would exceed the
+// cap set by SetMaxOutputBytes.
 //
 // The `xdr` object does not need to actually be initialized/valid:
 // we only use it to determine the name of the structure. We could just
 // accept a string, but that would make mistakes likelier than passing the
 // structure itself (by reference).
 func ConvertBytes(xdr any, field []byte) (json.RawMessage, error) {
-	if len(field) == 0 {
-		return []byte(""), nil
-	}
-
-	xdrTypeName := reflect.TypeOf(xdr).Name()
-	return convertAnyBytes(xdrTypeName, field)
+	return (*Budget)(nil).ConvertBytes(xdr, field)
 }
 
 // ConvertInterface takes a valid XDR object (`xdr`) and returns
@@ -50,13 +49,101 @@ func ConvertBytes(xdr any, field []byte) (json.RawMessage, error) {
 // Unlike `ConvertBytes`, the value here needs to be valid and
 // serializable.
 func ConvertInterface(xdr encoding.BinaryMarshaler) (json.RawMessage, error) {
+	return (*Budget)(nil).ConvertInterface(xdr)
+}
+
+// DefaultMaxOutputBytes caps one conversion until SetMaxOutputBytes is called.
+const DefaultMaxOutputBytes = 128 * 1024 * 1024
+
+//nolint:gochecknoglobals // set once at startup from the daemon config
+var maxOutputBytes atomic.Uint64
+
+// SetMaxOutputBytes caps the JSON, once escaped, that one conversion may
+// produce. Zero restores DefaultMaxOutputBytes.
+func SetMaxOutputBytes(n uint) {
+	maxOutputBytes.Store(uint64(n))
+}
+
+func outputCap() int {
+	n := maxOutputBytes.Load()
+	if n == 0 {
+		return DefaultMaxOutputBytes
+	}
+	return int(min(n, math.MaxInt))
+}
+
+// Budget caps the total size of the JSON produced by a series of conversions.
+// A nil Budget caps each conversion at the size SetMaxOutputBytes sets.
+type Budget struct {
+	remaining int
+}
+
+// NewBudget returns a Budget that allows up to maxBytes of JSON in total.
+func NewBudget(maxBytes int) *Budget {
+	return &Budget{remaining: maxBytes}
+}
+
+// ConvertBytes is like the package-level ConvertBytes, but fails instead of
+// exceeding the budget.
+func (b *Budget) ConvertBytes(xdr any, field []byte) (json.RawMessage, error) {
+	if len(field) == 0 {
+		return []byte(""), nil
+	}
+
+	return b.convert(reflect.TypeOf(xdr).Name(), field)
+}
+
+// ConvertSlice converts each of values as ConvertBytes does.
+func (b *Budget) ConvertSlice(xdr any, values [][]byte) ([]json.RawMessage, error) {
+	result := make([]json.RawMessage, len(values))
+	for i, value := range values {
+		var err error
+		if result[i], err = b.ConvertBytes(xdr, value); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
+// ConvertInterface is like the package-level ConvertInterface, but fails
+// instead of exceeding the budget.
+func (b *Budget) ConvertInterface(xdr encoding.BinaryMarshaler) (json.RawMessage, error) {
 	xdrTypeName := reflect.TypeOf(xdr).Name()
 	data, err := xdr.MarshalBinary()
 	if err != nil {
 		return []byte(""), errors.Wrapf(err, "failed to serialize XDR type '%s'", xdrTypeName)
 	}
 
-	return convertAnyBytes(xdrTypeName, data)
+	return b.convert(xdrTypeName, data)
+}
+
+func (b *Budget) convert(xdrTypeName string, field []byte) (json.RawMessage, error) {
+	if b == nil {
+		b = NewBudget(outputCap())
+	}
+	js, err := convertAnyBytes(xdrTypeName, field, b.remaining)
+	if err != nil {
+		return js, err
+	}
+	n := EscapedLen(js)
+	if n > b.remaining {
+		return nil, errors.Errorf("JSON output exceeds the %d bytes left in its budget once escaped", b.remaining)
+	}
+	b.remaining -= n
+	return js, nil
+}
+
+// EscapedLen is the length of js in the response, where encoding/json escapes
+// <, > and & as \u00XX and U+2028 and U+2029 as \u202X.
+func EscapedLen(js []byte) int {
+	n := len(js)
+	for _, c := range []string{"<", ">", "&"} {
+		n += 5 * bytes.Count(js, []byte(c))
+	}
+	for _, c := range []string{"\u2028", "\u2029"} {
+		n += 3 * bytes.Count(js, []byte(c))
+	}
+	return n
 }
 
 // maxJSONInputLen mirrors DEFAULT_XDR_RW_LIMITS.len in
@@ -69,7 +156,7 @@ const maxJSONInputLen = 32 * 1024 * 1024
 // ConvertBytes produces, and returns the value's XDR byte encoding. Unlike
 // ConvertBytes, empty input is an error: it is not valid JSON. Inputs over
 // 32 MiB are rejected, and serde_json's recursion limit caps container
-// nesting at 63 levels, below the 500 the read direction allows, so the
+// nesting at 63 levels, below the 1500 the read direction allows, so the
 // deepest protocol-legal values only convert from their base64 form.
 func ConvertJSON(xdr any, js json.RawMessage) ([]byte, error) {
 	// Rejecting empty input here also keeps C.CBytes below from making a
@@ -103,14 +190,14 @@ func ConvertJSON(xdr any, js json.RawMessage) ([]byte, error) {
 	return C.GoBytes(unsafe.Pointer(result.xdr.xdr), C.int(result.xdr.len)), nil
 }
 
-func convertAnyBytes(xdrTypeName string, field []byte) (json.RawMessage, error) {
+func convertAnyBytes(xdrTypeName string, field []byte, maxLen int) (json.RawMessage, error) {
 	goRawXdr := CXDR(field)
 	defer FreeGoXDR(goRawXdr)
 
 	b := C.CString(xdrTypeName)
 	defer C.free(unsafe.Pointer(b))
 
-	result := C.xdr_to_json(b, goRawXdr)
+	result := C.xdr_to_json(b, goRawXdr, C.size_t(maxLen))
 	defer C.free_conversion_result(result)
 
 	if errStr := C.GoString(result.error); errStr != "" {

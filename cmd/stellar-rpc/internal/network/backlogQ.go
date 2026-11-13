@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"net/http"
 	"sync/atomic"
 
 	"github.com/creachadair/jrpc2"
@@ -30,28 +29,6 @@ type backlogQLimiter struct {
 	logger       *log.Entry
 }
 
-type BacklogHTTPQLimiter struct {
-	backlogQLimiter
-
-	httpDownstreamHandler http.Handler
-}
-
-func MakeHTTPBacklogQueueLimiter(
-	downstream http.Handler,
-	gauge gauge,
-	limit uint64,
-	logger *log.Entry,
-) *BacklogHTTPQLimiter {
-	return &BacklogHTTPQLimiter{
-		httpDownstreamHandler: downstream,
-		backlogQLimiter: backlogQLimiter{
-			limit:  limit,
-			gauge:  gauge,
-			logger: logger,
-		},
-	}
-}
-
 type BacklogJrpcQLimiter struct {
 	backlogQLimiter
 
@@ -72,40 +49,6 @@ func MakeJrpcBacklogQueueLimiter(
 			logger: logger,
 		},
 	}
-}
-
-func (q *BacklogHTTPQLimiter) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	if q.limit == RequestBacklogQueueNoLimit {
-		// if specified max duration, pass-through
-		q.httpDownstreamHandler.ServeHTTP(res, req)
-		return
-	}
-	if newPending := atomic.AddUint64(&q.pending, 1); newPending > q.limit {
-		// we've reached our queue limit - let the caller know we're too busy.
-		atomic.AddUint64(&q.pending, ^uint64(0))
-		res.WriteHeader(http.StatusServiceUnavailable)
-		if atomic.CompareAndSwapUint64(&q.limitReached, 0, 1) {
-			// if the limit was reached, log a message.
-			if q.logger != nil {
-				q.logger.Infof(
-					"Backlog queue limiter reached the queue limit of %d executing concurrent http requests.",
-					q.limit,
-				)
-			}
-		}
-		return
-	} else if q.gauge != nil {
-		q.gauge.Inc()
-	}
-	defer func() {
-		atomic.AddUint64(&q.pending, ^uint64(0))
-		if q.gauge != nil {
-			q.gauge.Dec()
-		}
-		atomic.StoreUint64(&q.limitReached, 0)
-	}()
-
-	q.httpDownstreamHandler.ServeHTTP(res, req)
 }
 
 func (q *BacklogJrpcQLimiter) Handle(ctx context.Context, req *jrpc2.Request) (any, error) {

@@ -27,8 +27,8 @@ jobs:
 
       - uses: ./.github/actions/setup-go
         with:
-          internal-go-modules-app-id: ${{ vars.INTERNAL_GO_MODULES_APP_ID }}
-          internal-go-modules-private-key: ${{ secrets.INTERNAL_GO_MODULES_APP_PRIVATE_KEY }}
+          internal-go-modules-client-id: ${{ secrets.INTERNAL_GO_MODULES_GH_APP_CLIENT_ID }}
+          internal-go-modules-private-key: ${{ secrets.INTERNAL_GO_MODULES_GH_APP_PRIVATE_KEY }}
       - uses: stellar/actions/rust-cache@main
       - name: Build libpreflight
         run: |
