@@ -203,10 +203,10 @@ During ingestion the daemon maintains **one hot RocksDB per chunk** at `{storage
 | Column family | Holds | Serves |
 |---|---|---|
 | `ledgers` | compressed LCMs (LedgerCloseMeta), keyed by seq | `getLedger` for the live chunk; the source `processChunk` reads at freeze |
-| `txhash` | tx hash → seq | `getTransaction` for the live chunk |
+| `txhash_rows`, `txhash` | each ledger's sorted tx-hash routing keys, keyed by seq; and the sealed windows of them, routing key → seq | `getTransaction` for the live chunk |
 | events CFs | live events (schema per the events doc) | `getEvents` for the live chunk |
 
-CFs share the instance's WAL, so each ledger commits as **one atomic WriteBatch** across the ledgers, txhash, events data and events offsets CFs. The events index CF is not in the batch: a full slab is loaded into it as one sorted file, and the slabs not yet loaded are re-derived from the events data CF when the DB is opened. Per-CF options keep tuning independent (the events CFs carry their own settings). The DB is created when ingestion enters the chunk. It is discarded whole once every cold artifact derived from the chunk is durable **and** the rolling index covers the chunk. It keeps serving tx lookups across the brief freeze-to-coverage interval; freeze, rebuild, and discard all chain within one lifecycle run.
+CFs share the instance's WAL, so each ledger commits as **one atomic WriteBatch** across the ledgers, txhash rows, events data and events offsets CFs. The events index CF and the `txhash` CF are not in the batch: a full slab or window is loaded into them as one sorted file, and what is not yet loaded is rebuilt from the events data and txhash rows CFs when the DB is opened. Per-CF options keep tuning independent (the events CFs carry their own settings). The DB is created when ingestion enters the chunk. It is discarded whole once every cold artifact derived from the chunk is durable **and** the rolling index covers the chunk. It keeps serving tx lookups across the brief freeze-to-coverage interval; freeze, rebuild, and discard all chain within one lifecycle run.
 
 ### Catalog keys
 
@@ -1067,6 +1067,6 @@ Every durable byte the daemon writes belongs to a storage format, and the policy
 
 ## Related documents
 
-- The transactions design ([gettransaction-full-history-design.md](./gettransaction-full-history-design.md)) — the tx-by-hash subsystem end to end: the hot `txhash` CF, the `.bin`/`.idx` formats, the rolling window index rebuild — its streamhash build internals and safety argument — the `getTransaction` read path, and the capacity numbers. Canonical for the streamhash `.bin`/`.idx` formats, the index build internals, and the index-key coverage semantics this doc summarizes.
+- The transactions design ([gettransaction-full-history-design.md](./gettransaction-full-history-design.md)) — the tx-by-hash subsystem end to end: the hot tier, the `.bin`/`.idx` formats, the rolling window index rebuild — its streamhash build internals and safety argument — the `getTransaction` read path, and the capacity numbers. Canonical for the streamhash `.bin`/`.idx` formats, the index build internals, and the index-key coverage semantics this doc summarizes.
 - The events design ([getevents-full-history-design.md](./getevents-full-history-design.md), PR #635) — the cold-segment file formats and the hot events CF schema referenced by the data model.
 - The reader / query-routing design — how reads dispatch between hot DBs and frozen files for in-retention queries.
