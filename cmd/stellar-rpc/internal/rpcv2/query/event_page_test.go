@@ -968,12 +968,12 @@ func (f *fakeEventReader) Offsets() (*event.LedgerOffsets, error) { return f.ofs
 // as it would over a windowed reader.
 func (f *fakeEventReader) LookupKeys(
 	_ context.Context, keys []event.TermKey, window event.IDRange,
-) ([]*roaring.Bitmap, event.IDRange, error) {
+) ([]*roaring.Bitmap, event.Coverage, error) {
 	out := make([]*roaring.Bitmap, len(keys))
 	for i, k := range keys {
 		out[i] = f.bitmaps[k]
 	}
-	return out, window, nil
+	return out, event.Coverage{IDRange: window}, nil
 }
 
 func (f *fakeEventReader) FetchEvents(_ context.Context, ids []uint32) ([]event.Payload, error) {

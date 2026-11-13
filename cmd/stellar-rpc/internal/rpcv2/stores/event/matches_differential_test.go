@@ -36,20 +36,20 @@ func (r diffReader) Offsets() (*LedgerOffsets, error) {
 	return nil, errors.New("diffReader: Offsets is not part of the match path")
 }
 
-// The bitmaps are whole terms; covering only the window makes the walk stage
-// as it would over a windowed reader.
+// The bitmaps are whole terms; covering only the window, and marking none
+// whole, makes the walk stage as it would over split terms.
 func (r diffReader) LookupKeys(
 	_ context.Context, keys []TermKey, window IDRange,
-) ([]*roaring.Bitmap, IDRange, error) {
+) ([]*roaring.Bitmap, Coverage, error) {
 	out := make([]*roaring.Bitmap, len(keys))
 	for i, k := range keys {
 		bm, err := r.c.mirror.Get(k)
 		if err != nil {
-			return nil, IDRange{}, err
+			return nil, Coverage{}, err
 		}
 		out[i] = bm
 	}
-	return out, window, nil
+	return out, Coverage{IDRange: window}, nil
 }
 
 func (r diffReader) FetchEvents(_ context.Context, ids []uint32) ([]Payload, error) {
