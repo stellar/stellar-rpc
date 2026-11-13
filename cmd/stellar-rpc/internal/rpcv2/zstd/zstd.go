@@ -62,12 +62,20 @@ type CompressorOption func(*compressorConfig)
 
 type compressorConfig struct {
 	checksum bool
+	workers  int
 }
 
 // WithoutChecksum disables the zstd content checksum.
 // Use when the caller provides its own integrity check (e.g., CRC32C).
 func WithoutChecksum() CompressorOption {
 	return func(cfg *compressorConfig) { cfg.checksum = false }
+}
+
+// WithWorkers compresses on n libzstd threads. The output is one standard
+// frame, though not the bytes a single-threaded encode of the same input
+// gives. NewCompressor panics when libzstd was built without multithreading.
+func WithWorkers(n int) CompressorOption {
+	return func(cfg *compressorConfig) { cfg.workers = n }
 }
 
 // NewCompressor creates a new Compressor. By default content checksums are enabled.
@@ -92,6 +100,12 @@ func NewCompressor(opts ...CompressorOption) *Compressor {
 	if rc := C.ZSTD_CCtx_setParameter(ctx, C.ZSTD_c_checksumFlag, flag); C.ZSTD_isError(rc) != 0 {
 		C.ZSTD_freeCCtx(ctx)
 		panic("zstd: set checksum flag: " + C.GoString(C.ZSTD_getErrorName(rc)))
+	}
+	if cfg.workers > 0 {
+		if rc := C.ZSTD_CCtx_setParameter(ctx, C.ZSTD_c_nbWorkers, C.int(cfg.workers)); C.ZSTD_isError(rc) != 0 {
+			C.ZSTD_freeCCtx(ctx)
+			panic("zstd: set workers: " + C.GoString(C.ZSTD_getErrorName(rc)))
+		}
 	}
 	c := &Compressor{ctx: ctx}
 	// Safety net for C memory: when sync.Pool evicts items, there's no cleanup
