@@ -39,41 +39,44 @@ type runSpan struct {
 const runGap = 1 << 20
 
 // spill appends slab's terms, in key order with their serialized bitmaps, to
-// the runs file as the next run.
-func (r *coldRuns) spill(slab uint32, terms iter.Seq2[TermKey, []byte]) error {
+// the runs file as the next run, and returns how many it wrote.
+func (r *coldRuns) spill(slab uint32, terms iter.Seq2[TermKey, []byte]) (int, error) {
 	if r.f == nil {
 		if err := os.MkdirAll(r.dir, 0o755); err != nil {
-			return err
+			return 0, err
 		}
 		f, err := os.Create(filepath.Join(r.dir, "runs"))
 		if err != nil {
-			return err
+			return 0, err
 		}
 		r.f = f
 	} else if _, err := r.f.Seek(runGap, io.SeekCurrent); err != nil {
-		return err
+		return 0, err
 	}
 	off, err := r.f.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if err := writeRun(r.f, terms); err != nil {
-		return err
+	n, err := writeRun(r.f, terms)
+	if err != nil {
+		return 0, err
 	}
 	end, err := r.f.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	r.spans = append(r.spans, runSpan{off: off, n: end - off, slab: slab})
-	return nil
+	return n, nil
 }
 
-func writeRun(f *os.File, terms iter.Seq2[TermKey, []byte]) error {
+func writeRun(f *os.File, terms iter.Seq2[TermKey, []byte]) (int, error) {
 	w := bufio.NewWriterSize(f, 1<<16)
+	n := 0
 	for key, bitmap := range terms {
 		writeEntry(w, key, bitmap)
+		n++
 	}
-	return w.Flush()
+	return n, w.Flush()
 }
 
 // writeEntry writes key || uvarint(len(value)) || value. A bufio.Writer

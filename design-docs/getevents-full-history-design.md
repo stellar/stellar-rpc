@@ -273,15 +273,13 @@ The resulting bitmap contains the event IDs matching the term, over the range th
 ```
 1. Start new hot segment immediately.
 
-2. Read uncompressed events sequentially from the hot segment storage.
+2. Copy the hot segment's events, which the hot store holds in events.pack's wire format, into cold events.pack with offset index and ledger offset array embedded.
 
-3. Compress into zstd blocks and write cold events.pack with offset index and ledger offset array embedded.
+3. Build the index from the hot index: each sealed slab is already in a spilled run's form, so it becomes a run as it is; the events after the last sealed slab are indexed again from their data; then the runs merge into index.hash and index.pack as in backfill (§13). The files are the bytes backfill writes for the segment.
 
-4. Build the index the way backfill does (§13): spill one slab at a time, then merge the runs into index.hash and index.pack.
+4. Mark segment as frozen in DB; queries now served from cold files.
 
-5. Mark segment as frozen in DB; queries now served from cold files.
-
-6. Discard in-memory index and hot files.
+5. Discard in-memory index and hot files.
 ```
 
 The old hot segment continues serving reads throughout. During freeze, two hot segments coexist briefly: the old segment being frozen (still serving reads) and the new segment accepting writes. A hot index holds at most two slabs in memory (about 11 MiB each) whatever its segment holds, so the overlap costs at most that twice.
