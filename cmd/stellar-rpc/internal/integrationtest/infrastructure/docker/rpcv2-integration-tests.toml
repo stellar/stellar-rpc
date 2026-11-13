@@ -17,6 +17,7 @@ admin_endpoint = ""
 max_concurrent_requests = 5000
 max_request_execution_duration = "25s"
 request_execution_warning_threshold = "5s"
+max_request_batch_size = 10
 
 [service.fee_stats]
 classic_fee_window_ledgers = 10

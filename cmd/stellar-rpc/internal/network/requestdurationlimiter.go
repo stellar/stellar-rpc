@@ -2,8 +2,8 @@ package network
 
 import (
 	"context"
+	"errors"
 	"math"
-	"sync"
 	"time"
 
 	"github.com/creachadair/jrpc2"
@@ -36,12 +36,10 @@ type RPCRequestDurationLimiter struct {
 	requestDurationLimiter
 
 	jrpcDownstreamHandler jrpc2.Handler
-	inflight              *sync.WaitGroup // downstream calls, which can outlive Handle past the limit
 }
 
 func MakeJrpcRequestDurationLimiter(
 	downstream jrpc2.Handler,
-	inflight *sync.WaitGroup,
 	warningThreshold time.Duration,
 	limitThreshold time.Duration,
 	warningCounter increasingCounter,
@@ -55,7 +53,6 @@ func MakeJrpcRequestDurationLimiter(
 
 	return &RPCRequestDurationLimiter{
 		jrpcDownstreamHandler: downstream,
-		inflight:              inflight,
 		requestDurationLimiter: requestDurationLimiter{
 			warningThreshold: warningThreshold,
 			limitThreshold:   limitThreshold,
@@ -66,83 +63,59 @@ func MakeJrpcRequestDurationLimiter(
 	}
 }
 
-// Handle enforces warning and limit thresholds for JSON-RPC request execution.
-// TODO: this function is too complicated we should fix this and remove the nolint:gocognit
-//
-//nolint:gocognit,cyclop
+// Handle runs the request on a context that ends at the limit and waits for
+// the handler to return, so a request holds nothing once it is answered. A
+// request that ran to the limit gets ErrRequestExceededProcessingLimitThreshold
+// in place of its result; one past the warning threshold is counted and logged.
 func (q *RPCRequestDurationLimiter) Handle(ctx context.Context, req *jrpc2.Request) (any, error) {
 	if q.limitThreshold == RequestDurationLimiterNoLimit {
 		// if specified max duration, pass-through
 		return q.jrpcDownstreamHandler(ctx, req)
 	}
-	var warningCh <-chan time.Time
-	if q.warningThreshold != time.Duration(0) && q.warningThreshold < q.limitThreshold {
-		warningCh = time.NewTimer(q.warningThreshold).C
-	}
-	var limitCh <-chan time.Time
-	if q.limitThreshold != time.Duration(0) {
-		limitCh = time.NewTimer(q.limitThreshold).C
-	}
-	type requestResultOutput struct {
-		data any
-		err  error
-	}
-	requestCompleted := make(chan requestResultOutput, 1)
 	requestCtx, requestCtxCancel := context.WithTimeout(ctx, q.limitThreshold)
 	defer requestCtxCancel()
 
-	q.inflight.Go(func() {
-		defer func() {
-			if err := recover(); err != nil {
-				q.logger.Errorf("Request for method %s resulted in an error : %v", req.Method(), err)
-			}
-			close(requestCompleted)
-		}()
-		var res requestResultOutput
-		res.data, res.err = q.jrpcDownstreamHandler(requestCtx, req)
-		requestCompleted <- res
-	})
+	start := time.Now()
+	res, err := q.jrpcDownstreamHandler(requestCtx, req)
+	elapsed := time.Since(start)
+	switch {
+	// A handler that ends with its deadline can return before elapsed reaches the limit.
+	case q.limitThreshold != 0 && elapsed >= q.limitThreshold, errors.Is(requestCtx.Err(), context.DeadlineExceeded):
+		return nil, q.limited(ctx, req)
+	case q.warningThreshold != 0 && elapsed >= q.warningThreshold:
+		q.passed(req, "warning", q.warningThreshold, q.warningCounter)
+	}
+	return res, err
+}
 
-	warn := false
-	for {
-		select {
-		case <-warningCh:
-			// warn
-			warn = true
-		case <-limitCh:
-			// limit
-			requestCtxCancel()
-			if q.limitCounter != nil {
-				q.limitCounter.Inc()
-			}
-			if q.logger != nil {
-				q.logger.Infof("Request processing for %s exceed limiting threshold of %v", req.Method(), q.limitThreshold)
-			}
-			if ctxErr := ctx.Err(); ctxErr == nil {
-				return nil, ErrRequestExceededProcessingLimitThreshold
-			} else {
-				return nil, ctxErr
-			}
-		case requestRes, ok := <-requestCompleted:
-			if warn {
-				if q.warningCounter != nil {
-					q.warningCounter.Inc()
-				}
-				if q.logger != nil {
-					q.logger.Infof("Request processing for %s exceed warning threshold of %v", req.Method(), q.warningThreshold)
-				}
-			}
-			if ok {
-				return requestRes.data, requestRes.err
-			} else {
-				// request panicked ?
-				return nil, ErrFailToProcessDueToInternalIssue
-			}
-		}
+// passed counts and logs a request that ran past a threshold.
+func (q *RPCRequestDurationLimiter) passed(
+	req *jrpc2.Request, name string, threshold time.Duration, counter increasingCounter,
+) {
+	if counter != nil {
+		counter.Inc()
+	}
+	if q.logger != nil {
+		q.logger.Infof("Request processing for %s exceed %s threshold of %v", req.Method(), name, threshold)
 	}
 }
 
-// The three errors below are this repo's implementation-defined JSON-RPC
+// limited counts and logs a request that passed the limit, and returns its
+// error.
+func (q *RPCRequestDurationLimiter) limited(ctx context.Context, req *jrpc2.Request) error {
+	if q.limitCounter != nil {
+		q.limitCounter.Inc()
+	}
+	if q.logger != nil {
+		q.logger.Infof("Request processing for %s exceed limiting threshold of %v", req.Method(), q.limitThreshold)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return ErrRequestExceededProcessingLimitThreshold
+}
+
+// The errors below are this repo's implementation-defined JSON-RPC
 // codes, kept together so every -3200x code is defined in one place.
 
 var ErrRequestExceededProcessingLimitThreshold = jrpc2.Error{
@@ -153,4 +126,13 @@ var ErrRequestExceededProcessingLimitThreshold = jrpc2.Error{
 var ErrFailToProcessDueToInternalIssue = jrpc2.Error{
 	Code:    -32003, // internal error
 	Message: "request failed to process due to internal issue",
+}
+
+// ErrPreflightQueueFull fails a simulateTransaction call that finds every
+// preflight worker busy and no place left to wait for one. A client may retry.
+// It is a pointer so that the response's message is Message alone, without
+// the code that jrpc2.Error.Error adds.
+var ErrPreflightQueueFull = &jrpc2.Error{
+	Code:    -32004,
+	Message: "preflight queue full; retry later",
 }

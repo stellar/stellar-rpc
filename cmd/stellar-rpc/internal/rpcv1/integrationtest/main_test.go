@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/fsouza/fake-gcs-server/fakestorage"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 )
 
 // The Google Cloud Storage client library reads STORAGE_EMULATOR_HOST from the
@@ -17,6 +19,7 @@ import (
 var sharedGCSServer *fakestorage.Server
 
 func TestMain(m *testing.M) {
+	preflight.RunIfWorker()
 	// Every test in this package skips when STELLAR_RPC_INTEGRATION_TESTS_ENABLED
 	// is unset, so there is nothing to serve. Binding a listener anyway would
 	// fail the whole package in an environment that cannot open a loopback

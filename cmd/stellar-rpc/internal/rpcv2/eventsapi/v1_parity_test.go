@@ -162,7 +162,7 @@ func newLocalClient(t *testing.T, h jrpc2.Handler) *jrpc2.Client {
 // newV1Client seeds an rpcv1 sqlite store from lcms and serves the shared v1
 // handler over it. The passphrase must be the fixtures': their tx hashes are
 // computed against pubnet, and v1 ingestion recomputes them.
-func newV1Client(t *testing.T, lcms [][]byte) *jrpc2.Client {
+func newV1Client(t *testing.T, lcms [][]byte, maxResponseBytes uint) *jrpc2.Client {
 	t.Helper()
 	ctx := context.Background()
 	db, err := sqlitedb.OpenSQLiteDB(filepath.Join(t.TempDir(), "v1.sqlite"))
@@ -182,13 +182,13 @@ func newV1Client(t *testing.T, lcms [][]byte) *jrpc2.Client {
 	}
 	h := methods.NewGetEventsHandler(logger,
 		sqlitedb.NewEventReader(logger, db),
-		parityMaxLimit, parityDefaultLimit)
+		parityMaxLimit, parityDefaultLimit, maxResponseBytes)
 	return newLocalClient(t, h)
 }
 
 // newShimClient seeds a v2 hot chunk from the same lcms and serves the shim
 // with a pinned read view, the way wrapAdapterRequest does in production.
-func newShimClient(t *testing.T, lcms [][]byte) *jrpc2.Client {
+func newShimClient(t *testing.T, lcms [][]byte, maxResponseBytes uint) *jrpc2.Client {
 	t.Helper()
 	logger := rpcv2test.SilentLogger()
 	cat, _ := rpcv2test.OpenTestCatalogWith(t, geometry.ChunksPerTxhashIndex, logger)
@@ -203,8 +203,9 @@ func newShimClient(t *testing.T, lcms [][]byte) *jrpc2.Client {
 	require.NoError(t, err)
 	t.Cleanup(view.Release)
 	base := NewV1Handler(Limits{
-		MaxLimit:     parityMaxLimit,
-		DefaultLimit: parityDefaultLimit,
+		MaxLimit:         parityMaxLimit,
+		DefaultLimit:     parityDefaultLimit,
+		MaxResponseBytes: maxResponseBytes,
 	}, logger)
 	return newLocalClient(t, func(ctx context.Context, req *jrpc2.Request) (any, error) {
 		return base(query.WithView(ctx, view), req)
@@ -262,7 +263,7 @@ func TestV1WindowFitsThePagerScanWindow(t *testing.T) {
 // so a parity failure later indicts the shim and not the harness.
 func TestV1ParityHarness_V1SideServes(t *testing.T) {
 	lcms := parityLCMs(t)
-	c := newV1Client(t, lcms)
+	c := newV1Client(t, lcms, 0)
 	first := parityChunk.FirstLedger()
 
 	raw, jerr := callGetEvents(t, c, protocol.GetEventsRequest{StartLedger: first})
@@ -297,15 +298,15 @@ func TestV1ParityHarness_V1SideServes(t *testing.T) {
 //nolint:funlen // one table, one case per v1 behavior
 func TestGetEventsV1Parity(t *testing.T) {
 	lcms := parityLCMs(t)
-	v1c := newV1Client(t, lcms)
-	shimc := newShimClient(t, lcms)
+	v1c := newV1Client(t, lcms, 0)
+	shimc := newShimClient(t, lcms, 0)
 	first := parityChunk.FirstLedger()
 
 	contractA := testContractStrkey(t, 0xAA)
 	contractB := testContractStrkey(t, 0xBB)
 	seg := func(sym string) protocol.SegmentFilter {
-		v, _ := symbolScVal(t, sym)
-		return protocol.SegmentFilter{ScVal: &v}
+		_, raw := symbolScVal(t, sym)
+		return protocol.SegmentFilter{ScVal: raw}
 	}
 	wild := func(w string) protocol.SegmentFilter {
 		return protocol.SegmentFilter{Wildcard: &w}
@@ -435,13 +436,19 @@ func TestGetEventsV1Parity(t *testing.T) {
 // through both backends, comparing every page, the mid-ledger resume after
 // F+0's first event included.
 func TestGetEventsV1Parity_PaginationChain(t *testing.T) {
+	// One event per page, ended by the limit or by a 1-byte response cap.
+	t.Run("limit", func(t *testing.T) { paginationChain(t, 1, 0) })
+	t.Run("response bytes", func(t *testing.T) { paginationChain(t, parityDefaultLimit, 1) })
+}
+
+func paginationChain(t *testing.T, limit, maxResponseBytes uint) {
 	lcms := parityLCMs(t)
-	v1c := newV1Client(t, lcms)
-	shimc := newShimClient(t, lcms)
+	v1c := newV1Client(t, lcms, maxResponseBytes)
+	shimc := newShimClient(t, lcms, maxResponseBytes)
 
 	req := protocol.GetEventsRequest{
 		StartLedger: parityChunk.FirstLedger(),
-		Pagination:  &protocol.PaginationOptions{Limit: 1},
+		Pagination:  &protocol.PaginationOptions{Limit: limit},
 	}
 	const maxPages = 13 // 9 events + the empty window-end page, with margin
 	drained := 0
@@ -463,11 +470,12 @@ func TestGetEventsV1Parity_PaginationChain(t *testing.T) {
 			assert.Equal(t, 9, drained, "the chain must deliver every fixture event")
 			return
 		}
+		require.Len(t, events, 1, "page %d", page)
 		drained += len(events)
 		var cur protocol.Cursor
 		require.NoError(t, json.Unmarshal([]byte(strconv.Quote(cursorStr)), &cur))
 		req = protocol.GetEventsRequest{
-			Pagination: &protocol.PaginationOptions{Cursor: &cur, Limit: 1},
+			Pagination: &protocol.PaginationOptions{Cursor: &cur, Limit: limit},
 		}
 	}
 	t.Fatalf("window did not drain within %d pages", maxPages)

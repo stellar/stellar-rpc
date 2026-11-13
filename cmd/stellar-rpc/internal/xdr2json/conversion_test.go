@@ -48,6 +48,54 @@ func TestEmptyConversion(t *testing.T) {
 	require.Empty(t, string(js))
 }
 
+func TestBudgetChargesEscapedLength(t *testing.T) {
+	str := xdr.ScString("<&>")
+	val := xdr.ScVal{Type: xdr.ScValTypeScvString, Str: &str}
+	js, err := ConvertInterface(val)
+	require.NoError(t, err)
+	escaped, err := json.Marshal(js)
+	require.NoError(t, err)
+	require.Greater(t, len(escaped), len(js))
+
+	_, err = NewBudget(len(escaped) - 1).ConvertInterface(val)
+	require.ErrorContains(t, err, "exceeds")
+	_, err = NewBudget(len(escaped)).ConvertInterface(val)
+	require.NoError(t, err)
+}
+
+func TestBudgetCapsTheConversion(t *testing.T) {
+	asset := xdr.MustNewCreditAsset("ABCD", keypair.MustRandom().Address())
+	_, err := NewBudget(0).ConvertInterface(asset)
+	// The Rust conversion stops at the cap, before Go checks the escaped length.
+	require.EqualError(t, err, "JSON output exceeds the 0 bytes left in its budget")
+}
+
+func TestBudgetIsSharedAcrossConversions(t *testing.T) {
+	asset := xdr.MustNewCreditAsset("ABCD", keypair.MustRandom().Address())
+	js, err := ConvertInterface(asset)
+	require.NoError(t, err)
+
+	budget := NewBudget(len(js))
+	_, err = budget.ConvertInterface(asset)
+	require.NoError(t, err)
+	_, err = budget.ConvertInterface(asset)
+	require.ErrorContains(t, err, "exceeds")
+}
+
+func TestConversionIsCapped(t *testing.T) {
+	asset := xdr.MustNewCreditAsset("ABCD", keypair.MustRandom().Address())
+	js, err := ConvertInterface(asset)
+	require.NoError(t, err)
+	t.Cleanup(func() { SetMaxOutputBytes(0) })
+
+	SetMaxOutputBytes(uint(len(js) - 1))
+	_, err = ConvertInterface(asset)
+	require.ErrorContains(t, err, "exceeds")
+	SetMaxOutputBytes(uint(len(js)))
+	_, err = ConvertInterface(asset)
+	require.NoError(t, err)
+}
+
 // TestConversionError exercises the panic-unwinding path: xdr_to_json still
 // uses panic control flow for malformed bytes.
 func TestConversionError(t *testing.T) {
@@ -228,7 +276,7 @@ func nestedScVec(depth int) xdr.ScVal {
 // TestJSONConversionDepthLimit pins the parse direction's nesting boundary:
 // serde_json's recursion limit (128 JSON levels, two per ScVal container)
 // stops the ConvertBytes->ConvertJSON round trip at 63 nested containers,
-// below the 500-depth XDR read limit. Deeper values still convert from
+// below the 1500-depth XDR read limit. Deeper values still convert from
 // base64. A serde_json or stellar-xdr bump that moves the boundary should
 // fail here.
 func TestJSONConversionDepthLimit(t *testing.T) {
@@ -252,4 +300,86 @@ func TestJSONConversionSizeLimit(t *testing.T) {
 	js := []byte(`{"string":"` + strings.Repeat("a", 32<<20) + `"}`)
 	_, err := ConvertJSON(xdr.ScVal{}, js)
 	require.ErrorContains(t, err, "-byte limit")
+}
+
+// coreMaxScVecNesting is the deepest ScVec nesting of a contract-call argument
+// that stellar-core admits in a transaction envelope. The integration test
+// TestCoreAdmissionDepthLimit checks it against a real Core.
+const coreMaxScVecNesting = 246
+
+func deepInvokeEnvelope(t *testing.T) xdr.TransactionEnvelope {
+	t.Helper()
+	contractID := xdr.ContractId{0xde, 0xad}
+	envelope, err := xdr.NewTransactionEnvelope(xdr.EnvelopeTypeEnvelopeTypeTx, xdr.TransactionV1Envelope{
+		Tx: xdr.Transaction{
+			SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
+			Operations: []xdr.Operation{{
+				Body: xdr.OperationBody{
+					Type: xdr.OperationTypeInvokeHostFunction,
+					InvokeHostFunctionOp: &xdr.InvokeHostFunctionOp{
+						HostFunction: xdr.HostFunction{
+							Type: xdr.HostFunctionTypeHostFunctionTypeInvokeContract,
+							InvokeContract: &xdr.InvokeContractArgs{
+								ContractAddress: xdr.ScAddress{
+									Type:       xdr.ScAddressTypeScAddressTypeContract,
+									ContractId: &contractID,
+								},
+								FunctionName: "f",
+								Args:         []xdr.ScVal{nestedScVec(coreMaxScVecNesting)},
+							},
+						},
+					},
+				},
+			}},
+			Ext: xdr.TransactionExt{V: 1, SorobanData: &xdr.SorobanTransactionData{}},
+		},
+	})
+	require.NoError(t, err)
+	return envelope
+}
+
+// TestConversionCoreAdmittedDepth checks that the deepest envelope Core admits
+// converts inside the parallel Soroban phase of a ledger. The envelope alone
+// is shallower, so this covers it too.
+func TestConversionCoreAdmittedDepth(t *testing.T) {
+	envelope := deepInvokeEnvelope(t)
+	classic := []xdr.TxSetComponent{}
+	lcm := xdr.LedgerCloseMeta{
+		V: 2,
+		V2: &xdr.LedgerCloseMetaV2{
+			TxSet: xdr.GeneralizedTransactionSet{
+				V: 1,
+				V1TxSet: &xdr.TransactionSetV1{
+					Phases: []xdr.TransactionPhase{
+						{V: 0, V0Components: &classic},
+						{V: 1, ParallelTxsComponent: &xdr.ParallelTxsComponent{
+							ExecutionStages: []xdr.ParallelTxExecutionStage{
+								{xdr.DependentTxCluster{envelope}},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+	_, err := ConvertInterface(lcm)
+	require.NoError(t, err)
+}
+
+// xdrReadDepthLimit is DEFAULT_XDR_RW_LIMITS.depth in lib/xdr2json/src/lib.rs.
+const xdrReadDepthLimit = 1500
+
+// maxConvertibleScVecNesting is the deepest ScVec nesting that reads within
+// xdrReadDepthLimit: each layer costs 4 depth units.
+const maxConvertibleScVecNesting = xdrReadDepthLimit/4 - 1
+
+// TestConversionReadDepthLimit checks that the deepest ScVal the read limit
+// allows converts without exhausting the cgo thread's stack, and that one more
+// layer is rejected.
+func TestConversionReadDepthLimit(t *testing.T) {
+	_, err := ConvertInterface(nestedScVec(maxConvertibleScVecNesting))
+	require.NoError(t, err)
+
+	_, err = ConvertInterface(nestedScVec(maxConvertibleScVecNesting + 1))
+	require.ErrorContains(t, err, "depth limit exceeded")
 }

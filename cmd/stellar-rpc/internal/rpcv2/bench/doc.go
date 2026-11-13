@@ -16,7 +16,7 @@
 // tells whether the queried chunks are cold (frozen) or hot. Each scenario runs
 // one query type at one target rate. Each request calls the daemon's method
 // handler (rpcv2.ReadMethods) through the daemon's JSON-RPC bridge
-// (jsonrpc.NewBridge), in process, which runs one handler per CPU. An
+// (jsonrpc.NewBridge), in process, which runs GOMAXPROCS handlers at once. An
 // open-loop load generator starts requests on a fixed schedule, so a slow read
 // does not lower the arrival rate. latency covers the bridge's request parse,
 // the wait for a handler slot, the handler and the response write;

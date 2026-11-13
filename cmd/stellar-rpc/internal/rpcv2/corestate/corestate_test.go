@@ -246,14 +246,15 @@ func TestLedgerEntryGetter_QueriesTheQueryPortAtTheDaemonsLedger(t *testing.T) {
 	require.NoError(t, err)
 
 	getter := d.LedgerEntryGetter(stubLedgerReader{latest: 1234})
-	key := xdr.LedgerKey{
+	key, err := xdr.LedgerKey{
 		Type: xdr.LedgerEntryTypeAccount,
 		Account: &xdr.LedgerKeyAccount{
 			AccountId: xdr.MustAddress("GDKXE2OZMJIPOSLNA6N6F2BVCI3O777I2OOC4BV7VOYUEHYX7RTRYA7Y"),
 		},
-	}
+	}.MarshalBinary()
+	require.NoError(t, err)
 
-	entries, atLedger, err := getter.GetLedgerEntries(context.Background(), []xdr.LedgerKey{key})
+	entries, atLedger, err := getter.GetLedgerEntries(context.Background(), []xdr.LedgerKeyView{key})
 	require.NoError(t, err)
 	assert.Empty(t, entries)
 	assert.Equal(t, uint32(1234), atLedger)

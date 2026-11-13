@@ -23,6 +23,7 @@ admin_endpoint = "localhost:9001"
 max_concurrent_requests = 7000
 max_request_execution_duration = "30s"
 request_execution_warning_threshold = "3s"
+max_request_batch_size = 4
 
 [service.fee_stats]
 classic_fee_window_ledgers = 20
@@ -99,6 +100,7 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	assert.Equal(t, uint(7000), *cfg.Service.MaxConcurrentRequests)
 	assert.Equal(t, 30*time.Second, *cfg.Service.MaxRequestExecutionDuration)
 	assert.Equal(t, 3*time.Second, *cfg.Service.RequestExecutionWarningThreshold)
+	assert.Equal(t, uint(4), *cfg.Service.MaxRequestBatchSize)
 	assert.Equal(t, uint32(20), *cfg.Service.FeeStats.ClassicFeeWindowLedgers)
 	assert.Equal(t, uint32(60), *cfg.Service.FeeStats.SorobanInclusionFeeWindowLedgers)
 
@@ -208,6 +210,10 @@ func TestParseConfig_ServiceDefaults(t *testing.T) {
 	assert.Equal(t, DefaultMaxConcurrentRequests, *cfg.Service.MaxConcurrentRequests)
 	assert.Equal(t, DefaultMaxRequestExecutionDuration, *cfg.Service.MaxRequestExecutionDuration)
 	assert.Equal(t, DefaultRequestExecutionWarningThreshold, *cfg.Service.RequestExecutionWarningThreshold)
+	assert.Equal(t, DefaultMaxRequestBatchSize, *cfg.Service.MaxRequestBatchSize)
+	assert.Equal(t, DefaultMaxJSONConversionBytes, *cfg.Service.MaxJSONConversionBytes)
+	assert.Equal(t, DefaultMaxResponseBytes, *cfg.Service.MaxResponseBytes)
+	assert.Equal(t, DefaultMaxTotalResponseBytes, *cfg.Service.MaxTotalResponseBytes)
 	assert.Equal(t, DefaultClassicFeeWindowLedgers, *cfg.Service.FeeStats.ClassicFeeWindowLedgers)
 	assert.Equal(t, DefaultSorobanInclusionFeeWindowLedgers, *cfg.Service.FeeStats.SorobanInclusionFeeWindowLedgers)
 
@@ -242,9 +248,34 @@ func TestParseConfig_PreflightDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	p := cfg.Service.Preflight
-	assert.Equal(t, NumCPU(), *p.WorkerCount)
-	assert.Equal(t, NumCPU(), *p.WorkerQueueSize)
+	assert.Equal(t, UsableCPUs(), *p.WorkerCount)
+	assert.Equal(t, max(UsableCPUs(), DefaultMaxRequestBatchSize), *p.WorkerQueueSize)
 	assert.True(t, *p.EnableDebug)
+}
+
+// The preflight queue holds a whole batch of simulations by default.
+func TestParseConfig_PreflightQueueHoldsABatch(t *testing.T) {
+	cfg, err := ParseConfig([]byte(minimalValidConfig + `
+[service]
+max_request_batch_size = 500
+`))
+	require.NoError(t, err)
+	assert.Equal(t, uint(500), *cfg.Service.Preflight.WorkerQueueSize)
+}
+
+// The concurrency defaults follow GOMAXPROCS, the CPUs the process may use,
+// which can be fewer than the machine has.
+func TestParseConfig_ConcurrencyDefaultsFollowGOMAXPROCS(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(3))
+	cfg, err := ParseConfig([]byte(minimalValidConfig + `
+[service]
+max_request_batch_size = 1
+`))
+	require.NoError(t, err)
+
+	assert.Equal(t, uint(3), *cfg.Service.Preflight.WorkerCount)
+	assert.Equal(t, uint(3), *cfg.Service.Preflight.WorkerQueueSize)
+	assert.Equal(t, uint(3), *cfg.Ingestion.CoreHTTPQueryThreadPoolSize)
 }
 
 func TestParseConfig_PreflightExplicitValues(t *testing.T) {
@@ -271,7 +302,7 @@ func TestParseConfig_CoreHTTPDefaults(t *testing.T) {
 	assert.Equal(t, "http://localhost:11626", ing.CoreURL)
 	assert.Equal(t, DefaultCoreRequestTimeout, *ing.CoreRequestTimeout)
 	assert.Equal(t, DefaultCoreHTTPQueryPort, *ing.CoreHTTPQueryPort)
-	assert.Equal(t, NumCPU(), *ing.CoreHTTPQueryThreadPoolSize)
+	assert.Equal(t, UsableCPUs(), *ing.CoreHTTPQueryThreadPoolSize)
 	assert.Equal(t, DefaultCoreHTTPQuerySnapshotLedgers, *ing.CoreHTTPQuerySnapshotLedgers)
 }
 

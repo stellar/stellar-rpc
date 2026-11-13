@@ -3,8 +3,8 @@
 //
 // Three methods need it, all over HTTP: sendTransaction submits to core's admin
 // server, getLedgerEntries reads from core's query server, and
-// simulateTransaction runs the Rust preflight library in-process, which fetches
-// the entries it touches from that same query server.
+// simulateTransaction runs the Rust preflight library in worker processes,
+// which fetch the entries it touches from that same query server.
 //
 // Daemon is the host.Daemon those handlers take. It holds two HTTP clients, a
 // metrics registry, and the core binary's version string — no reference to the
@@ -136,10 +136,14 @@ func (d *Daemon) CoreClient() host.CoreClient {
 	return d.coreClient
 }
 
-// FastCoreClient talks to core's query server: getLedgerEntries and preflight's
-// entry lookups.
+// FastCoreClient talks to core's query server for getLedgerEntries.
 func (d *Daemon) FastCoreClient() host.FastCoreClient {
 	return d.fastCoreClient
+}
+
+// QueryURL is the URL of core's query server.
+func (d *Daemon) QueryURL() string {
+	return d.fastCoreClient.URL
 }
 
 // CoreVersion returns the version read from the core binary at startup, or "".

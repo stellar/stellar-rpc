@@ -74,6 +74,10 @@ admin_endpoint = ""
 max_concurrent_requests = 5000              # in-flight requests, all methods
 max_request_execution_duration = "25s"      # longer requests fail with HTTP 504
 request_execution_warning_threshold = "5s"  # longer requests log a warning
+max_request_batch_size = 10                 # calls in one JSON-RPC batch
+max_json_conversion_bytes = 268435456       # JSON from one XDR value with xdrFormat "json"
+max_response_bytes = 0                      # XDR or JSON in one response; pages end early; 0 means no limit
+max_total_response_bytes = 4294967296       # responses held before they are written, all methods together; 0 means no limit
 
 # Sizes, in ledgers, of the two getFeeStats windows. Each must be 1 to 1000.
 [service.fee_stats]
@@ -168,12 +172,19 @@ soroban_inclusion_fee_window_ledgers = 50
 # The simulateTransaction worker pool.
 [service.preflight]
 # Concurrent preflights, and how many more may wait for a worker before new
-# requests are rejected. Both default to the CPU count.
+# requests are rejected. The worker count defaults to the number of CPUs the
+# process may use, and the queue to the larger of that and
+# max_request_batch_size, since the calls of one batch start at once.
 #worker_count = 8
-#worker_queue_size = 8
-# Detailed diagnostics in preflight errors. The default is true, but they are
-# expensive to produce, so this sample turns them off.
+#worker_queue_size = 10
+# Diagnostic events in simulateTransaction responses. The default is true, but
+# they are expensive to produce, so this sample turns them off.
 enable_debug = false
+# Most heap memory, in bytes, the simulation library may hold in a worker
+# process. 0 means 8 times the network's per-transaction memory limit, and any
+# other value must be at least 16000000. Plan for about this limit + 128 MiB
+# per worker.
+#simulation_memory_limit = 0
 
 # -----------------------------------------------------------------------------
 # [backfill]: downloading history into local storage
@@ -245,8 +256,8 @@ core_http_query_port = 11628
 #core_url = "http://localhost:11626"
 # Timeout for each request to either server.
 core_request_timeout = "2s"
-# Query server threads (default: the CPU count), and how many recent ledgers
-# it keeps snapshots of.
+# Query server threads (default: the number of CPUs the process may use), and
+# how many recent ledgers it keeps snapshots of.
 #core_http_query_thread_pool_size = 8
 core_http_query_snapshot_ledgers = 4
 

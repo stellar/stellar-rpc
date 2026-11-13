@@ -271,8 +271,11 @@ func TestGetLatestLedgerErrorsAreNotMemoized(t *testing.T) {
 	require.ErrorContains(t, err, "could not get latest ledger: disk")
 	reader.rawErr = nil
 
+	_, err = h(WithResponsePool(t.Context(), &poolStub{}), &jrpc2.Request{})
+	require.ErrorIs(t, err, errPoolStubFull)
+
 	assert.Equal(t, expectedLatestLedgerSequence, decodeLatestLedger(t, callGetLatestLedger(t, h)).Sequence)
-	assert.Equal(t, int32(2), reader.rawReads.Load())
+	assert.Equal(t, int32(3), reader.rawReads.Load())
 }
 
 // paddedLedger builds a ~2.1 MB LCM (pubnet median, 2026-09) out of ManageData-heavy transactions.

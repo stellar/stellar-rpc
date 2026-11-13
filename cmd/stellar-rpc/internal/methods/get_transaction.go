@@ -79,6 +79,12 @@ func GetTransaction(
 			Message: getTxErr.Error(),
 		}
 	default:
+		if request.Format != protocol.FormatJSON {
+			// Base64 is held until the bridge writes it: take its bytes before encoding.
+			if err := TakeResponseBytes(ctx, transactionXDRLen(tx)); err != nil {
+				return response, err
+			}
+		}
 		txInfo, ferr := transactionInfo(tx, request.Format)
 		if ferr != nil {
 			return response, &jrpc2.Error{

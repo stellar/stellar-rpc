@@ -131,6 +131,8 @@ func TestRoundTrip(t *testing.T) {
 			*v = 22
 		case *uint32:
 			*v = 32
+		case *uint64:
+			*v = 64
 		case *time.Duration:
 			*v = 5 * time.Second
 		case *[]string:

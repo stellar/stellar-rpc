@@ -2,7 +2,9 @@
 package config
 
 import (
+	"errors"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -51,12 +53,17 @@ type Config struct {
 	Network                                        string
 	PreflightWorkerCount                           uint
 	PreflightWorkerQueueSize                       uint
+	PreflightSimulationMemoryLimit                 uint64
 	PreflightEnableDebug                           bool
 	SQLiteDBPath                                   string
 	HistoryRetentionWindow                         uint32
 	SorobanFeeStatsLedgerRetentionWindow           uint32
 	ClassicFeeStatsLedgerRetentionWindow           uint32
 	RequestBacklogGlobalQueueLimit                 uint
+	MaxRequestBatchSize                            uint
+	MaxJSONConversionBytes                         uint
+	MaxResponseBytes                               uint
+	MaxTotalResponseBytes                          uint64
 	RequestBacklogGetHealthQueueLimit              uint
 	RequestBacklogGetEventsQueueLimit              uint
 	RequestBacklogGetNetworkQueueLimit             uint
@@ -159,6 +166,10 @@ func (cfg *Config) SetValues(lookupEnv func(string) (string, bool)) error {
 		}
 	}
 
+	if cfg.PreflightWorkerQueueSize == 0 {
+		//nolint:gosec // runtime.GOMAXPROCS(0) is always positive and realistically well below uint limits
+		cfg.PreflightWorkerQueueSize = max(uint(runtime.GOMAXPROCS(0)), cfg.MaxRequestBatchSize)
+	}
 	return nil
 }
 
@@ -224,5 +235,12 @@ func (cfg *Config) loadConfigPath() error {
 }
 
 func (cfg *Config) Validate() error {
-	return cfg.options().Validate()
+	if err := cfg.options().Validate(); err != nil {
+		return err
+	}
+	total := cfg.MaxTotalResponseBytes
+	if total > 0 && total < uint64(max(cfg.MaxResponseBytes, cfg.MaxJSONConversionBytes)) {
+		return errors.New("max-total-response-bytes must be at least max-response-bytes and max-json-conversion-bytes")
+	}
+	return nil
 }

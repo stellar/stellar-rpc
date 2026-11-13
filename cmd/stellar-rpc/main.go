@@ -5,12 +5,14 @@ import (
 	"os"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/cli"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/preflight"
 )
 
 //nolint:gochecknoglobals // make build-stellar-rpc sets it from RPCV2 with -ldflags -X
 var rpcv2 = "true"
 
 func main() {
+	preflight.RunIfWorker()
 	entry := cli.Entry{DisableRPCv2: rpcv2 != "true"}
 	os.Exit(entry.Run())
 }

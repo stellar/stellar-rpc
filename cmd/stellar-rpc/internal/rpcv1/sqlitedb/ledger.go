@@ -8,8 +8,10 @@ import (
 	"iter"
 
 	sq "github.com/Masterminds/squirrel"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/stellar/go-stellar-sdk/support/db"
+	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
@@ -281,8 +283,13 @@ func getLedgerCountInRange(ctx context.Context, db readDB, start, end uint32) (u
 }
 
 type ledgerWriter struct {
-	stmtCache *sq.StmtCache
+	log             *log.Entry
+	stmtCache       *sq.StmtCache
+	oversizedMetric prometheus.Counter
 }
+
+// largeLedgerMetaBytes is the raw meta size past which ingestion logs a warning.
+const largeLedgerMetaBytes = 256 << 20
 
 // trimLedgers removes all ledgers which fall outside the retention window.
 func (l ledgerWriter) trimLedgers(latestLedgerSeq uint32, retentionWindow uint32) error {
@@ -319,9 +326,18 @@ func getLedgerRawFromDB(ctx context.Context, db readDB, sequence uint32) ([]byte
 
 // InsertLedger inserts a ledger in the db.
 func (l ledgerWriter) InsertLedger(ledger xdr.LedgerCloseMeta) error {
-	_, err := sq.StatementBuilder.RunWith(l.stmtCache).
+	raw, err := ledger.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	if len(raw) > largeLedgerMetaBytes {
+		l.oversizedMetric.Inc()
+		l.log.WithField("ledger_seq", ledger.LedgerSequence()).WithField("meta_size", len(raw)).
+			Warn("Ledger meta exceeds 256 MiB")
+	}
+	_, err = sq.StatementBuilder.RunWith(l.stmtCache).
 		Insert(ledgerCloseMetaTableName).
-		Values(ledger.LedgerSequence(), ledger).
+		Values(ledger.LedgerSequence(), raw).
 		Exec()
 	return err
 }
