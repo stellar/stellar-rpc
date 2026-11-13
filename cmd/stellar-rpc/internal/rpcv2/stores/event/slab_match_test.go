@@ -872,10 +872,10 @@ type lookupCountingReader struct {
 
 func (c *lookupCountingReader) LookupKeys(
 	ctx context.Context, keys []TermKey, window IDRange,
-) ([]*roaring.Bitmap, IDRange, error) {
+) ([]*roaring.Bitmap, Coverage, error) {
 	c.lookups++
 	bms, _, err := c.Reader.LookupKeys(ctx, keys, window)
-	return bms, IDRange{End: math.MaxUint32}, err
+	return bms, Coverage{IDRange: IDRange{End: math.MaxUint32}}, err
 }
 
 // TestMatches_WholeTermLookupIsOneStage pins that a lookup covering every id
@@ -911,6 +911,66 @@ func TestMatches_DeadPlanEndsTheWalk(t *testing.T) {
 	assert.Equal(t, 1, r.lookupKeysCalls, "a dead plan must not ask for a second stage")
 }
 
+// TestMatches_LaterStagesAreBounded pins what stageSlabs buys: a walk that runs
+// the window out asks the index for it in stages of at most stageSlabs slabs,
+// so it never holds more than that of a split term at once.
+func TestMatches_LaterStagesAreBounded(t *testing.T) {
+	defer func(s uint) { slabShift = s }(slabShift)
+	slabShift = 10 // 69 slabs: stage 1's four, four stages of 16, then the last one
+	f := newShapedFixture(t)
+	r := &countingReader{Reader: diffReader{f.corpus}}
+	got := drainMatches(t, Matches(context.Background(), r, f.filterSparseOnly(),
+		IDRange{0, shapedCorpusSize}, false, 0), 0)
+	assert.Equal(t, f.rareContract, matchOrdinals(got))
+	require.Len(t, r.windows, 6)
+	for _, w := range r.windows[1:] {
+		assert.LessOrEqual(t, w.End-w.Start, uint32(stageSlabs)<<slabShift)
+	}
+}
+
+// wholeTermsReader marks absent terms and those of at most maxIDs ids whole,
+// as a cold index marks the terms it does not split. The readers it wraps
+// return whole terms, so the marking is true.
+type wholeTermsReader struct {
+	Reader
+
+	maxIDs uint64
+}
+
+func (r wholeTermsReader) LookupKeys(
+	ctx context.Context, keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, Coverage, error) {
+	bms, covered, err := r.Reader.LookupKeys(ctx, keys, window)
+	covered.Whole = make([]bool, len(bms))
+	for i, bm := range bms {
+		covered.Whole[i] = bm == nil || bm.GetCardinality() <= r.maxIDs
+	}
+	return bms, covered, err
+}
+
+// TestMatches_SkipsSlabsAWholeTermRulesOut pins what a whole term buys: past
+// stage 1 the walk asks only for the stretches the rare contract's ids span,
+// three lookups where staging alone reads every slab in six.
+func TestMatches_SkipsSlabsAWholeTermRulesOut(t *testing.T) {
+	defer func(s uint) { slabShift = s }(slabShift)
+	slabShift = 10 // 69 slabs; the rare contract's ids are in slabs 0, 12, 63, 64 and 68
+	f := newShapedFixture(t)
+	// The rare contract AND a dense topic, or a contract the chunk lacks.
+	filters := append(f.filterMixedGroups(), f.filterAbsentTerm()...)
+	all := matchingEvents(t, f.corpus, filters)
+	for desc, want := range map[bool][]IDRange{
+		false: {{0, 4 << 10}, {12_345, 12_346}, {65_535, shapedCorpusSize}},
+		true:  {{65 << 10, shapedCorpusSize}, {65_535, 66_001}, {1, 12_346}},
+	} {
+		r := &countingReader{Reader: wholeTermsReader{Reader: diffReader{f.corpus}, maxIDs: 100}}
+		requireStream(t, r, all, queryCase{
+			name: "rare AND dense", filters: filters, window: IDRange{0, shapedCorpusSize}, desc: desc,
+		})
+		assert.Equal(t, want, r.windows, "desc=%v", desc)
+		assert.Equal(t, 5, r.totalKeys, "only stage 1 asks for the whole and absent terms")
+	}
+}
+
 // underCoveringReader breaks Reader.LookupKeys' contract the one way the walk
 // cannot survive: it answers for less than it was asked, so a stage walks
 // nothing and the remainder never shrinks.
@@ -918,9 +978,9 @@ type underCoveringReader struct{ Reader }
 
 func (r underCoveringReader) LookupKeys(
 	ctx context.Context, keys []TermKey, window IDRange,
-) ([]*roaring.Bitmap, IDRange, error) {
+) ([]*roaring.Bitmap, Coverage, error) {
 	bms, _, err := r.Reader.LookupKeys(ctx, keys, window)
-	return bms, IDRange{Start: window.Start + 1, End: window.End}, err
+	return bms, Coverage{IDRange: IDRange{Start: window.Start + 1, End: window.End}}, err
 }
 
 // TestMatches_UnderCoveringLookupIsAnError pins that as an error on the
@@ -943,7 +1003,8 @@ func TestMatches_UnderCoveringLookupIsAnError(t *testing.T) {
 // must not move a single match, which is what makes "unspecified outside" a
 // contract rather than an accident of what today's readers happen to return.
 // The rewriting follows the covered range rather than the window, since that
-// is what the walk is entitled to read; a reader that covers more than it was
+// is what the walk is entitled to read, and spares a bitmap marked whole,
+// which it may read anywhere; a reader that covers more than it was
 // asked (the cold index, which reads whole parts) keeps its extra ids. The
 // bitmaps the wrapped reader hands back may be shared with other readers (hot
 // dense snapshots are), so each is cloned before it is rewritten.
@@ -958,13 +1019,13 @@ type windowFuzzReader struct {
 
 func (r windowFuzzReader) LookupKeys(
 	ctx context.Context, keys []TermKey, window IDRange,
-) ([]*roaring.Bitmap, IDRange, error) {
+) ([]*roaring.Bitmap, Coverage, error) {
 	bms, covered, err := r.Reader.LookupKeys(ctx, keys, window)
 	if err != nil {
-		return nil, IDRange{}, err
+		return nil, Coverage{}, err
 	}
 	for i, bm := range bms {
-		if bm == nil {
+		if bm == nil || covered.whole(i) {
 			continue
 		}
 		out := bm.Clone()
@@ -972,7 +1033,7 @@ func (r windowFuzzReader) LookupKeys(
 			out.RemoveRange(0, uint64(covered.Start))
 			out.RemoveRange(uint64(covered.End), uint64(math.MaxUint32)+1)
 		} else {
-			r.perturb(out, covered)
+			r.perturb(out, covered.IDRange)
 		}
 		bms[i] = out
 	}
@@ -1021,21 +1082,23 @@ func TestMatches_IgnoresIDsOutsideTheLookupWindow(t *testing.T) {
 	// A small fetch seam exercises fetch batches inside a stage.
 	slabShift, matchBatchSize = 2, 7
 
-	for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {
-		for _, seed := range []int64{1, 2, 3} {
-			r := windowFuzzReader{
-				Reader: diffReader{corpus},
-				rng:    rand.New(rand.NewSource(seed)),
-				mode:   mode,
-				span:   2 * corpusSize,
+	for _, maxIDs := range []uint64{0, corpusSize / 8} {
+		for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {
+			for _, seed := range []int64{1, 2, 3} {
+				r := windowFuzzReader{
+					Reader: wholeTermsReader{Reader: diffReader{corpus}, maxIDs: maxIDs},
+					rng:    rand.New(rand.NewSource(seed)),
+					mode:   mode,
+					span:   2 * corpusSize,
+				}
+				rng := rand.New(rand.NewSource(20260912 + seed))
+				matched := 0
+				for range 150 {
+					matched += randomizedTrial(t, r, corpus, v, rng, corpusSize)
+				}
+				require.Greater(t, matched, 500,
+					"fixture sanity: randomized queries selected too little")
 			}
-			rng := rand.New(rand.NewSource(20260912 + seed))
-			matched := 0
-			for range 150 {
-				matched += randomizedTrial(t, r, corpus, v, rng, corpusSize)
-			}
-			require.Greater(t, matched, 500,
-				"fixture sanity: randomized queries selected too little")
 		}
 	}
 }
@@ -1043,38 +1106,41 @@ func TestMatches_IgnoresIDsOutsideTheLookupWindow(t *testing.T) {
 // ───────────────────────── the batch schedule ─────────────────────────
 
 // TestMatches_StageScheduleIsInvisible pins that materializing the window in
-// two stages never changes what a query yields. At four ids per slab stage 1
-// is the leading four slabs — 16 of the corpus's 300 ids — and stage 2 the
-// rest, so every randomized query is split, and the stream must still be the
-// one the corpus says it is.
+// stages never changes what a query yields. At four ids per slab stage 1 is
+// the leading four slabs — 16 of the corpus's 300 ids — and the rest comes in
+// stages of 64, so most randomized queries are split, many more than once,
+// and the stream must still be the one the corpus says it is.
 func TestMatches_StageScheduleIsInvisible(t *testing.T) {
 	v := newDiffVocab(t)
 	const corpusSize = 300
 	corpus := newDiffCorpus(t, rand.New(rand.NewSource(20260829)), v, corpusSize)
-	r := diffReader{corpus}
 	defer func(s uint) { slabShift = s }(slabShift)
 	defer func(n int) { matchBatchSize = n }(matchBatchSize)
 	slabShift, matchBatchSize = 2, 7
 
-	rng := rand.New(rand.NewSource(20260912))
-	matched := 0
-	for range 150 {
-		matched += randomizedTrial(t, r, corpus, v, rng, corpusSize)
+	// With the rarer terms whole, later stages also skip slabs.
+	for _, maxIDs := range []uint64{0, corpusSize / 8} {
+		r := wholeTermsReader{Reader: diffReader{corpus}, maxIDs: maxIDs}
+		rng := rand.New(rand.NewSource(20260912))
+		matched := 0
+		for range 150 {
+			matched += randomizedTrial(t, r, corpus, v, rng, corpusSize)
+		}
+		require.Greater(t, matched, 500,
+			"fixture sanity: randomized queries selected too little")
 	}
-	require.Greater(t, matched, 500,
-		"fixture sanity: randomized queries selected too little")
 }
 
-// TestStage1Request_TakesTheLeadingSlabs pins which end of the window the
-// first stage comes off — the low slabs ascending, the trailing ones
-// descending — and that it is cut on whole slabs, so no slab is split across
-// the two stages and the candidates are the same however the window is
-// staged. The window's own bound stands where it sits mid-slab: a stage is
-// entered at the edge the walk starts from, not at a slab boundary.
-func TestStage1Request_TakesTheLeadingSlabs(t *testing.T) {
+// TestStageRequest_TakesTheLeadingSlabs pins which end of the window a
+// stage comes off — the low slabs ascending, the trailing ones descending —
+// and that it is cut on whole slabs, so no slab is split across two stages
+// and the candidates are the same however the window is staged. The
+// window's own bound stands where it sits mid-slab: a stage is entered at
+// the edge the walk starts from, not at a slab boundary.
+func TestStageRequest_TakesTheLeadingSlabs(t *testing.T) {
 	defer func(s uint) { slabShift = s }(slabShift)
 	slabShift = 4
-	// 16 ids to the slab, and a stage is firstStageSlabs (4) of them wide.
+	// 16 ids to the slab, and a stage is four of them wide.
 	const slab = 1 << 4
 
 	for _, tc := range []struct {
@@ -1098,8 +1164,8 @@ func TestStage1Request_TakesTheLeadingSlabs(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.asc, stage1Request(tc.window, false))
-			assert.Equal(t, tc.desc, stage1Request(tc.window, true))
+			assert.Equal(t, tc.asc, stageRequest(tc.window, false, 4))
+			assert.Equal(t, tc.desc, stageRequest(tc.window, true, 4))
 			// What is left is the rest of the window, on the other side.
 			assert.Equal(t, IDRange{tc.asc.End, tc.window.End},
 				stageRemainder(tc.window, tc.asc, false))

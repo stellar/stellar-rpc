@@ -95,19 +95,20 @@ type Reader interface {
 	// result[i] is nil if keys[i] has no matching events in this
 	// chunk — a per-key miss is not an error.
 	//
-	// window is the id range to answer for. The second result is the
-	// range the answer covers: it contains window, and every bitmap is
-	// exact on it. Ids outside it may be present or absent, so callers
-	// must not rely on them, not even through NextValue or PreviousValue.
+	// window is the id range to answer for. The second result says where
+	// the answer is exact: every bitmap on its range, which contains
+	// window, and a bitmap it marks whole on every id. Elsewhere ids may
+	// be present or absent, so callers must not rely on them, not even
+	// through NextValue or PreviousValue.
 	//
 	// ColdReader coalesces the underlying packfile reads into a
 	// single ReadItems pass, fanning out across the worker count
-	// configured via ColdReaderOptions.Concurrency. It returns whole
-	// terms, so its covered range is the whole id space. HotStore returns
-	// snapshots of the live mirror shared by all readers of a term;
-	// a dense term written since its last lookup is cloned once, by
-	// the first reader to look it up, and that clone is then shared,
-	// window or no window.
+	// configured via ColdReaderOptions.Concurrency. It reads a split term
+	// only in the slabs the window reaches, covers them, and marks the other
+	// terms whole. HotStore returns snapshots of the live mirror shared by
+	// all readers of a term; a dense term written since its last lookup is
+	// cloned once, by the first reader to look it up, and that clone is then
+	// shared, window or no window.
 	//
 	// Callers MUST treat returned bitmaps as read-only. Dense hot
 	// snapshots are shared with other readers; sparse hot terms
@@ -118,7 +119,7 @@ type Reader interface {
 	// ctx cancels in-flight I/O on the cold path (MPHF load,
 	// index.pack ReadAt); hot side checks ctx as a fast guard before
 	// touching the in-memory mirror.
-	LookupKeys(ctx context.Context, keys []TermKey, window IDRange) ([]*roaring.Bitmap, IDRange, error)
+	LookupKeys(ctx context.Context, keys []TermKey, window IDRange) ([]*roaring.Bitmap, Coverage, error)
 
 	// FetchEvents decodes events for the supplied chunk-relative
 	// eventIDs and returns them positionally aligned with the input
