@@ -94,8 +94,14 @@ func TestConfigPreflightQueueHoldsABatch(t *testing.T) {
 	}
 }
 
-func TestConfigBufferedStorageBackendDefaults(t *testing.T) {
-	const datastoreToml = `
+func TestConfigBufferedStorageBackend(t *testing.T) {
+	const base = `
+NETWORK_PASSPHRASE = "Test SDF Network ; September 2015"
+HISTORY_ARCHIVE_URLS = ["http://localhost:1570"]
+CAPTIVE_CORE_CONFIG_PATH = "/etc/stellar/captive-core.cfg"
+STELLAR_CORE_BINARY_PATH = "/usr/bin/stellar-core"
+`
+	const datastore = base + `
 SERVE_LEDGERS_FROM_DATASTORE = true
 
 [datastore_config]
@@ -104,34 +110,55 @@ type = "GCS"
 [datastore_config.params]
 destination_bucket_path = "bucket/ledgers"
 `
+	const section = "\n[buffered_storage_backend_config]\n"
 	for _, tc := range []struct {
-		toml string
-		want ledgerbackend.BufferedStorageBackendConfig
+		name    string
+		toml    string
+		want    ledgerbackend.BufferedStorageBackendConfig
+		wantErr string
 	}{
 		{
-			toml: datastoreToml,
+			name: "missing section",
+			toml: datastore,
 			want: ledgerbackend.BufferedStorageBackendConfig{BufferSize: 100, NumWorkers: 10},
 		},
 		{
-			toml: datastoreToml + "\n[buffered_storage_backend_config]\nbuffer_size = 50\n",
+			name: "buffer size only",
+			toml: datastore + section + "buffer_size = 50\n",
 			want: ledgerbackend.BufferedStorageBackendConfig{BufferSize: 50, NumWorkers: 10},
 		},
 		{
-			toml: datastoreToml + "\n[buffered_storage_backend_config]\nbuffer_size = 5\n",
-			want: ledgerbackend.BufferedStorageBackendConfig{BufferSize: 5, NumWorkers: 5},
+			name:    "explicit zero workers",
+			toml:    datastore + section + "num_workers = 0\n",
+			want:    ledgerbackend.BufferedStorageBackendConfig{BufferSize: 100},
+			wantErr: "invalid [buffered_storage_backend_config]: number of workers must be > 0",
+		},
+		{
+			name:    "more workers than buffer size",
+			toml:    datastore + section + "buffer_size = 5\n",
+			want:    ledgerbackend.BufferedStorageBackendConfig{BufferSize: 5, NumWorkers: 10},
+			wantErr: "invalid [buffered_storage_backend_config]: number of workers must be <= BufferSize",
+		},
+		{
+			name: "datastore serving off",
+			toml: base + section + "buffer_size = 5\n",
+			want: ledgerbackend.BufferedStorageBackendConfig{BufferSize: 5, NumWorkers: 10},
 		},
 	} {
-		path := filepath.Join(t.TempDir(), "config.toml")
-		require.NoError(t, os.WriteFile(path, []byte(tc.toml), 0o600))
-		var cfg Config
-		require.NoError(t, cfg.SetValues(func(key string) (string, bool) {
-			if key == "SOROBAN_RPC_CONFIG_PATH" {
-				return path, true
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			require.NoError(t, os.WriteFile(path, []byte(tc.toml), 0o600))
+			var cfg Config
+			require.NoError(t, cfg.SetValues(func(key string) (string, bool) {
+				return path, key == "SOROBAN_RPC_CONFIG_PATH"
+			}))
+			assert.Equal(t, tc.want, cfg.BufferedStorageBackendConfig)
+			if tc.wantErr == "" {
+				require.NoError(t, cfg.Validate())
+			} else {
+				require.ErrorContains(t, cfg.Validate(), tc.wantErr)
 			}
-			return "", false
-		}))
-		require.True(t, cfg.ServeLedgersFromDatastore)
-		assert.Equal(t, tc.want, cfg.BufferedStorageBackendConfig, tc.toml)
+		})
 	}
 }
 

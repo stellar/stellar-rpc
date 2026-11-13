@@ -640,14 +640,28 @@ func (cfg *Config) options() Options {
 			DefaultValue: false,
 		},
 		{
-			TomlKey:   "buffered_storage_backend_config",
-			ConfigKey: &cfg.BufferedStorageBackendConfig,
-			Usage:     "Buffered storage backend configuration for reading ledgers from the datastore.",
+			TomlKey:      "buffered_storage_backend_config",
+			ConfigKey:    &cfg.BufferedStorageBackendConfig,
+			Usage:        "Buffered storage backend configuration for reading ledgers from the datastore.",
+			DefaultValue: defaultBufferedStorageBackendConfig(),
 			CustomSetValue: func(option *Option, i any) error {
+				if v, ok := i.(ledgerbackend.BufferedStorageBackendConfig); ok {
+					cfg.BufferedStorageBackendConfig = v
+					return nil
+				}
 				return unmarshalTOMLTree(i, option.ConfigKey, "buffered_storage_backend_config")
 			},
 			MarshalTOML: func(_ *Option) (any, error) {
 				return marshalTOMLTree(defaultBufferedStorageBackendConfig(), "buffered_storage_backend_config")
+			},
+			Validate: func(_ *Option) error {
+				if !cfg.ServeLedgersFromDatastore {
+					return nil
+				}
+				if err := cfg.BufferedStorageBackendConfig.Validate(); err != nil {
+					return fmt.Errorf("invalid [buffered_storage_backend_config]: %w", err)
+				}
+				return nil
 			},
 		},
 		{

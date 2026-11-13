@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Fixed
-* **`getLedgers` no longer fails for ledgers older than the local retention window when the config has no `[buffered_storage_backend_config]` section.** With `SERVE_LEDGERS_FROM_DATASTORE` enabled, those requests used to fail with `-32603` ("failed to create buffered storage backend: buffer size must be > 0"). The buffer size and worker count now default to 100 and 10 when the config leaves them unset, with no more workers than the buffer size.
+* **`getLedgers` no longer fails for ledgers older than the local retention window when the config has no `[buffered_storage_backend_config]` section.** With `SERVE_LEDGERS_FROM_DATASTORE` enabled, those requests used to fail with `-32603` ("failed to create buffered storage backend: buffer size must be > 0"). The buffer size and worker count now default to 100 and 10 when the config leaves them unset. An invalid section, such as one with more workers than the buffer size, now stops stellar-rpc at startup instead of failing every such request.
 
 ## [v30.0.1](https://github.com/stellar/stellar-rpc/compare/v30.0.0...v30.0.1)
 
