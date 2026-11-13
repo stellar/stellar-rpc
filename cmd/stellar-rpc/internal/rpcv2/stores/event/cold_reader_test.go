@@ -578,7 +578,7 @@ func TestColdReader_LookupKeys(t *testing.T) {
 	bms, covered, err := cr.LookupKeys(context.Background(), keys, everyID)
 	require.NoError(t, err)
 	require.Len(t, bms, len(keys))
-	assert.Equal(t, IDRange{End: math.MaxUint32}, covered, "whole terms cover the whole id space")
+	assert.Equal(t, IDRange{End: math.MaxUint32}, covered.IDRange, "whole terms cover the whole id space")
 
 	require.NotNil(t, bms[0], "contract key should hit")
 	assert.Equal(t, uint64(len(payloads)), bms[0].GetCardinality())

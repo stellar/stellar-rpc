@@ -17,6 +17,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/xdr"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
@@ -136,6 +138,7 @@ func TestColdReader_WindowedLookupsMatchTheirTerms(t *testing.T) {
 		require.GreaterOrEqual(t, covered.End, window.End, "the covered range must contain %v", window)
 		clip := freshRange(uint64(covered.Start), uint64(covered.End))
 		for i, name := range names {
+			assert.Equal(t, !slices.Contains(splitTerms, name), covered.whole(i), "%s is whole unless split", name)
 			want, ok := f.oracle[name]
 			if !ok {
 				assert.Nil(t, got[i], "a term the index never saw is a miss")
@@ -145,7 +148,7 @@ func TestColdReader_WindowedLookupsMatchTheirTerms(t *testing.T) {
 			assert.True(t, roaring.And(want, clip).Equals(roaring.And(got[i], clip)),
 				"%s over covered %v of window %v", name, covered, window)
 		}
-		return covered
+		return covered.IDRange
 	}
 
 	const slab = 1 << 16
@@ -191,7 +194,7 @@ func TestColdReader_UnseenKeyOnASplitSlotMisses(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []*roaring.Bitmap{nil, nil, nil}, got[:3])
 	// No split term was reached, so the lookup covers every id.
-	assert.Equal(t, everyID, covered)
+	assert.Equal(t, everyID, covered.IDRange)
 }
 
 func TestWriteColdIndex_SplitsAtTheThreshold(t *testing.T) {
@@ -365,4 +368,168 @@ func TestColdReader_CorruptSplitIndexIsCorrupt(t *testing.T) {
 		require.ErrorIs(t, err, stores.ErrCorrupt)
 		require.ErrorContains(t, err, "is not one container of slab 20")
 	})
+}
+
+// TestMatches_SplitColdIndexAgreesWithBruteForce runs Matches over a real cold
+// chunk with split terms against brute force: both directions, windows on and
+// off slab edges, with and without a limit.
+func TestMatches_SplitColdIndexAgreesWithBruteForce(t *testing.T) {
+	c := writeSplitChunk(t)
+	queries := []splitQuery{
+		{{0, ""}},
+		{{0, "rare"}},
+		{{1, "rare"}},
+		{{0, "early"}},
+		{{0, "whole"}},
+		{{1, "mid"}},
+		{{-1, "rare"}},
+		{{-1, "whole"}},
+		{{0, "whole"}, {1, "rare"}},
+		{{0, "mid"}, {-1, "rare"}},
+		{{1, "common"}},
+		{{0, "nope"}},
+	}
+	rng := rand.New(rand.NewSource(1))
+	for qi, q := range queries {
+		for trial := range 12 {
+			w := IDRange{0, splitChunkEvents}
+			switch {
+			case trial == 1:
+				w = IDRange{3 << 16, 3<<16 + 1}
+			case trial > 1:
+				a := uint32(rng.Intn(splitChunkEvents))
+				w = IDRange{a, a + uint32(rng.Intn(splitChunkEvents-int(a))) + 1}
+			}
+			for _, desc := range []bool{false, true} {
+				limit := -1
+				if trial%3 == 2 {
+					limit = 1 + rng.Intn(300)
+				}
+				got, _ := c.run(t, q, w, desc, limit)
+				require.Equal(t, q.want(w, desc, limit), got, "query %d over %v desc=%v limit %d", qi, w, desc, limit)
+			}
+		}
+	}
+	// Every "early" id is in stage 1's slabs, so the walk stops there.
+	_, lookups := c.run(t, splitQuery{{0, "early"}}, IDRange{0, splitChunkEvents}, false, -1)
+	assert.Equal(t, 1, lookups)
+}
+
+// splitChunk is a real cold chunk of 11 slabs. Its contracts, "mid" and
+// "common" are split; "rare", "whole" and "early" are not, and "early" ends in
+// slab 1.
+type splitChunk struct {
+	dir    string
+	cids   [2]xdr.ContractId
+	topics map[string][]byte
+}
+
+const splitChunkEvents = 700_000
+
+func splitChunkTopic(id uint32) string {
+	switch {
+	case id%50_000 == 7:
+		return "rare"
+	case id < 2<<16 && id%1_000 == 10:
+		return "early"
+	case id%40 == 3:
+		return "whole"
+	case id%5 == 0:
+		return "mid"
+	}
+	return "common"
+}
+
+func writeSplitChunk(t *testing.T) splitChunk {
+	t.Helper()
+	c := splitChunk{dir: t.TempDir(), cids: [2]xdr.ContractId{{0xaa}, {0xbb}}, topics: map[string][]byte{}}
+	payloads := map[[2]string][]byte{}
+	for _, name := range []string{"rare", "early", "whole", "mid", "common", "nope"} {
+		sym := xdr.ScSymbol(name)
+		val := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
+		raw, err := val.MarshalBinary()
+		require.NoError(t, err)
+		c.topics[name] = raw
+		for _, cid := range c.cids {
+			payloads[[2]string{string(cid[:]), name}] = marshaledEvent(t, symTopicEvent(&cid, name))
+		}
+	}
+	first := indexTestChunkID.FirstLedger()
+	cw, err := NewColdWriter(indexTestChunkID, c.dir, ColdWriterOptions{})
+	require.NoError(t, err)
+	idx := NewBitmaps()
+	for id := range uint32(splitChunkEvents) {
+		cid, topic := c.cids[id%2], splitChunkTopic(id)
+		require.NoError(t, cw.Append(Payload{
+			TxHash: xdr.Hash{0xab}, LedgerSequence: first, TxIdx: id, LedgerClosedAt: 1_700_000_000,
+			ContractEventBytes: payloads[[2]string{string(cid[:]), topic}],
+		}))
+		idx.AddTo(ComputeTermKey(cid[:], FieldContractID), id)
+		idx.AddTo(ComputeTermKey(c.topics[topic], FieldTopic0), id)
+	}
+	offsets := NewLedgerOffsets(first)
+	require.NoError(t, offsets.Append(first, splitChunkEvents))
+	require.NoError(t, cw.Finish(offsets))
+	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, c.dir, testIndexSecret))
+	return c
+}
+
+// splitQuery is a union of filters, each on a contract, -1 for any, and a
+// topic, "" for any.
+type splitQuery []struct {
+	cid   int
+	topic string
+}
+
+func (q splitQuery) matches(id uint32) bool {
+	for _, f := range q {
+		if (f.cid < 0 || int(id%2) == f.cid) && (f.topic == "" || splitChunkTopic(id) == f.topic) {
+			return true
+		}
+	}
+	return false
+}
+
+// want is the brute-force answer.
+func (q splitQuery) want(w IDRange, desc bool, limit int) []uint32 {
+	var out []uint32
+	for id := w.Start; id < w.End; id++ {
+		if q.matches(id) {
+			out = append(out, id)
+		}
+	}
+	if desc {
+		slices.Reverse(out)
+	}
+	if limit >= 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// run queries a fresh reader, as a request gets one, and counts its lookups.
+func (c splitChunk) run(t *testing.T, q splitQuery, w IDRange, desc bool, limit int) ([]uint32, int) {
+	t.Helper()
+	filters := make([]Filter, len(q))
+	for i, f := range q {
+		if f.cid >= 0 {
+			filters[i].ContractID = c.cids[f.cid][:]
+		}
+		if f.topic != "" {
+			filters[i].Topics[0] = c.topics[f.topic]
+		}
+	}
+	cr, err := OpenColdReader(indexTestChunkID, ColdDirs{Data: c.dir, Index: c.dir}, ColdReaderOptions{Concurrency: 4})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, cr.Close()) }()
+	counter := &countingReader{Reader: cr}
+	var got []uint32
+	for m, err := range Matches(context.Background(), counter, filters, w, desc, limit) {
+		require.NoError(t, err)
+		got = append(got, m.Ordinal)
+		if len(got) == limit {
+			break
+		}
+	}
+	return got, counter.lookupKeysCalls
 }

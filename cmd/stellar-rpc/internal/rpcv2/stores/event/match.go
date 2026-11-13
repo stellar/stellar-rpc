@@ -23,6 +23,8 @@ import (
 	"iter"
 	"slices"
 
+	"github.com/RoaringBitmap/roaring/v2"
+
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -184,6 +186,18 @@ func (r IDRange) check() error {
 	return nil
 }
 
+// Coverage is where a LookupKeys answer is exact: every bitmap on the
+// IDRange, and bitmap i on every id too when Whole[i] is set, its term being
+// stored whole. A missing entry is not whole.
+type Coverage struct {
+	IDRange
+
+	Whole []bool
+}
+
+// whole reports whether bitmap i is exact on every id.
+func (c Coverage) whole(i int) bool { return i < len(c.Whole) && c.Whole[i] }
+
 // IDRangeForLedgers translates the closed ledger window
 // [startLedger, endLedger] into the half-open IDRange
 // [firstID, lastID) covering those ledgers' events. Both bounds
@@ -247,9 +261,8 @@ func batchSizes(hint int) (int, int) {
 // number of slabs from the edge the walk starts at — the trailing ones when
 // descending. The request falls on a slab boundary, so no slab is split
 // across two stages and the candidates evaluated are the same however the
-// window is staged; the leading stage is entered at the window's own bound,
-// which may sit mid-slab. remaining is never empty here, so End is never
-// zero.
+// window is staged; a stage is entered where the walk resumes, which may sit
+// mid-slab. remaining is never empty here, so End is never zero.
 func stageRequest(remaining IDRange, descending bool, slabs uint64) IDRange {
 	if descending {
 		// The base of the slabs-th slab at or below the one holding End-1.
@@ -276,6 +289,83 @@ func stageRemainder(remaining, walked IDRange, descending bool) IDRange {
 	return IDRange{Start: walked.End, End: remaining.End}
 }
 
+// skipRuledOut moves the near edge of remaining to where some plan can next
+// match, by the terms covered marks whole: unlike a stage's other bitmaps they
+// are exact past the stage, so they bound the rest of the window. It returns
+// an empty range when no plan can match in what is left.
+func skipRuledOut(
+	plans []termPlan, sources []*roaring.Bitmap, covered Coverage, remaining IDRange, descending bool,
+) IDRange {
+	if remaining.isEmpty() {
+		return remaining
+	}
+	var best int64
+	found := false
+	for _, plan := range plans {
+		b, ok := wholeBound(plan, sources, covered, remaining, descending)
+		if ok && (!found || (!descending && b < best) || (descending && b > best)) {
+			best, found = b, true
+		}
+	}
+	switch {
+	case !found:
+		return IDRange{}
+	case descending:
+		remaining.End = uint32(best) + 1
+	default:
+		remaining.Start = uint32(best)
+	}
+	return remaining
+}
+
+// nextStage is the next stageSlabs slabs of remaining, cut short past the last
+// id some plan's whole terms allow: skipRuledOut from the stage's far end.
+func nextStage(
+	plans []termPlan, sources []*roaring.Bitmap, covered Coverage, remaining IDRange, descending bool,
+) IDRange {
+	return skipRuledOut(plans, sources, covered, stageRequest(remaining, descending, stageSlabs), !descending)
+}
+
+// wholeBound is the first id from the near edge of remaining that all of
+// plan's whole terms hold, or the near edge when it has none. It reports false
+// when the plan cannot match in remaining: a term is absent from the chunk, or
+// its whole terms share no id there.
+func wholeBound(
+	plan termPlan, sources []*roaring.Bitmap, covered Coverage, remaining IDRange, descending bool,
+) (int64, bool) {
+	whole := make(slabPlan, 0, len(plan))
+	for _, slot := range plan {
+		if sources[slot] == nil {
+			return 0, false
+		}
+		if covered.whole(slot) {
+			whole = append(whole, sources[slot])
+		}
+	}
+	if descending {
+		for b := remaining.End - 1; ; {
+			next := whole.prevBound(b)
+			if next < int64(remaining.Start) {
+				return 0, false
+			}
+			if next == int64(b) {
+				return next, true
+			}
+			b = uint32(next) //nolint:gosec // remaining.Start <= next < b
+		}
+	}
+	for b := remaining.Start; ; {
+		next := whole.nextBound(b)
+		if next == boundRetired || next >= int64(remaining.End) {
+			return 0, false
+		}
+		if next == int64(b) {
+			return next, true
+		}
+		b = uint32(next) //nolint:gosec // b < next < remaining.End
+	}
+}
+
 // Matches yields the events in window matching filters, in
 // chunk-relative ordinal order (reversed when descending), each
 // verified by the post-filter. Yielded payloads are owned by the
@@ -297,13 +387,13 @@ func stageRemainder(remaining, walked IDRange, descending bool) IDRange {
 // consumers never see or reason about resume state.
 //
 // The window is materialized in stages (see stageRequest): the leading slabs
-// in the walk's direction, then the next, each only if the consumer is still
+// in the walk's direction, then the next from where a plan can next match to
+// the last id one can (see nextStage), each only if the consumer is still
 // pulling when the previous runs out. A stage is walked as far as its lookup
 // says it covered, so the seam moves to where the reading stopped and no part
-// is read twice. The stream is still the pinned window's: the caller pins
-// window.End below the ingest frontier (see IDRange) and a committed ledger's
-// events never change, so every stage's image answers for the window
-// identically.
+// is read twice. The stream is still the pinned window's: the caller pins window.End
+// below the ingest frontier (see IDRange) and a committed ledger's events
+// never change, so every stage's image answers for the window identically.
 //
 // firstBatch sizes the first internal fetch: a consumer that will stop after
 // N matches passes N. Zero and negative hints use the default. A page that
@@ -330,12 +420,18 @@ func Matches(
 			return
 		}
 		emitted := 0
-		// remaining is the part of the window no stage has walked yet. A stage
-		// always walks at least what it asked for, so it always shrinks.
+		// remaining is the part of the window no stage has walked or skipped. A
+		// stage always walks at least what it asked for, so it always shrinks.
 		remaining := window
-		for slabs := uint64(firstStageSlabs); !remaining.isEmpty(); slabs = stageSlabs {
-			stage := stageRequest(remaining, descending, slabs)
-			sources, covered, err := r.LookupKeys(ctx, uniqueKeys, stage)
+		stage := stageRequest(remaining, descending, firstStageSlabs)
+		// Stage 1 asks for every term. A whole term's bitmap is exact on every
+		// id, so later stages ask only for the split ones, at the slots in split.
+		var sources []*roaring.Bitmap
+		var whole []bool
+		var split []int
+		keys := uniqueKeys
+		for first := true; ; first = false {
+			got, covered, err := r.LookupKeys(ctx, keys, stage)
 			if err != nil {
 				yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
 				return
@@ -346,8 +442,21 @@ func Matches(
 					covered.Start, covered.End, stage.Start, stage.End))
 				return
 			}
+			if first {
+				sources, whole, keys = got, covered.Whole, nil
+				for i, k := range uniqueKeys {
+					if !covered.whole(i) {
+						keys, split = append(keys, k), append(split, i)
+					}
+				}
+			} else {
+				for j, i := range split {
+					sources[i] = got[j]
+				}
+				covered.Whole = whole
+			}
 			// The bitmaps answer only for the covered range.
-			walked := remaining.intersect(covered)
+			walked := remaining.intersect(covered.IDRange)
 			st := newSlabStepper(plans, sources, walked, descending)
 			// Only a term absent from the whole chunk drops a plan.
 			if len(st.plans) == 0 {
@@ -362,7 +471,12 @@ func Matches(
 			if !ok {
 				return
 			}
-			remaining = stageRemainder(remaining, walked, descending)
+			remaining = skipRuledOut(
+				plans, sources, covered, stageRemainder(remaining, walked, descending), descending)
+			if remaining.isEmpty() {
+				return
+			}
+			stage = nextStage(plans, sources, covered, remaining, descending)
 		}
 	}
 }

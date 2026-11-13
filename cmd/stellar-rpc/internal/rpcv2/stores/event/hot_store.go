@@ -190,25 +190,25 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 // in one stage rather than looking up ids it is already holding.
 func (h *HotStore) LookupKeys(
 	ctx context.Context, keys []TermKey, window IDRange,
-) ([]*roaring.Bitmap, IDRange, error) {
+) ([]*roaring.Bitmap, Coverage, error) {
 	if h.chunkStore.IsClosed() {
-		return nil, IDRange{}, stores.ErrStoreClosed
+		return nil, Coverage{}, stores.ErrStoreClosed
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, IDRange{}, err
+		return nil, Coverage{}, err
 	}
 	if len(keys) == 0 {
-		return nil, window, nil
+		return nil, Coverage{IDRange: window}, nil
 	}
 	results := make([]*roaring.Bitmap, len(keys))
 	for i, key := range keys {
 		bm, err := h.mirror.Get(key)
 		if err != nil {
-			return nil, IDRange{}, fmt.Errorf("events: LookupKeys for chunk %s: %w", h.chunkID, err)
+			return nil, Coverage{}, fmt.Errorf("events: LookupKeys for chunk %s: %w", h.chunkID, err)
 		}
 		results[i] = bm // nil for misses — Get already returns nil bitmap for not-found
 	}
-	return results, IDRange{End: math.MaxUint32}, nil
+	return results, Coverage{IDRange: IDRange{End: math.MaxUint32}}, nil
 }
 
 // FetchEvents decodes the events_data row for each provided eventID
