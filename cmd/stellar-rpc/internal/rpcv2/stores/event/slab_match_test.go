@@ -175,7 +175,13 @@ func newShapedFixture(tb testing.TB) *shapedFixture {
 	slices.Sort(f.thin)
 	slices.Sort(f.rareContract)
 	slices.Sort(f.rareTopic)
+	return f.build(tb)
+}
 
+// build fills the corpus from f's id lists.
+func (f *shapedFixture) build(tb testing.TB) *shapedFixture {
+	tb.Helper()
+	const n = shapedCorpusSize
 	raws := make(map[slabShape][]byte)
 	keys := make(map[slabShape][]TermKey)
 	c := &diffCorpus{
@@ -518,14 +524,22 @@ func TestMatches_RandomizedAgainstPostFilter(t *testing.T) {
 	// Narrow widths put many slab seams in the corpus; 16 is production.
 	for _, shift := range []uint{1, 2, 4, 8, 16} {
 		slabShift = shift
-		rng := rand.New(rand.NewSource(int64(20260909 + shift)))
-		matched := 0
-		for range 400 {
-			matched += randomizedTrial(t, r, corpus, v, rng, corpusSize)
-		}
-		require.Greater(t, matched, 2000,
-			"fixture sanity: randomized queries selected too little")
+		randomizedTrials(t, r, corpus, v, int64(20260909+shift), corpusSize, 400, 2000)
 	}
+}
+
+// randomizedTrials runs n random queries from seed and checks that they
+// selected more than floor matches, so the fixture is not vacuous.
+func randomizedTrials(
+	t *testing.T, r Reader, corpus *diffCorpus, v *diffVocab, seed int64, corpusSize, n, floor int,
+) {
+	t.Helper()
+	rng := rand.New(rand.NewSource(seed))
+	matched := 0
+	for range n {
+		matched += randomizedTrial(t, r, corpus, v, rng, corpusSize)
+	}
+	require.Greater(t, matched, floor, "fixture sanity: randomized queries selected too little")
 }
 
 // randomizedTrial runs one random query in both directions and returns how
@@ -872,10 +886,10 @@ type lookupCountingReader struct {
 
 func (c *lookupCountingReader) LookupKeys(
 	ctx context.Context, keys []TermKey, window IDRange,
-) ([]*roaring.Bitmap, IDRange, error) {
+) ([]*roaring.Bitmap, Coverage, error) {
 	c.lookups++
 	bms, _, err := c.Reader.LookupKeys(ctx, keys, window)
-	return bms, IDRange{End: math.MaxUint32}, err
+	return bms, Coverage{IDRange: IDRange{End: math.MaxUint32}}, err
 }
 
 // TestMatches_WholeTermLookupIsOneStage pins that a lookup covering every id
@@ -928,6 +942,95 @@ func TestMatches_LaterStagesAreBounded(t *testing.T) {
 	}
 }
 
+// wholeTermsReader marks absent terms and those of at most maxIDs ids whole,
+// as a cold index marks the terms it does not split. The readers it wraps
+// return whole terms, so the marking is true.
+type wholeTermsReader struct {
+	Reader
+
+	maxIDs uint64
+}
+
+func (r wholeTermsReader) LookupKeys(
+	ctx context.Context, keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, Coverage, error) {
+	bms, covered, err := r.Reader.LookupKeys(ctx, keys, window)
+	covered.Whole = make([]bool, len(bms))
+	for i, bm := range bms {
+		covered.Whole[i] = bm == nil || bm.GetCardinality() <= r.maxIDs
+	}
+	return bms, covered, err
+}
+
+// TestMatches_SkipsSlabsAWholeTermRulesOut pins what a whole term buys: past
+// stage 1 the walk asks only for the stretches the rare contract's ids span,
+// three lookups where staging alone reads every slab in six.
+func TestMatches_SkipsSlabsAWholeTermRulesOut(t *testing.T) {
+	defer func(s uint) { slabShift = s }(slabShift)
+	slabShift = 10 // 69 slabs; the rare contract's ids are in slabs 0, 12, 63, 64 and 68
+	f := newShapedFixture(t)
+	// The rare contract AND a dense topic, or a contract the chunk lacks.
+	filters := append(f.filterMixedGroups(), f.filterAbsentTerm()...)
+	all := matchingEvents(t, f.corpus, filters)
+	for desc, want := range map[bool][]IDRange{
+		false: {{0, 4 << 10}, {12_345, 12_346}, {65_535, shapedCorpusSize}},
+		true:  {{65 << 10, shapedCorpusSize}, {65_535, 66_001}, {1, 12_346}},
+	} {
+		r := &countingReader{Reader: wholeTermsReader{Reader: diffReader{f.corpus}, maxIDs: 100}}
+		requireStream(t, r, all, queryCase{
+			name: "rare AND dense", filters: filters, window: IDRange{0, shapedCorpusSize}, desc: desc,
+		})
+		assert.Equal(t, want, r.windows, "desc=%v", desc)
+		assert.Equal(t, 5, r.totalKeys, "only stage 1 asks for the whole and absent terms")
+	}
+}
+
+// TestMatches_LaterStagesSkipTermsOfPlansThatCannotMatch pins that a split term
+// only a plan with an absent term uses is read in stage 1 and never again.
+func TestMatches_LaterStagesSkipTermsOfPlansThatCannotMatch(t *testing.T) {
+	defer func(s uint) { slabShift = s }(slabShift)
+	slabShift = 10
+	f := newShapedFixture(t)
+	// The rare contract, or a contract the chunk lacks AND the dense topic.
+	filters := append(f.filterSparseOnly(), Filter{
+		ContractID: f.vocab.contracts[3],
+		Topics:     [protocol.MaxTopicCount][]byte{0: f.vocab.topicRaw[1]},
+	})
+	r := &countingReader{Reader: wholeTermsReader{Reader: diffReader{f.corpus}, maxIDs: 100}}
+	requireStream(t, r, matchingEvents(t, f.corpus, filters), queryCase{
+		name: "rare OR (absent AND dense)", filters: filters, window: IDRange{0, shapedCorpusSize},
+	})
+	assert.Equal(t, 3, r.totalKeys, "only stage 1 asks for the dense topic")
+}
+
+// TestMatches_TwoInterleavedWholeTermsFindTheirSharedID pins a plan whose two
+// whole terms interleave, so a bound taken from both could skip past the stage
+// it narrows. The walk must neither spin nor stop before the one id they share.
+func TestMatches_TwoInterleavedWholeTermsFindTheirSharedID(t *testing.T) {
+	defer func(s uint) { slabShift = s }(slabShift)
+	slabShift = 10
+	f := (&shapedFixture{
+		vocab:        newDiffVocab(t),
+		rareContract: []uint32{5001, 13001, 40001, 57001, 65001},
+		rareTopic:    []uint32{6001, 40001, 64001},
+	}).build(t)
+	// The rare contract AND the dense odd topic AND the rare second topic.
+	filters := []Filter{{
+		ContractID: f.vocab.contracts[2],
+		Topics:     [protocol.MaxTopicCount][]byte{0: f.vocab.topicRaw[1], 1: f.vocab.topicRaw[2]},
+	}}
+	all := matchingEvents(t, f.corpus, filters)
+	require.Len(t, all, 1)
+	window := IDRange{0, shapedCorpusSize}
+	r := wholeTermsReader{Reader: diffReader{f.corpus}, maxIDs: 100}
+	for _, desc := range []bool{false, true} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		got := drainMatches(t, Matches(ctx, r, filters, window, desc, 0), 0)
+		cancel()
+		require.Equal(t, expectedStream(all, window, desc, 0), got, "desc=%v", desc)
+	}
+}
+
 // underCoveringReader breaks Reader.LookupKeys' contract the one way the walk
 // cannot survive: it answers for less than it was asked, so a stage walks
 // nothing and the remainder never shrinks.
@@ -935,9 +1038,9 @@ type underCoveringReader struct{ Reader }
 
 func (r underCoveringReader) LookupKeys(
 	ctx context.Context, keys []TermKey, window IDRange,
-) ([]*roaring.Bitmap, IDRange, error) {
+) ([]*roaring.Bitmap, Coverage, error) {
 	bms, _, err := r.Reader.LookupKeys(ctx, keys, window)
-	return bms, IDRange{Start: window.Start + 1, End: window.End}, err
+	return bms, Coverage{IDRange: IDRange{Start: window.Start + 1, End: window.End}}, err
 }
 
 // TestMatches_UnderCoveringLookupIsAnError pins that as an error on the
@@ -960,7 +1063,8 @@ func TestMatches_UnderCoveringLookupIsAnError(t *testing.T) {
 // must not move a single match, which is what makes "unspecified outside" a
 // contract rather than an accident of what today's readers happen to return.
 // The rewriting follows the covered range rather than the window, since that
-// is what the walk is entitled to read; a reader that covers more than it was
+// is what the walk is entitled to read, and spares a bitmap marked whole,
+// which it may read anywhere; a reader that covers more than it was
 // asked (the cold index, which reads whole parts) keeps its extra ids. The
 // bitmaps the wrapped reader hands back may be shared with other readers (hot
 // dense snapshots are), so each is cloned before it is rewritten.
@@ -975,13 +1079,13 @@ type windowFuzzReader struct {
 
 func (r windowFuzzReader) LookupKeys(
 	ctx context.Context, keys []TermKey, window IDRange,
-) ([]*roaring.Bitmap, IDRange, error) {
+) ([]*roaring.Bitmap, Coverage, error) {
 	bms, covered, err := r.Reader.LookupKeys(ctx, keys, window)
 	if err != nil {
-		return nil, IDRange{}, err
+		return nil, Coverage{}, err
 	}
 	for i, bm := range bms {
-		if bm == nil {
+		if bm == nil || covered.whole(i) {
 			continue
 		}
 		out := bm.Clone()
@@ -989,7 +1093,7 @@ func (r windowFuzzReader) LookupKeys(
 			out.RemoveRange(0, uint64(covered.Start))
 			out.RemoveRange(uint64(covered.End), uint64(math.MaxUint32)+1)
 		} else {
-			r.perturb(out, covered)
+			r.perturb(out, covered.IDRange)
 		}
 		bms[i] = out
 	}
@@ -1038,21 +1142,17 @@ func TestMatches_IgnoresIDsOutsideTheLookupWindow(t *testing.T) {
 	// A small fetch seam exercises fetch batches inside a stage.
 	slabShift, matchBatchSize = 2, 7
 
-	for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {
-		for _, seed := range []int64{1, 2, 3} {
-			r := windowFuzzReader{
-				Reader: diffReader{corpus},
-				rng:    rand.New(rand.NewSource(seed)),
-				mode:   mode,
-				span:   2 * corpusSize,
+	for _, maxIDs := range []uint64{0, corpusSize / 8} {
+		for _, mode := range []lookupFuzzMode{fuzzOutside, fuzzClip} {
+			for _, seed := range []int64{1, 2, 3} {
+				r := windowFuzzReader{
+					Reader: wholeTermsReader{Reader: diffReader{corpus}, maxIDs: maxIDs},
+					rng:    rand.New(rand.NewSource(seed)),
+					mode:   mode,
+					span:   2 * corpusSize,
+				}
+				randomizedTrials(t, r, corpus, v, 20260912+seed, corpusSize, 150, 500)
 			}
-			rng := rand.New(rand.NewSource(20260912 + seed))
-			matched := 0
-			for range 150 {
-				matched += randomizedTrial(t, r, corpus, v, rng, corpusSize)
-			}
-			require.Greater(t, matched, 500,
-				"fixture sanity: randomized queries selected too little")
 		}
 	}
 }
@@ -1068,18 +1168,15 @@ func TestMatches_StageScheduleIsInvisible(t *testing.T) {
 	v := newDiffVocab(t)
 	const corpusSize = 300
 	corpus := newDiffCorpus(t, rand.New(rand.NewSource(20260829)), v, corpusSize)
-	r := diffReader{corpus}
 	defer func(s uint) { slabShift = s }(slabShift)
 	defer func(n int) { matchBatchSize = n }(matchBatchSize)
 	slabShift, matchBatchSize = 2, 7
 
-	rng := rand.New(rand.NewSource(20260912))
-	matched := 0
-	for range 150 {
-		matched += randomizedTrial(t, r, corpus, v, rng, corpusSize)
+	// With the rarer terms whole, later stages also skip slabs.
+	for _, maxIDs := range []uint64{0, corpusSize / 8} {
+		r := wholeTermsReader{Reader: diffReader{corpus}, maxIDs: maxIDs}
+		randomizedTrials(t, r, corpus, v, 20260912, corpusSize, 150, 500)
 	}
-	require.Greater(t, matched, 500,
-		"fixture sanity: randomized queries selected too little")
 }
 
 // TestStageRequest_TakesTheLeadingSlabs pins which end of the window a

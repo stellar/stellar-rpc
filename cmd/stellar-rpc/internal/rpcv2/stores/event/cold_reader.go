@@ -366,52 +366,54 @@ func decodeSlabEntry(entry []byte, rd entryRead) (*roaring.Bitmap, error) {
 }
 
 // LookupKeys returns bitmaps for each key, aligned positionally with
-// the input slice (result[i] corresponds to keys[i]), and the id range
-// they answer for. See Reader.LookupKeys for the semantics.
+// the input slice (result[i] corresponds to keys[i]), and where they are
+// exact. See Reader.LookupKeys for the semantics.
 //
 // A split term is read only in the slabs the window reaches. Every split
 // term shares the chunk's slabs, so the lookup covers their span, up to the
 // top when it reaches slab C−1, past which the index holds no id; an empty
 // window covers itself. A lookup that reached no split term covers the whole
-// id space.
+// id space. Every term but a present split one is marked whole.
 //
 //nolint:cyclop // resolve, read and assemble in one pass
 func (c *ColdReader) LookupKeys(
 	ctx context.Context, keys []TermKey, window IDRange,
-) ([]*roaring.Bitmap, IDRange, error) {
+) ([]*roaring.Bitmap, Coverage, error) {
 	if c.closed.Load() {
-		return nil, IDRange{}, stores.ErrStoreClosed
+		return nil, Coverage{}, stores.ErrStoreClosed
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, IDRange{}, err
+		return nil, Coverage{}, err
 	}
 	if err := window.check(); err != nil {
-		return nil, IDRange{}, err
+		return nil, Coverage{}, err
 	}
 	if len(keys) == 0 {
-		return nil, IDRange{End: math.MaxUint32}, nil
+		return nil, Coverage{IDRange: IDRange{End: math.MaxUint32}}, nil
 	}
 
 	layout, err := c.waitLayout()
 	if err != nil {
-		return nil, IDRange{}, err
+		return nil, Coverage{}, err
 	}
 	mphf, err := c.waitMPHF()
 	if err != nil {
-		return nil, IDRange{}, err
+		return nil, Coverage{}, err
 	}
 
 	lo, hi, splitCovered := layout.slabsIn(window)
 
 	results := make([]*roaring.Bitmap, len(keys))
+	whole := make([]bool, len(keys))
 	reads := make([]entryRead, 0, len(keys))
 	covered := IDRange{End: math.MaxUint32}
 	for i, hit := range mphf.LookupBatch(keys) {
+		whole[i] = true
 		if hit.err != nil {
 			if errors.Is(hit.err, ErrKeyNotFound) {
 				continue // result[i] stays nil
 			}
-			return nil, IDRange{}, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, hit.err)
+			return nil, Coverage{}, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, hit.err)
 		}
 		pos, rowFP, split := layout.locate(hit.slot)
 		if !split {
@@ -421,6 +423,7 @@ func (c *ColdReader) LookupKeys(
 		if rowFP != hit.fp {
 			continue
 		}
+		whole[i] = false
 		results[i] = roaring.New()
 		results[i].SetCopyOnWrite(true)
 		covered = splitCovered
@@ -430,7 +433,7 @@ func (c *ColdReader) LookupKeys(
 	}
 
 	if err := readIndexEntries(ctx, c.index, reads); err != nil {
-		return nil, IDRange{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
+		return nil, Coverage{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
 	}
 	// reads is in position order, so each Or appends a split term's next
 	// slab; with copy-on-write on both sides it takes over the slab's
@@ -451,7 +454,7 @@ func (c *ColdReader) LookupKeys(
 			bm.SetCopyOnWrite(false)
 		}
 	}
-	return results, covered, nil
+	return results, Coverage{IDRange: covered, Whole: whole}, nil
 }
 
 // readIndexEntries decodes the entry each read names into its bm, in one
