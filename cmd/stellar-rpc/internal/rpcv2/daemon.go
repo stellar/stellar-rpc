@@ -26,6 +26,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/corestate"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/eventsapi"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
@@ -292,6 +293,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 			daemon:            coreDaemon,
 			logger:            logger,
 			metrics:           metrics,
+			eventsMetrics:     eventsapi.NewMetrics(registry, host.StellarPrometheusNamespace),
 			preflightGetter:   preflightPool,
 			feeWindows:        feeWindows,
 			networkPassphrase: core.networkPassphrase,

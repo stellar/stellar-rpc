@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/creachadair/jrpc2"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/eventsapi"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
@@ -121,6 +123,45 @@ func TestJSONRPCHandler_ServesQueryEvents(t *testing.T) {
 	assert.Equal(t, protocol.ScanStatusComplete, result.ScanStatus)
 	assert.Empty(t, result.Cursor)
 	assert.Equal(t, uint32(chunk.FirstLedgerSeq), result.LatestLedger)
+}
+
+// The table hands the metrics to the queryEvents handler, so requests over
+// the real server reach the registry. The unknown field fails in the
+// handler's own decoder, a path the eventsapi tests cannot reach.
+func TestJSONRPCHandler_QueryEventsRecordsMetrics(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	params := testHandlerParams(t, seedServingRegistry(t))
+	params.eventsMetrics = eventsapi.NewMetrics(registry, "test_ns")
+	handler := newJSONRPCHandler(defaultsConfig(t), params)
+	srv := httptest.NewServer(handler)
+	t.Cleanup(func() {
+		srv.Close()
+		handler.Close()
+	})
+
+	out := rpcv2test.PostRPC(t, srv.URL, "queryEvents", `{"minLedger":2,"maxLedger":2}`)
+	require.Nil(t, out.Error)
+	out = rpcv2test.PostRPC(t, srv.URL, "queryEvents", `{"minLedger":2,"bogus":1}`)
+	require.NotNil(t, out.Error)
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	var termSamples uint64
+	var invalidParams float64
+	for _, family := range families {
+		switch family.GetName() {
+		case "test_ns_query_events_distinct_terms":
+			termSamples = family.GetMetric()[0].GetHistogram().GetSampleCount()
+		case "test_ns_query_events_rejections_total":
+			for _, metric := range family.GetMetric() {
+				if metric.GetLabel()[0].GetValue() == protocol.ErrorReasonInvalidParams {
+					invalidParams = metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	assert.Equal(t, uint64(1), termSamples, "the undecodable request never reaches the term count")
+	assert.InDelta(t, float64(1), invalidParams, 0)
 }
 
 // An invalid request must reach the client as typed error data, not as a

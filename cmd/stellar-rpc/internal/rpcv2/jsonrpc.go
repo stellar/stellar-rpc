@@ -32,6 +32,7 @@ type handlerParams struct {
 	daemon            host.Daemon
 	logger            *supportlog.Entry
 	metrics           observability.Metrics
+	eventsMetrics     *eventsapi.Metrics
 	registry          *query.Registry
 	ledgerReader      store.LedgerReader
 	transactionReader store.TransactionReader
@@ -123,7 +124,7 @@ func buildHandlerSpecs(cfg config.Config, p handlerParams) []jsonrpc.HandlerSpec
 				MaxResponseBytes: deref(cfg.Service.MaxResponseBytes),
 			},
 			TermBudget: uint32(min(deref(m.QueryEvents.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
-		}, p.logger),
+		}, p.eventsMetrics, p.logger),
 	})
 	for i := range specs {
 		specs[i].Handler = wrapAdapterRequest(specs[i].Handler, p.registry)
