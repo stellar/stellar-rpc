@@ -658,10 +658,7 @@ func (cfg *Config) options() Options {
 				if !cfg.ServeLedgersFromDatastore {
 					return nil
 				}
-				if err := cfg.BufferedStorageBackendConfig.Validate(); err != nil {
-					return fmt.Errorf("invalid [buffered_storage_backend_config]: %w", err)
-				}
-				return nil
+				return cfg.BufferedStorageBackendConfig.Validate()
 			},
 		},
 		{
