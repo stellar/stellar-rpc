@@ -37,10 +37,11 @@ func (cfg *Config) options() Options {
 		return *cfg.optionsCache
 	}
 	defaultStellarCoreBinaryPath, _ := exec.LookPath("stellar-core")
-	//nolint:gosec // runtime.NumCPU() is always non-negative and realistically well below uint limits
-	defaultUintCPU := uint(runtime.NumCPU())
-	//nolint:gosec // runtime.NumCPU() is always non-negative and realistically well below uint16 limits
-	defaultUint16CPU := uint16(runtime.NumCPU())
+	// The number of CPUs the process may use, which follows a container's CPU limit.
+	//nolint:gosec // runtime.GOMAXPROCS(0) is always positive and realistically well below uint limits
+	defaultUintCPU := uint(runtime.GOMAXPROCS(0))
+	//nolint:gosec // runtime.GOMAXPROCS(0) is always positive and realistically well below uint16 limits
+	defaultUint16CPU := uint16(runtime.GOMAXPROCS(0))
 	cfg.optionsCache = &Options{
 		{
 			Name: "config-path",
@@ -401,21 +402,32 @@ func (cfg *Config) options() Options {
 		},
 		{
 			Name:         "preflight-worker-count",
-			Usage:        "Number of workers (read goroutines) used to compute preflights for the simulateTransaction endpoint. Defaults to the number of CPUs.",
+			Usage:        "Number of worker processes used to compute preflights for the simulateTransaction endpoint. Defaults to the number of CPUs the process may use (GOMAXPROCS).",
 			ConfigKey:    &cfg.PreflightWorkerCount,
 			DefaultValue: defaultUintCPU,
 			Validate:     positive,
 		},
 		{
 			Name:         "preflight-worker-queue-size",
-			Usage:        "Maximum number of outstanding preflight requests for the simulateTransaction endpoint. Defaults to the number of CPUs.",
+			Usage:        "Maximum number of outstanding preflight requests for the simulateTransaction endpoint. 0, the default, means the larger of the number of CPUs the process may use (GOMAXPROCS) and MAX_REQUEST_BATCH_SIZE, since the calls of one batch start at once.",
 			ConfigKey:    &cfg.PreflightWorkerQueueSize,
-			DefaultValue: defaultUintCPU,
+			DefaultValue: uint(0),
 			Validate:     positive,
 		},
 		{
+			Name: "preflight-simulation-memory-limit",
+			Usage: fmt.Sprintf(
+				"Most heap memory, in bytes, the simulation library may hold in a preflight worker process. 0 means "+
+					"8 times the network's per-transaction memory limit, and any other value must be at least %d. "+
+					"Plan for about this limit + 128 MiB per worker.",
+				limits.MinSimulationMemoryLimit),
+			ConfigKey:    &cfg.PreflightSimulationMemoryLimit,
+			DefaultValue: uint64(0),
+			Validate:     simulationMemoryLimitValidator,
+		},
+		{
 			Name:         "preflight-enable-debug",
-			Usage:        "Enable debug information in preflighting (provides more detailed errors). It should not be enabled in production deployments.",
+			Usage:        "Include diagnostic events in simulateTransaction responses",
 			ConfigKey:    &cfg.PreflightEnableDebug,
 			DefaultValue: true,
 		},
@@ -425,6 +437,32 @@ func (cfg *Config) options() Options {
 			ConfigKey:    &cfg.RequestBacklogGlobalQueueLimit,
 			DefaultValue: uint(5000),
 			Validate:     positive,
+		},
+		{
+			TomlKey:      strutils.KebabToConstantCase("max-request-batch-size"),
+			Usage:        "Maximum number of calls in a JSON-RPC batch request",
+			ConfigKey:    &cfg.MaxRequestBatchSize,
+			DefaultValue: uint(10),
+			Validate:     positive,
+		},
+		{
+			Name:         "max-json-conversion-bytes",
+			Usage:        "Maximum bytes of JSON one XDR value may convert to when a request asks for xdrFormat json",
+			ConfigKey:    &cfg.MaxJSONConversionBytes,
+			DefaultValue: uint(128 * 1024 * 1024),
+			Validate:     positive,
+		},
+		{
+			Name:         "max-response-bytes",
+			Usage:        "Maximum bytes of XDR or JSON that one response may carry (0 means no limit)",
+			ConfigKey:    &cfg.MaxResponseBytes,
+			DefaultValue: uint(0),
+		},
+		{
+			Name:         "max-total-response-bytes",
+			Usage:        "Maximum bytes of responses held in memory at once, before they are written; while held, a larger response fails (0 means no limit)",
+			ConfigKey:    &cfg.MaxTotalResponseBytes,
+			DefaultValue: uint64(2 * 1024 * 1024 * 1024),
 		},
 		{
 			TomlKey:      strutils.KebabToConstantCase("request-backlog-get-health-queue-limit"),
@@ -743,6 +781,14 @@ func feeStatsRetentionWindowValidator(option *Option) error {
 		return fmt.Errorf("%s is not a uint32", option.Name)
 	}
 	return limits.ValidateFeeStatsRetentionWindow(option.Name, *ptr)
+}
+
+func simulationMemoryLimitValidator(option *Option) error {
+	ptr, ok := option.ConfigKey.(*uint64)
+	if !ok {
+		return fmt.Errorf("%s is not a uint64", option.Name)
+	}
+	return limits.ValidateSimulationMemoryLimit(option.Name, *ptr)
 }
 
 func positive(option *Option) error {

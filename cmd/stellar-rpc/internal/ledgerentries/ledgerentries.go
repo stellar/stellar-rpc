@@ -2,7 +2,11 @@ package ledgerentries
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"net/url"
+	"time"
 
 	coreProto "github.com/stellar/go-stellar-sdk/protocols/stellarcore"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -12,13 +16,13 @@ import (
 )
 
 type LedgerKeyAndEntry struct {
-	Key                xdr.LedgerKey
-	Entry              xdr.LedgerEntry
+	Key                xdr.LedgerKeyView
+	Entry              xdr.LedgerEntryView
 	LiveUntilLedgerSeq *uint32 // optional live-until ledger seq, when applicable.
 }
 
 type LedgerEntryGetter interface {
-	GetLedgerEntries(ctx context.Context, keys []xdr.LedgerKey) ([]LedgerKeyAndEntry, uint32, error)
+	GetLedgerEntries(ctx context.Context, keys []xdr.LedgerKeyView) ([]LedgerKeyAndEntry, uint32, error)
 }
 
 // NewLedgerEntryGetter creates a LedgerEntryGetter which obtains the latest known value of the given ledger entries
@@ -50,7 +54,7 @@ type coreLedgerEntryGetter struct {
 
 func (c coreLedgerEntryGetter) GetLedgerEntries(
 	ctx context.Context,
-	keys []xdr.LedgerKey,
+	keys []xdr.LedgerKeyView,
 ) ([]LedgerKeyAndEntry, uint32, error) {
 	atLedger := c.atLedger
 	if atLedger == 0 {
@@ -63,7 +67,10 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 	}
 	resp, err := c.coreClient.GetLedgerEntries(ctx, atLedger, keys...)
 	if err != nil {
-		return nil, 0, fmt.Errorf("could not query captive core: %w", err)
+		resp, err = c.readWhenCoreReaches(ctx, atLedger, keys, err)
+		if err != nil {
+			return nil, 0, fmt.Errorf("could not query captive core: %w", err)
+		}
 	}
 
 	result := make([]LedgerKeyAndEntry, 0, len(resp.Entries))
@@ -74,8 +81,7 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 			continue
 		}
 
-		var xdrEntry xdr.LedgerEntry
-		err := xdr.SafeUnmarshalBase64(entry.Entry, &xdrEntry)
+		entryXDR, err := base64.StdEncoding.DecodeString(entry.Entry)
 		if err != nil {
 			return nil, 0, fmt.Errorf("could not decode ledger entry: %w", err)
 		}
@@ -84,7 +90,7 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 		// returned in order.
 		newEntry := LedgerKeyAndEntry{
 			Key:   keys[i],
-			Entry: xdrEntry,
+			Entry: entryXDR,
 		}
 		if entry.LiveUntilLedgerSeq != 0 || entry.State == coreProto.LedgerEntryStateArchived {
 			// Core doesn't provide the specific TTL in which an entry was archived.
@@ -96,4 +102,34 @@ func (c coreLedgerEntryGetter) GetLedgerEntries(
 	}
 
 	return result, atLedger, nil
+}
+
+// Core streams a ledger's meta before its query server has that ledger, so a
+// read pinned to the newest ledger can arrive early.
+func (c coreLedgerEntryGetter) readWhenCoreReaches(
+	ctx context.Context, ledger uint32, keys []xdr.LedgerKeyView, pinnedErr error,
+) (coreProto.GetLedgerEntryResponse, error) {
+	if _, notAnswered := errors.AsType[*url.Error](pinnedErr); notAnswered || ctx.Err() != nil {
+		return coreProto.GetLedgerEntryResponse{}, pinnedErr
+	}
+	for delay := 5 * time.Millisecond; ; delay = min(2*delay, time.Second) {
+		resp, err := c.coreClient.GetLedgerEntries(ctx, 0, keys...)
+		switch {
+		case err != nil:
+			return coreProto.GetLedgerEntryResponse{}, fmt.Errorf("%w: %w", err, pinnedErr)
+		case resp.Ledger == ledger:
+			return resp, nil
+		case resp.Ledger > ledger:
+			// Core still serves its last few ledgers.
+			if resp, err = c.coreClient.GetLedgerEntries(ctx, ledger, keys...); err != nil {
+				return coreProto.GetLedgerEntryResponse{}, pinnedErr
+			}
+			return resp, nil
+		}
+		select {
+		case <-ctx.Done():
+			return coreProto.GetLedgerEntryResponse{}, fmt.Errorf("%w: %w", context.Cause(ctx), pinnedErr)
+		case <-time.After(delay):
+		}
+	}
 }

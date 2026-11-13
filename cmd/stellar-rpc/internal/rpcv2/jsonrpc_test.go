@@ -3,7 +3,10 @@ package rpcv2
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"maps"
+	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
@@ -270,6 +273,30 @@ func TestJSONRPCHandler_ServesLatestLedgerFromRegistry(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(out.Result, &result))
 	assert.Equal(t, uint32(chunk.FirstLedgerSeq), result.Sequence)
+}
+
+// The server takes its batch cap from [service].max_request_batch_size.
+func TestJSONRPCHandler_CapsBatchSize(t *testing.T) {
+	url := newTestRPCServer(t, seedServingRegistry(t))
+	post := func(calls int) string {
+		call := `{"jsonrpc":"2.0","id":1,"method":"getLatestLedger"}`
+		body := "[" + strings.TrimSuffix(strings.Repeat(call+",", calls), ",") + "]"
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, strings.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		out, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return string(out)
+	}
+
+	limit := int(config.DefaultMaxRequestBatchSize)
+	assert.Equal(t, limit, strings.Count(post(limit), `"result"`))
+	over := post(limit + 1)
+	assert.Contains(t, over, fmt.Sprintf("batch exceeds the limit of %d calls", limit))
+	assert.NotContains(t, over, `"result"`)
 }
 
 func TestJSONRPCHandler_HealthyOverFreshRegistryStamp(t *testing.T) {

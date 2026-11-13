@@ -26,10 +26,11 @@ const (
 )
 
 type eventsRPCHandler struct {
-	dbReader     store.EventReader
-	maxLimit     uint
-	defaultLimit uint
-	logger       *log.Entry
+	dbReader         store.EventReader
+	maxLimit         uint
+	defaultLimit     uint
+	maxResponseBytes int // zero means no limit
+	logger           *log.Entry
 }
 
 func combineContractIDs(filters []protocol.EventFilter) ([][]byte, error) {
@@ -78,12 +79,12 @@ func combineEventTypes(filters []protocol.EventFilter) []int {
 	return uniqueEventTypes
 }
 
-func combineTopics(filters []protocol.EventFilter) (store.TopicFilters, error) {
+func combineTopics(filters []protocol.EventFilter) store.TopicFilters {
 	topicFilters := make(store.TopicFilters, 0, len(filters))
 
 	for _, filter := range filters {
 		if len(filter.Topics) == 0 {
-			return nil, nil
+			return nil
 		}
 
 		// Each topic is an OR...
@@ -94,26 +95,22 @@ func combineTopics(filters []protocol.EventFilter) (store.TopicFilters, error) {
 				if segmentFilter.Wildcard != nil || segmentFilter.ScVal == nil {
 					continue // skip wildcards but keep position of segment
 				}
-				encodedTopic, err := segmentFilter.ScVal.MarshalBinary()
-				if err != nil {
-					return nil, fmt.Errorf("failed to marshal segment: %w", err)
-				}
 				conditions = append(conditions, store.TopicCondition{
 					Column: i + 1, // columns start with `topic1`
-					Value:  encodedTopic,
+					Value:  segmentFilter.ScVal,
 				})
 			}
 
 			// This means a topic full of wildcards, making it dominate any
 			// other filter.
 			if len(conditions) == 0 {
-				return nil, nil
+				return nil
 			}
 			topicFilters = append(topicFilters, conditions)
 		}
 	}
 
-	return topicFilters, nil
+	return topicFilters
 }
 
 // TODO: remove this linter exclusions
@@ -187,16 +184,10 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		}
 	}
 
-	topics, err := combineTopics(request.Filters)
-	if err != nil {
-		return protocol.GetEventsResponse{}, &jrpc2.Error{
-			Code: jrpc2.InvalidParams, Message: err.Error(),
-		}
-	}
-
+	topics := combineTopics(request.Filters)
 	eventTypes := combineEventTypes(request.Filters)
 
-	filters, err := compileFilters(request.Filters)
+	matcher, err := protocol.NewEventMatcher(request.Filters)
 	if err != nil {
 		return protocol.GetEventsResponse{}, &jrpc2.Error{
 			Code: jrpc2.InvalidParams, Message: err.Error(),
@@ -204,24 +195,27 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	}
 
 	results := []protocol.EventInfo{}
+	budget := PageBudget{Limit: h.maxResponseBytes}
 	// procErr keeps the callback's own error out of the reader's wrap, as getTransactions does,
 	// so a render failure stays a plain (system) error rather than an InvalidRequest.
 	var procErr error
 	var eventViewScanFunction store.ViewScanFunction = func(
 		eventView xdr.DiagnosticEventView, cursor protocol.Cursor, ledgerCloseTimestamp int64, txHash *xdr.Hash,
 	) (bool, error) {
+		if procErr = ctx.Err(); procErr != nil {
+			return false, procErr
+		}
 		var event xdr.ContractEventView
 		if event, procErr = eventView.Event(); procErr != nil {
 			return false, procErr
 		}
-		// Fields are pulled off the view once and feed both the match and the render.
 		// Topics wait until type and contract id pass, so a rejected event never sizes them.
 		head, err := eventHeader(event)
 		if err != nil {
 			procErr = errors.Wrap(err, "could not parse event")
 			return false, procErr
 		}
-		if !filters.matchHeader(head) {
+		if !matcher.MatchesTypeAndContract(head.typ, head.cid) {
 			return true, nil
 		}
 		body, err := eventBody(head.v0)
@@ -229,7 +223,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 			procErr = errors.Wrap(err, "could not parse event")
 			return false, procErr
 		}
-		if !filters.match(head, body.topics) {
+		if !matcher.Matches(head.typ, head.cid, body.topics) {
 			return true, nil
 		}
 		info, err := eventInfo(head, body, cursor,
@@ -237,6 +231,9 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 		if err != nil {
 			procErr = errors.Wrap(err, "could not parse event")
 			return false, procErr
+		}
+		if !budget.Fits(EventInfoBytes(info)) {
+			return false, nil
 		}
 		results = append(results, info)
 		return uint(len(results)) < limit, nil
@@ -253,7 +250,7 @@ func (h eventsRPCHandler) getEvents(ctx context.Context, request protocol.GetEve
 	}
 
 	var cursor string
-	if uint(len(results)) == limit {
+	if budget.full || uint(len(results)) == limit {
 		lastEvent := results[len(results)-1]
 		cursor = lastEvent.ID
 	} else {
@@ -304,23 +301,34 @@ type eventV0 struct {
 	data   []byte
 }
 
-// eventHeader locates type, contract id and body in one pass. Fields returns views trimmed
-// to their extent, so their bytes are the raw XDR and Raw() would only re-walk them.
+// eventHeader reads type and contract id without sizing the body.
 func eventHeader(ev xdr.ContractEventView) (eventHead, error) {
-	f, err := ev.Fields()
+	var h eventHead
+	typ, err := ev.Type()
 	if err != nil {
 		return eventHead{}, err
 	}
-	var h eventHead
-	if h.typ, err = f.Type.Value(); err != nil {
+	if h.typ, err = typ.Value(); err != nil {
 		return eventHead{}, err
 	}
-	if cid, ok, err := f.ContractId.Unwrap(); err != nil {
+	opt, err := ev.ContractId()
+	if err != nil {
 		return eventHead{}, err
-	} else if ok {
-		h.cid = []byte(cid)
 	}
-	if h.v0, err = f.Body.V0(); err != nil { // fails on a non-V0 body, replacing "unknown event version"
+	cid, ok, err := opt.Unwrap()
+	if err != nil {
+		return eventHead{}, err
+	}
+	if ok {
+		if h.cid, err = cid.Raw(); err != nil {
+			return eventHead{}, err
+		}
+	}
+	body, err := ev.Body()
+	if err != nil {
+		return eventHead{}, err
+	}
+	if h.v0, err = body.V0(); err != nil { // fails on a non-V0 body, replacing "unknown event version"
 		return eventHead{}, err
 	}
 	return h, nil
@@ -409,12 +417,14 @@ func NewGetEventsHandler(
 	dbReader store.EventReader,
 	maxLimit uint,
 	defaultLimit uint,
+	maxResponseBytes uint,
 ) jrpc2.Handler {
 	eventsHandler := eventsRPCHandler{
-		dbReader:     dbReader,
-		maxLimit:     maxLimit,
-		defaultLimit: defaultLimit,
-		logger:       logger,
+		dbReader:         dbReader,
+		maxLimit:         maxLimit,
+		defaultLimit:     defaultLimit,
+		maxResponseBytes: ByteLimit(maxResponseBytes),
+		logger:           logger,
 	}
 	return NewHandler(eventsHandler.getEvents)
 }

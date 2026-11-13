@@ -54,17 +54,7 @@ func ledgerToJSON(lcm, headerRaw []byte) ([]byte, []byte, error) {
 }
 
 func jsonifySlice(xdr any, values [][]byte) ([]json.RawMessage, error) {
-	result := make([]json.RawMessage, len(values))
-	var err error
-
-	for i, value := range values {
-		result[i], err = xdr2json.ConvertBytes(xdr, value)
-		if err != nil {
-			return result, err
-		}
-	}
-
-	return result, nil
+	return (*xdr2json.Budget)(nil).ConvertSlice(xdr, values)
 }
 
 // helper function to jsonify slices of slices like ContractEvents

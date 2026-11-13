@@ -117,6 +117,25 @@ func TestQueryEvents_AscendingPagesToTheTip(t *testing.T) {
 	// The top edge follows the tip, so a finished walk still waits.
 	assert.Equal(t, protocol.ScanStatusWaitingForLedgers, page2.ScanStatus)
 	assert.NotEmpty(t, page2.Cursor)
+
+	// A 1-byte response cap ends the page after a0, mid-ledger, and resumes at a1.
+	limits := testLimits()
+	limits.MaxResponseBytes = 1
+	cut, err := queryEvents(ctx, limits, nil, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		MinLedger: first,
+		Limit:     new(uint(2)),
+	})
+	require.NoError(t, err)
+	require.Len(t, cut.Events, 1)
+	assert.Equal(t, page1.Events[0].ID, cut.Events[0].ID)
+	assert.Equal(t, protocol.ScanStatusHasMore, cut.ScanStatus)
+	assert.Equal(t, first-1, cut.ScannedLedger)
+	resumed, err := queryEvents(ctx, limits, nil, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		Cursor: cut.Cursor,
+	})
+	require.NoError(t, err)
+	require.Len(t, resumed.Events, 1)
+	assert.Equal(t, page1.Events[1].ID, resumed.Events[0].ID)
 }
 
 // A page that covers no whole ledger reports the ledger just outside the

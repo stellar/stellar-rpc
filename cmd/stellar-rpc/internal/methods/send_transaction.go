@@ -2,8 +2,8 @@ package methods
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 
 	"github.com/creachadair/jrpc2"
 	"github.com/pkg/errors"
@@ -27,7 +27,6 @@ func NewSendTransactionHandler(
 	logger *log.Entry,
 	ledgerReader store.LedgerReader,
 	passphrase string,
-	decodeOptions xdr.DecodeOptions,
 ) jrpc2.Handler {
 	submitter := daemon.CoreClient()
 	return NewHandler(func(ctx context.Context, request protocol.SendTransactionRequest,
@@ -39,9 +38,7 @@ func NewSendTransactionHandler(
 			}
 		}
 
-		var envelope xdr.TransactionEnvelope
-
-		err := xdr.SafeUnmarshalBase64WithOptions(request.Transaction, &envelope, decodeOptions)
+		envelope, err := xdr.ViewFromBase64[xdr.TransactionEnvelopeView](request.Transaction)
 		if err != nil {
 			return protocol.SendTransactionResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,
@@ -49,8 +46,7 @@ func NewSendTransactionHandler(
 			}
 		}
 
-		var hash [32]byte
-		hash, err = network.HashTransactionInEnvelope(envelope, passphrase)
+		hash, err := hashTransaction(envelope, passphrase)
 		if err != nil {
 			return protocol.SendTransactionResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,
@@ -90,6 +86,17 @@ func NewSendTransactionHandler(
 
 		switch resp.Status {
 		case proto.TXStatusError:
+			events, err := splitDiagnosticEvents(resp.DiagnosticEvents)
+			if err != nil {
+				logger.WithField("tx", request.Transaction).
+					WithError(err).Error("Cannot decode diagnostic events")
+
+				return protocol.SendTransactionResponse{}, &jrpc2.Error{
+					Code:    jrpc2.InternalError,
+					Message: "could not decode diagnostic events",
+				}
+			}
+
 			errorResp := protocol.SendTransactionResponse{
 				Status:                resp.Status,
 				Hash:                  txHash,
@@ -99,8 +106,7 @@ func NewSendTransactionHandler(
 
 			switch request.Format {
 			case protocol.FormatJSON:
-				errResult := xdr.TransactionResult{}
-				err = xdr.SafeUnmarshalBase64(resp.Error, &errResult)
+				errResult, err := base64.StdEncoding.DecodeString(resp.Error)
 				if err != nil {
 					logger.WithField("tx", request.Transaction).
 						WithError(err).Error("Cannot decode error result")
@@ -111,7 +117,7 @@ func NewSendTransactionHandler(
 					}
 				}
 
-				errorResp.ErrorResultJSON, err = xdr2json.ConvertInterface(errResult)
+				errorResp.ErrorResultJSON, err = xdr2json.ConvertBytes(xdr.TransactionResult{}, errResult)
 				if err != nil {
 					logger.WithField("tx", request.Transaction).
 						WithError(err).Error("Cannot JSONify error result")
@@ -122,44 +128,20 @@ func NewSendTransactionHandler(
 					}
 				}
 
-				diagEvents := []xdr.DiagnosticEvent{}
-				err = xdr.SafeUnmarshalBase64(resp.DiagnosticEvents, &diagEvents)
+				errorResp.DiagnosticEventsJSON, err = jsonifySlice(xdr.DiagnosticEvent{}, events)
 				if err != nil {
 					logger.WithField("tx", request.Transaction).
-						WithError(err).Error("Cannot decode events")
+						WithError(err).Error("Cannot JSONify events")
 
 					return protocol.SendTransactionResponse{}, &jrpc2.Error{
 						Code:    jrpc2.InternalError,
-						Message: errors.Wrap(err, "couldn't decode events").Error(),
-					}
-				}
-
-				errorResp.DiagnosticEventsJSON = make([]json.RawMessage, len(diagEvents))
-				for i, event := range diagEvents {
-					errorResp.DiagnosticEventsJSON[i], err = xdr2json.ConvertInterface(event)
-					if err != nil {
-						logger.WithField("tx", request.Transaction).
-							WithError(err).Errorf("Cannot decode event %d: %+v", i+1, event)
-
-						return protocol.SendTransactionResponse{}, &jrpc2.Error{
-							Code:    jrpc2.InternalError,
-							Message: errors.Wrapf(err, "couldn't decode event #%d", i+1).Error(),
-						}
+						Message: errors.Wrap(err, "couldn't serialize events").Error(),
 					}
 				}
 
 			default:
-				events, err := proto.DiagnosticEventsToSlice(resp.DiagnosticEvents)
-				if err != nil {
-					logger.WithField("tx", request.Transaction).Error("Cannot decode diagnostic events:", err)
-					return protocol.SendTransactionResponse{}, &jrpc2.Error{
-						Code:    jrpc2.InternalError,
-						Message: "could not decode diagnostic events",
-					}
-				}
-
 				errorResp.ErrorResultXDR = resp.Error
-				errorResp.DiagnosticEventsXDR = events
+				errorResp.DiagnosticEventsXDR = base64EncodeSlice(events)
 			}
 
 			return errorResp, nil
@@ -181,4 +163,38 @@ func NewSendTransactionHandler(
 			}
 		}
 	})
+}
+
+// hashTransaction returns the hash of the transaction in envelope.
+func hashTransaction(envelope xdr.TransactionEnvelopeView, passphrase string) ([32]byte, error) {
+	hasher, err := network.NewTransactionViewHasher(passphrase)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return hasher.Hash(envelope)
+}
+
+func splitDiagnosticEvents(b64 string) ([][]byte, error) {
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(raw) == 0 {
+		return nil, err
+	}
+	count, err := xdr.Uint32View(raw).Value()
+	if err != nil {
+		return nil, err
+	}
+	var events [][]byte
+	raw = raw[4:]
+	for range count {
+		event, err := xdr.DiagnosticEventView(raw).Raw()
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+		raw = raw[len(event):]
+	}
+	if len(raw) > 0 {
+		return nil, errors.Errorf("%d bytes after the last diagnostic event", len(raw))
+	}
+	return events, nil
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stellar/go-stellar-sdk/network"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/toid"
@@ -72,6 +73,31 @@ func TestGetTransactions_DefaultLimit(t *testing.T) { //nolint:dupl
 
 	// assert the transaction structure. We will match only 1 tx for sanity purposes.
 	assert.Equal(t, expectedTransactionInfo, response.Transactions[0])
+
+	// A byte limit ends the page early. Ledger 1 holds two transactions, so a
+	// limit of two ends the page before ledger 2, and the cursor resumes there.
+	handler.maxResponseBytes = transactionInfoBytes(response.Transactions[0]) +
+		transactionInfoBytes(response.Transactions[1])
+	response, err = handler.getTransactionsByLedgerSequence(context.TODO(), request)
+	require.NoError(t, err)
+	assert.Len(t, response.Transactions, 2)
+	assert.Equal(t, toid.New(2, 0, 1).String(), response.Cursor)
+
+	response, err = handler.getTransactionsByLedgerSequence(context.TODO(), protocol.GetTransactionsRequest{
+		Pagination: &protocol.LedgerPaginationOptions{Cursor: response.Cursor},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(2), response.Transactions[0].Ledger)
+	assert.Equal(t, int32(1), response.Transactions[0].ApplicationOrder)
+
+	// The pool bounds a base64 page before it is rendered: room for only one
+	// transaction fails the call.
+	handler.maxResponseBytes = 0
+	response, err = handler.getTransactionsByLedgerSequence(context.TODO(), request)
+	require.NoError(t, err)
+	pool := &poolStub{room: int64(transactionInfoBytes(response.Transactions[0]))}
+	_, err = handler.getTransactionsByLedgerSequence(WithResponsePool(context.TODO(), pool), request)
+	require.ErrorIs(t, err, errPoolStubFull)
 }
 
 func TestGetTransactions_DefaultLimitExceedsLatestLedger(t *testing.T) { //nolint:dupl
@@ -324,6 +350,15 @@ func TestGetTransactions_NoResults(t *testing.T) {
 func createTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 	sequence -= 100
 	meta := txMeta(sequence, true)
+	// The second transaction differs from the first only in its fee, so it has its own hash.
+	envelope := txEnvelope(sequence)
+	envelope.V1.Tx.Fee++
+	hash, err := network.HashTransactionInEnvelope(envelope, NetworkPassphrase)
+	if err != nil {
+		panic(err)
+	}
+	component := (*meta.V2.TxSet.V1TxSet.Phases[0].V0Components)[0].TxsMaybeDiscountedFee
+	component.Txs = append(component.Txs, envelope)
 	meta.V2.TxProcessing = append(meta.V2.TxProcessing, xdr.TransactionResultMetaV1{
 		TxApplyProcessing: xdr.TransactionMeta{
 			V:          3,
@@ -334,7 +369,7 @@ func createTestLedger(sequence uint32) xdr.LedgerCloseMeta {
 			V3: &xdr.TransactionMetaV3{},
 		},
 		Result: xdr.TransactionResultPair{
-			TransactionHash: txHash(sequence),
+			TransactionHash: hash,
 			Result:          transactionResult(false),
 		},
 	})

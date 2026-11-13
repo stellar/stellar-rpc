@@ -9,11 +9,12 @@ package event
 // Optimization shape: terms are deduped across filters and issued as one
 // batched Reader.LookupKeys per window stage, whose bitmaps the walk holds
 // for that stage; payload fetches stream in internal batches. The window is
-// materialized in two stages — the leading slabs in the walk's direction,
-// then the remainder, and the second only if the page did not fill — so a
-// query that stops after a page asked the index about the slabs that page
-// spans, not about the whole window. The candidate set comes from the slab
-// engine in slab_match.go, which serves both directions from one walk.
+// materialized in stages of a few slabs each, in the walk's direction, the
+// next only if the page did not fill — so a query that stops after a page
+// asked the index about the slabs that page spans, not about the whole
+// window, and no query holds more than a stage of the index at once. The
+// candidate set comes from the slab engine in slab_match.go, which serves
+// both directions from one walk.
 
 import (
 	"bytes"
@@ -21,6 +22,8 @@ import (
 	"fmt"
 	"iter"
 	"slices"
+
+	"github.com/RoaringBitmap/roaring/v2"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -183,6 +186,39 @@ func (r IDRange) check() error {
 	return nil
 }
 
+// Coverage is where a LookupKeys answer is exact: every bitmap on the
+// IDRange, and bitmap i on every id too when Whole[i] is set, its term being
+// stored whole. A missing entry is not whole.
+type Coverage struct {
+	IDRange
+
+	Whole []bool
+}
+
+// whole reports whether bitmap i is exact on every id.
+func (c Coverage) whole(i int) bool { return i < len(c.Whole) && c.Whole[i] }
+
+// narrow is r from the first to the last id where some plan can match, by the
+// bounds laterStages gives.
+func (r IDRange) narrow(bounds []*roaring.Bitmap) IDRange {
+	if r.isEmpty() {
+		return r
+	}
+	first, last := int64(r.End), int64(-1)
+	for _, bm := range bounds {
+		if bm == nil {
+			return r
+		}
+		if f := bm.NextValue(r.Start); f >= 0 && f < int64(r.End) {
+			first, last = min(first, f), max(last, bm.PreviousValue(r.End-1))
+		}
+	}
+	if last < first {
+		return IDRange{}
+	}
+	return IDRange{Start: uint32(first), End: uint32(last) + 1} //nolint:gosec // r.Start <= first <= last < r.End
+}
+
 // IDRangeForLedgers translates the closed ledger window
 // [startLedger, endLedger] into the half-open IDRange
 // [firstID, lastID) covering those ledgers' events. Both bounds
@@ -208,8 +244,16 @@ func IDRangeForLedgers(ofs *LedgerOffsets, startLedger, endLedger uint32) (IDRan
 //nolint:gochecknoglobals // test seam; production never writes it
 var matchBatchSize = 512
 
-// firstStageSlabs is how many slabs a query's first stage covers.
-const firstStageSlabs = 4
+// firstStageSlabs is how many slabs a query's first stage covers, and
+// stageSlabs how many every later one does. A split term is read only for a
+// stage's slabs and held for its walk, at most one container per slab, so a
+// query holds at most 128 KiB of each split term at once, whatever the
+// chunk's density. queryEvents' 15-term budget keeps that under 2 MiB;
+// getEvents v1 has no term budget.
+const (
+	firstStageSlabs = 4
+	stageSlabs      = 16
+)
 
 // Match is a payload plus Ordinal, its chunk-relative event ID. A
 // consumer that stops mid-stream needs the ordinal to know where it
@@ -235,19 +279,13 @@ func batchSizes(hint int) (int, int) {
 	return first, rest
 }
 
-// stage1Request is the piece of remaining a query's first lookup asks for:
-// the leading firstStageSlabs slabs from the edge the walk starts at — the
-// trailing ones when descending.
-//
-// Every stage after it asks for the whole remainder, so there are at most two
-// lookups, and a query that fills its page inside stage 1 never makes the
-// second — the point of the split. The request falls on a slab boundary, so
-// no slab is split across two stages and the candidates evaluated are the
-// same whether there are one or two; the leading stage is entered at the
-// window's own bound, which may sit mid-slab. remaining is never empty here,
-// so End is never zero.
-func stage1Request(remaining IDRange, descending bool) IDRange {
-	const slabs = uint64(firstStageSlabs)
+// stageRequest is the piece of remaining a lookup asks for: the given
+// number of slabs from the edge the walk starts at — the trailing ones when
+// descending. The request falls on a slab boundary, so no slab is split
+// across two stages and the candidates evaluated are the same however the
+// window is staged; a stage is entered where the walk resumes, which may sit
+// mid-slab. remaining is never empty here, so End is never zero.
+func stageRequest(remaining IDRange, descending bool, slabs uint64) IDRange {
 	if descending {
 		// The base of the slabs-th slab at or below the one holding End-1.
 		lo := remaining.Start
@@ -273,6 +311,53 @@ func stageRemainder(remaining, walked IDRange, descending bool) IDRange {
 	return IDRange{Start: walked.End, End: remaining.End}
 }
 
+// lookupStage is LookupKeys for one stage. Covering less than the stage would
+// never advance the walk, so it is an error.
+func lookupStage(ctx context.Context, r Reader, keys []TermKey, stage IDRange) ([]*roaring.Bitmap, Coverage, error) {
+	got, covered, err := r.LookupKeys(ctx, keys, stage)
+	if err != nil {
+		return nil, Coverage{}, fmt.Errorf("events: query lookup: %w", err)
+	}
+	if covered.Start > stage.Start || covered.End < stage.End {
+		return nil, Coverage{}, fmt.Errorf("events: query lookup covered [%d, %d) but was asked for [%d, %d)",
+			covered.Start, covered.End, stage.Start, stage.End)
+	}
+	return got, covered, nil
+}
+
+// laterStages sets up the stages after stage 1 from its lookup of every term.
+// A whole term's bitmap is exact on every id, so they ask only for the split
+// terms the plans read, whose slots split lists, and each is narrowed by
+// bounds: for every plan, its sparsest whole term, or nil when it has none and
+// can match anywhere. bounds is never nil.
+func laterStages(
+	keys []TermKey, plans []termPlan, sources []*roaring.Bitmap, covered Coverage,
+) ([]TermKey, []int, []*roaring.Bitmap) {
+	read := make([]bool, len(keys))
+	bounds := make([]*roaring.Bitmap, 0, len(plans))
+	for _, plan := range plans {
+		var sparsest *roaring.Bitmap
+		for _, slot := range plan {
+			bm := sources[slot]
+			switch {
+			case !covered.whole(slot):
+				read[slot] = true
+			case sparsest == nil || bm.GetCardinality() < sparsest.GetCardinality():
+				sparsest = bm
+			}
+		}
+		bounds = append(bounds, sparsest)
+	}
+	var splitKeys []TermKey
+	var split []int
+	for i, k := range keys {
+		if read[i] {
+			splitKeys, split = append(splitKeys, k), append(split, i)
+		}
+	}
+	return splitKeys, split, bounds
+}
+
 // Matches yields the events in window matching filters, in
 // chunk-relative ordinal order (reversed when descending), each
 // verified by the post-filter. Yielded payloads are owned by the
@@ -293,18 +378,18 @@ func stageRemainder(remaining, walked IDRange, descending bool) IDRange {
 // drops are invisible: the iterator advances past them internally, so
 // consumers never see or reason about resume state.
 //
-// The window is materialized in at most two stages (see stage1Request): the
-// leading slabs in the walk's direction, then the remainder, and the second
-// only if the consumer is still pulling when the first runs out. A stage is
-// walked as far as its lookup says it covered, so the seam moves to where the
-// reading stopped and no part is read twice. The stream is still the pinned
-// window's: the caller pins window.End below the ingest frontier (see
-// IDRange) and a committed ledger's events never change, so every stage's
-// image answers for the window identically.
+// The window is materialized in stages (see stageRequest): the leading slabs
+// in the walk's direction, then the next, each narrowed to the ids where a plan
+// can still match (see laterStages) and run only if the consumer is still
+// pulling when the previous runs out. A stage is walked as far as its lookup
+// says it covered, so the seam moves to where the reading stopped and no part
+// is read twice. The stream is still the pinned window's: the caller pins window.End
+// below the ingest frontier (see IDRange) and a committed ledger's events
+// never change, so every stage's image answers for the window identically.
 //
 // firstBatch sizes the first internal fetch: a consumer that will stop after
 // N matches passes N. Zero and negative hints use the default. A page that
-// spans the stage seam carries the rest of its hint into the second stage.
+// spans a stage seam carries the rest of its hint into the next stage.
 // The hint changes I/O counts only, never what the stream yields.
 func Matches(
 	ctx context.Context, r Reader, filters []Filter, window IDRange,
@@ -327,31 +412,33 @@ func Matches(
 			return
 		}
 		emitted := 0
-		// remaining is the part of the window no stage has walked yet. A stage
-		// always walks at least what it asked for, so it always shrinks; every
-		// stage after the first asks for the whole of it.
+		// remaining is the part of the window no stage has walked or skipped. A
+		// stage always walks at least what it asked for, so it always shrinks.
 		remaining := window
-		for stage := stage1Request(window, descending); !remaining.isEmpty(); stage = remaining {
-			sources, covered, err := r.LookupKeys(ctx, uniqueKeys, stage)
-			if err != nil {
-				yield(Match{}, fmt.Errorf("events: query lookup: %w", err))
-				return
-			}
-			// Covering less than the stage would never advance the walk.
-			if covered.Start > stage.Start || covered.End < stage.End {
-				yield(Match{}, fmt.Errorf("events: query lookup covered [%d, %d) but was asked for [%d, %d)",
-					covered.Start, covered.End, stage.Start, stage.End))
-				return
-			}
+		stage := stageRequest(remaining, descending, firstStageSlabs)
+		sources, covered, err := lookupStage(ctx, r, uniqueKeys, stage)
+		if err != nil {
+			yield(Match{}, err)
+			return
+		}
+		// A plan naming a term absent from the chunk matches nothing, so the
+		// rest of the walk keeps only the plans that can match.
+		plans = slices.DeleteFunc(plans, func(p termPlan) bool {
+			return slices.ContainsFunc(p, func(slot int) bool { return sources[slot] == nil })
+		})
+		if len(plans) == 0 {
+			return
+		}
+		// Set up once the walk goes past stage 1 (see laterStages).
+		var splitKeys []TermKey
+		var split []int
+		var bounds []*roaring.Bitmap
+		for {
 			// The bitmaps answer only for the covered range.
-			walked := remaining.intersect(covered)
+			walked := remaining.intersect(covered.IDRange)
 			st := newSlabStepper(plans, sources, walked, descending)
-			// Only a term absent from the whole chunk drops a plan.
-			if len(st.plans) == 0 {
-				return
-			}
-			// firstBatch is the whole query's hint, so what stage 1 yielded
-			// comes off it. A spent hint goes non-positive and batchSizes
+			// firstBatch is the whole query's hint, so what earlier stages
+			// yielded comes off it. A spent hint goes non-positive and batchSizes
 			// falls back to the default.
 			n, ok := streamSlabs(
 				ctx, r, filters, st, descending, firstBatch-emitted, yield)
@@ -360,6 +447,29 @@ func Matches(
 				return
 			}
 			remaining = stageRemainder(remaining, walked, descending)
+			if remaining.isEmpty() {
+				return
+			}
+			if bounds == nil {
+				splitKeys, split, bounds = laterStages(uniqueKeys, plans, sources, covered)
+			}
+			if remaining = remaining.narrow(bounds); remaining.isEmpty() {
+				return
+			}
+			stage = stageRequest(remaining, descending, stageSlabs).narrow(bounds)
+			// Let the last stage's split slabs go before reading the next stage's,
+			// so a query holds at most 16 slabs of a split term.
+			for _, i := range split {
+				sources[i] = nil
+			}
+			var got []*roaring.Bitmap
+			if got, covered, err = lookupStage(ctx, r, splitKeys, stage); err != nil {
+				yield(Match{}, err)
+				return
+			}
+			for j, i := range split {
+				sources[i] = got[j]
+			}
 		}
 	}
 }

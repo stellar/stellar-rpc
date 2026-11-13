@@ -423,12 +423,15 @@ func newPreflightPool(
 ) *preflight.WorkerPool {
 	p := cfg.Service.Preflight
 	return preflight.NewPreflightWorkerPool(preflight.WorkerPoolConfig{
-		Daemon:            coreDaemon,
-		WorkerCount:       deref(p.WorkerCount),
-		JobQueueCapacity:  deref(p.WorkerQueueSize),
-		EnableDebug:       deref(p.EnableDebug),
-		NetworkPassphrase: networkPassphrase,
-		Logger:            logger,
+		Daemon:             coreDaemon,
+		WorkerCount:        deref(p.WorkerCount),
+		JobQueueCapacity:   deref(p.WorkerQueueSize),
+		EnableDebug:        deref(p.EnableDebug),
+		NetworkPassphrase:  networkPassphrase,
+		Logger:             logger,
+		CoreURL:            coreDaemon.QueryURL(),
+		CoreRequestTimeout: deref(cfg.Ingestion.CoreRequestTimeout),
+		MemoryLimit:        uint64(deref(p.SimulationMemoryLimit)),
 	})
 }
 

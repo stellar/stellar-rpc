@@ -35,6 +35,9 @@ type Limits struct {
 	MaxLimit uint
 	// DefaultLimit applies when the request sets no limit.
 	DefaultLimit uint
+	// MaxResponseBytes ends a page before an event that would take its XDR or
+	// JSON past it. Zero means no limit.
+	MaxResponseBytes uint
 }
 
 // QueryEventsLimits adds the term budget. Only queryEvents has one: v1's own caps
@@ -172,12 +175,13 @@ func serve(
 	// A range with no ledgers in it is finished before it starts. Only a
 	// below-genesis max produces one; the pager would call it inverted.
 	var page *query.EventPage
+	events := []protocol.EventInfo{}
 	if s := &cursor.Scope; s.MaxLedger != nil && s.MinLedger > *s.MaxLedger {
 		page = &query.EventPage{Next: cursor, Status: query.ScanComplete}
-	} else if page, err = view.QueryEvents(ctx, cursor, limit); err != nil {
+	} else if page, events, err = scanPage(ctx, view, limits, req.Format, cursor, limit); err != nil {
 		return protocol.QueryEventsResponse{}, err
 	}
-	resp, err := response(page, req.Format, oldest, latest)
+	resp, err := response(page, events, oldest, latest)
 	if err != nil {
 		return protocol.QueryEventsResponse{}, err
 	}
@@ -187,6 +191,33 @@ func serve(
 		metrics.observePage(page)
 	}
 	return resp, nil
+}
+
+// scanPage walks one page and converts its events. It returns the page
+// that the response is built from.
+func scanPage(
+	ctx context.Context, view *query.ReadView, limits QueryEventsLimits, format string,
+	cursor query.EventCursor, limit int,
+) (*query.EventPage, []protocol.EventInfo, error) {
+	page, err := view.QueryEvents(ctx, cursor, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	events, err := eventInfos(ctx, page.Events, format, limits.MaxResponseBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(events) < len(page.Events) {
+		// Not every event fit, so mint the cursor from a walk limited to those that did.
+		if page, err = view.QueryEvents(ctx, cursor, len(events)); err != nil {
+			return nil, nil, err
+		}
+		if len(page.Events) != len(events) {
+			return nil, nil, fmt.Errorf("rpcv2: second walk served %d events, want %d",
+				len(page.Events), len(events))
+		}
+	}
+	return page, events, nil
 }
 
 // requestCursor turns either request shape into the cursor the pager
@@ -275,21 +306,14 @@ func checkTermBudget(terms int, budget uint32) error {
 // response carries a cursor on every page but the last: an absent cursor is
 // what tells a client the query is finished.
 func response(
-	page *query.EventPage, format string, oldest, latest uint32,
+	page *query.EventPage, events []protocol.EventInfo, oldest, latest uint32,
 ) (protocol.QueryEventsResponse, error) {
 	resp := protocol.QueryEventsResponse{
-		Events:        make([]protocol.EventInfo, 0, len(page.Events)),
+		Events:        events,
 		ScanStatus:    responseScanStatus(page.Status),
 		ScannedLedger: responseScannedLedger(&page.Next),
 		OldestLedger:  oldest,
 		LatestLedger:  latest,
-	}
-	for i := range page.Events {
-		info, err := eventInfo(&page.Events[i], format)
-		if err != nil {
-			return protocol.QueryEventsResponse{}, err
-		}
-		resp.Events = append(resp.Events, info)
 	}
 	if page.Status != query.ScanComplete {
 		token, err := page.Next.Encode()
@@ -481,6 +505,29 @@ func responseScanStatus(s query.ScanStatus) string {
 	default:
 		return protocol.ScanStatusHasMore
 	}
+}
+
+// eventInfos converts events in order, stopping before one that would take the
+// page past maxResponseBytes. The first always fits.
+func eventInfos(
+	ctx context.Context, events []event.Payload, format string, maxResponseBytes uint,
+) ([]protocol.EventInfo, error) {
+	infos := make([]protocol.EventInfo, 0, len(events))
+	budget := methods.PageBudget{Limit: methods.ByteLimit(maxResponseBytes)}
+	for i := range events {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		info, err := eventInfo(&events[i], format)
+		if err != nil {
+			return nil, err
+		}
+		if !budget.Fits(methods.EventInfoBytes(info)) {
+			break
+		}
+		infos = append(infos, info)
+	}
+	return infos, nil
 }
 
 // eventInfo builds one response event from a stored event payload.

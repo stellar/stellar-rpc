@@ -12,18 +12,14 @@ use anyhow::{anyhow, Result};
 #[allow(clippy::wildcard_imports)]
 use ffi::*;
 
-// This is the same limit as the soroban serialization limit
-// but we redefine it here for two reasons:
-//
-//   1. To depend only on the XDR crate, not the soroban host.
-//   2. To allow customizing it here, since this function may
-//      serialize many XDR types that are larger than the types
-//      soroban allows serializing (eg. transaction sets or ledger
-//      entries or whatever). Soroban is conservative and stops
-//      at 32MiB.
-
+// The depth limit must cover every envelope Core has admitted, inside the
+// `LedgerCloseMeta` that holds it (about 12 more). Since protocol 28, Core
+// admits envelopes up to depth 1000 (`validateXDRForProtocol`). For
+// protocols 20 to 22, Core bounded nesting with its XDR decoder's
+// 1000-level recursion limit, which counts 3 levels per nested `ScVec`
+// where this crate counts 4, so those ledgers can need about 1330.
 const DEFAULT_XDR_RW_LIMITS: xdr::Limits = xdr::Limits {
-    depth: 500,
+    depth: 1500,
     len: 32 * 1024 * 1024,
 };
 
@@ -39,9 +35,45 @@ pub struct JsonToXdrResult {
     error: *mut libc::c_char,
 }
 
+/// An `io::Write` sink that fails rather than grow past `cap` bytes.
+struct CappedBuffer {
+    buf: Vec<u8>,
+    cap: usize,
+}
+
+impl std::io::Write for CappedBuffer {
+    #[inline]
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.write_all(data)?;
+        Ok(data.len())
+    }
+
+    // serde_json writes every token with write_all, so it must stay inlined.
+    #[inline]
+    fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
+        if data.len() > self.cap - self.buf.len() {
+            return Err(over_cap(self.cap));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cold]
+fn over_cap(cap: usize) -> std::io::Error {
+    std::io::Error::other(format!(
+        "JSON output exceeds the {cap} bytes left in its budget"
+    ))
+}
+
 /// Takes in a string name of an XDR type in the Stellar Protocol (i.e. from the
 /// `stellar_xdr` crate) as well as a raw byte structure and returns a structure
-/// containing the JSON-ified string of the given structure.
+/// containing the JSON-ified string of the given structure, failing if the
+/// JSON would exceed `max_len` bytes.
 ///
 /// # Errors
 ///
@@ -63,6 +95,7 @@ pub struct JsonToXdrResult {
 pub unsafe extern "C" fn xdr_to_json(
     typename: *mut libc::c_char,
     xdr: CXDR,
+    max_len: libc::size_t,
 ) -> *mut ConversionResult {
     let result = catch_conversion_panic("xdr_to_json()", move || {
         let type_str = unsafe { from_c_string(typename) };
@@ -79,7 +112,12 @@ pub unsafe extern "C" fn xdr_to_json(
             Err(e) => panic!("couldn't read {type_str}: {e}"),
         };
 
-        Ok(serde_json::to_string(&t).unwrap())
+        let mut json = CappedBuffer {
+            buf: Vec::with_capacity(128), // as serde_json::to_string starts
+            cap: max_len,
+        };
+        serde_json::to_writer(&mut json, &t)?;
+        Ok(String::from_utf8(json.buf)?)
     });
 
     let (json, error) = match result {
@@ -124,7 +162,7 @@ pub unsafe extern "C" fn free_conversion_result(ptr: *mut ConversionResult) {
 /// panicking because this function parses user-supplied values. Inputs over
 /// the 32 MiB limit are rejected before parsing (the Go wrapper enforces the
 /// same bound first; this check covers direct FFI callers), and
-/// `serde_json`'s recursion limit caps container nesting well below the 500
+/// `serde_json`'s recursion limit caps container nesting well below the 1500
 /// levels the XDR read direction allows (the Go tests pin that boundary).
 ///
 /// # Safety
@@ -242,5 +280,37 @@ fn catch_conversion_panic<T>(label: &str, op: impl FnOnce() -> Result<T>) -> Res
         }
         // See https://docs.rs/anyhow/latest/anyhow/struct.Error.html#display-representations
         Ok(r) => r.map_err(|e| format!("{e:#}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::{CStr, CString};
+    use xdr::WriteXdr;
+
+    #[test]
+    fn json_output_is_capped() {
+        let val = xdr::ScVal::Bytes(xdr::ScBytes(vec![1; 64].try_into().unwrap()));
+        let len = serde_json::to_vec(&val).unwrap().len();
+        let bytes = val.to_xdr(xdr::Limits::none()).unwrap();
+        let typename = CString::new("ScVal").unwrap();
+        let error = |max_len| unsafe {
+            let result = xdr_to_json(
+                typename.as_ptr().cast_mut(),
+                CXDR {
+                    xdr: bytes.as_ptr().cast_mut(),
+                    len: bytes.len(),
+                },
+                max_len,
+            );
+            let error = CStr::from_ptr((*result).error)
+                .to_string_lossy()
+                .into_owned();
+            free_conversion_result(result);
+            error
+        };
+        assert_eq!(error(len), "");
+        assert!(error(len - 1).contains("exceeds"));
     }
 }

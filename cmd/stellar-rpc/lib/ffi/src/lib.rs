@@ -1,5 +1,7 @@
 extern crate libc;
 
+pub mod memory;
+
 use std::ffi::{CStr, CString};
 use std::ptr::null_mut;
 use std::slice;

@@ -62,6 +62,10 @@ Every TOML leaf is also settable from the command line:
 | `max_concurrent_requests` | uint | `5000` | HTTP-layer gate: bounds total in-flight requests across ALL methods, in addition to per-method limits. |
 | `max_request_execution_duration` | duration | `"25s"` | HTTP-layer global timeout. |
 | `request_execution_warning_threshold` | duration | `"5s"` | Slower requests log a warning. |
+| `max_request_batch_size` | uint | `10` | Most calls in one JSON-RPC batch; a larger batch gets one error and none of its calls run. |
+| `max_json_conversion_bytes` | uint | `268435456` (256 MiB) | Most JSON one XDR value may convert to with `xdrFormat: "json"`; a larger value fails the request. |
+| `max_response_bytes` | uint | `0` | Most XDR or JSON one response may carry; `0` = no limit. getLedgerEntries fails a larger response; getLedgers, getTransactions, getEvents and queryEvents end the page early. |
+| `max_total_response_bytes` | uint | `4294967296` (4 GiB) | Most bytes all responses may hold together before they are written; while they do, a response over 4 KiB fails. `0` = no limit; otherwise at least `max_response_bytes` and `max_json_conversion_bytes`. |
 
 **[service.fee_stats]** — sizes (in ledgers, 1..1000) of the in-memory fee windows behind getFeeStats; they are fed by live ingestion (#881), and size ingestion-time memory rather than request handling, hence not method config:
 
@@ -82,9 +86,10 @@ Every TOML leaf is also settable from the command line:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `worker_count` | uint | `NumCPU` | Concurrent preflights; >= 1. |
-| `worker_queue_size` | uint | `NumCPU` | Requests that may wait for a free worker; >= 1. |
-| `enable_debug` | bool | `true` | Detailed diagnostics in preflight errors; not advised in production. |
+| `worker_count` | uint | `GOMAXPROCS` | Concurrent preflights; >= 1. |
+| `worker_queue_size` | uint | `GOMAXPROCS` | Requests that may wait for a free worker; >= 1. |
+| `simulation_memory_limit` | uint | `0` | Most heap memory, in bytes, the simulation library may hold in a worker; 0 means 8 times the network's per-transaction memory limit, and any other value must be at least 16000000. Plan for about this limit + 128 MiB per worker. |
+| `enable_debug` | bool | `true` | Diagnostic events in simulateTransaction responses. |
 
 **[retention]** — the two inputs to the retention floor; the effective floor is the higher of the two:
 
@@ -139,7 +144,7 @@ Every TOML leaf is also settable from the command line:
 | `core_url` | string | `http://localhost:{core_http_port}` | Where transactions are submitted; set it only if core's admin server is not on localhost. |
 | `core_request_timeout` | duration | `"2s"` | Timeout for requests to either core server. |
 | `core_http_query_port` | uint | `11628` | Core's query port, serving ledger-entry reads for getLedgerEntries and preflight. |
-| `core_http_query_thread_pool_size` | uint | `NumCPU` | Threads core's query server uses. |
+| `core_http_query_thread_pool_size` | uint | `GOMAXPROCS` | Threads core's query server uses. |
 | `core_http_query_snapshot_ledgers` | uint | `4` | Recent ledgers core's query server keeps snapshots of. |
 
 - The `core_*` keys are written into the **live** ingestion core's config only. A no-lake backfill runs one bounded-replay core per chunk in parallel, so fixed ports there would collide; nothing queries a backfill core.
@@ -1054,7 +1059,7 @@ Every durable byte the daemon writes belongs to a storage format, and the policy
 
 **Roll-forward-only.** A release that changes any storage format, adds a catalog key family, or changes a value form cannot be rolled back past: the older binary refuses the tree, and the remedy is redeploying the newer binary. Release notes for a format-touching release must say so.
 
-**Where format identity lives.** The catalog value that makes an artifact visible also names its format: the planned grammar widens `"frozen"` to `"frozen@id"`, with a bare value meaning format 1 forever. Release 1 writes only bare values, so the grammar ships with the first bump. The grammar applies to the three state families only, never to `config:*` or `meta/*` values (the secret's random bytes can contain `@`). The files themselves stay self-describing as witnesses: the packfile trailer carries a container version and a per-store `Format` id, the streamhash files carry their own header version, and every app-data blob leads with its own version byte. Two extension rules coexist and are both deliberate: the `index.pack` build stamp ignores trailing bytes, so a later version can append fields without a version bump, while the ledger app data and the txhash `.idx` metadata require their exact length, so any growth is a version bump. A change to the term schema or the indexed-field set ships as a new events format id, never as a stamp-only bump: nothing ties the stamp to the trailer's format id, and a stamp-only bump would leave every chunk `frozen` in the catalog with an index that fails on every filtered lookup.
+**Where format identity lives.** The catalog value that makes an artifact visible also names its format: the planned grammar widens `"frozen"` to `"frozen@id"`, with a bare value meaning format 1 forever. Release 1 writes only bare values, so the grammar ships with the first bump. The grammar applies to the three state families only, never to `config:*` or `meta/*` values (the secret's random bytes can contain `@`). The files themselves stay self-describing as witnesses: the packfile trailer carries a container version and a per-store `Format` id, the streamhash files carry their own header version, and every app-data blob leads with its own version byte. The ledger app data, the txhash `.idx` metadata and the `index.pack` app data (stamp version `0x01`, slab count, split-term rows) require their exact length, so any growth is a version bump. A change to the term schema or the indexed-field set ships as a new events format id, never as a stamp-only bump: nothing ties the stamp to the trailer's format id, and a stamp-only bump would leave every chunk `frozen` in the catalog with an index that fails on every filtered lookup.
 
 **The bump razor.** Any reader-visible change to a family's bytes or semantics is a new format id. Two non-obvious corollaries. A new indexed term family bumps the hot format too, or the live chunk's already-ingested half would silently lack the new terms. A dependency bump that changes RocksDB's on-disk behavior is format-touching, which is why the block-based-table `format_version` is pinned in code. The term-key derivation and blinding are pinned by byte-level golden fixtures, so an unbumped change to them fails CI rather than silently forking a format id.
 

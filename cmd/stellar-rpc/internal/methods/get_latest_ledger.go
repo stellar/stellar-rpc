@@ -38,11 +38,18 @@ func NewGetLatestLedgerHandler(ledgerReader store.LedgerReader) jrpc2.Handler {
 // renderLatestLedger renders ledger seq's getLatestLedger response as final JSON.
 func renderLatestLedger(ctx context.Context, s store.LedgerScanner, seq uint32) (json.RawMessage, error) {
 	var response protocol.GetLatestLedgerResponse
-	var parseErr error
+	var parseErr, poolErr error
 	found, err := store.WithLedgerRaw(ctx, s, seq, func(raw []byte) error {
+		// Base64 is held until the bridge writes it: take its bytes before encoding.
+		if poolErr = TakeResponseBytes(ctx, base64.StdEncoding.EncodedLen(len(raw))); poolErr != nil {
+			return poolErr
+		}
 		response, parseErr = latestLedgerResponse(xdr.LedgerCloseMetaView(raw), seq)
 		return parseErr
 	})
+	if poolErr != nil {
+		return nil, poolErr
+	}
 	if err != nil || !found {
 		var msg string
 		switch {
