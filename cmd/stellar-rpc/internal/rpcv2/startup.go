@@ -18,6 +18,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/lifecycle"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
@@ -122,10 +123,13 @@ func run(ctx context.Context, cfg StartConfig) error {
 		return fmt.Errorf("startup open ingestion stream: %w", err)
 	}
 
-	// The lifecycle goroutine runs one tick per boundary signal; ingestion Publishes
-	// the just-completed chunk id into a latest-cell. It shares NO in-memory state
-	// with ingestion — all derived from durable keys.
+	// The lifecycle goroutine runs one tick per boundary signal, which ingestion
+	// sends at each chunk boundary, and its index builds wait at the gate while
+	// ingestion ingests a ledger. Neither carries data: the lifecycle derives its
+	// state from durable keys.
 	boundary := lifecycle.NewBoundarySignal()
+	gate := new(ingest.Gate)
+	cfg.Exec.Build.Yield = gate.Wait
 
 	// Seed the first tick so it fires at once; the tick derives its anchor from
 	// the catalog and no-ops on a young network where no chunk is complete. This
@@ -187,6 +191,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 			Sink:       cfg.Exec.Process.Sink,
 			Registry:   registry,
 			FeeWindows: cfg.FeeWindows,
+			Gate:       gate,
 		})
 		if err == nil {
 			// WithContext cancels gctx (unblocking the lifecycle sibling in g.Wait)
