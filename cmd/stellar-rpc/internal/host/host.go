@@ -13,6 +13,11 @@ import (
 // TODO: deprecate and rename to stellar_rpc
 const PrometheusNamespace = "soroban_rpc"
 
+// StellarPrometheusNamespace is the namespace for new metrics. The metrics
+// under PrometheusNamespace keep that name, which operators' dashboards
+// use, until they move here too.
+const StellarPrometheusNamespace = "stellar_rpc"
+
 // Daemon defines the interface that the Daemon would be implementing.
 // this would be useful for decoupling purposes, allowing to test components without
 // the actual daemon.

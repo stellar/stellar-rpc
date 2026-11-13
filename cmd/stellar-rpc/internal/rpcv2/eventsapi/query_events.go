@@ -51,13 +51,17 @@ type QueryEventsLimits struct {
 
 // NewQueryEventsHandler builds the queryEvents handler. It decodes the params itself,
 // not through methods.NewHandler, so an unknown field fails.
-func NewQueryEventsHandler(limits QueryEventsLimits, logger *supportlog.Entry) jrpc2.Handler {
+func NewQueryEventsHandler(
+	limits QueryEventsLimits, metrics *Metrics, logger *supportlog.Entry,
+) jrpc2.Handler {
 	return func(ctx context.Context, r *jrpc2.Request) (any, error) {
 		req, err := decodeRequest(r.ParamString(), limits.MaxLimit)
 		if err != nil {
+			// Every decode failure is an invalid_params error.
+			metrics.countRejection(protocol.ErrorReasonInvalidParams)
 			return nil, err
 		}
-		return queryEvents(ctx, limits, logger, req)
+		return queryEvents(ctx, limits, metrics, logger, req)
 	}
 }
 
@@ -133,23 +137,23 @@ func invalidParams(message string) error {
 
 // queryEvents classifies every failure in one place.
 func queryEvents(
-	ctx context.Context, limits QueryEventsLimits, logger *supportlog.Entry,
+	ctx context.Context, limits QueryEventsLimits, metrics *Metrics, logger *supportlog.Entry,
 	req *protocol.QueryEventsRequest,
 ) (protocol.QueryEventsResponse, error) {
 	view, err := query.ViewFrom(ctx)
 	if err != nil {
-		return protocol.QueryEventsResponse{}, responseError(err, 0, 0, logger)
+		return protocol.QueryEventsResponse{}, responseError(err, 0, 0, metrics, logger)
 	}
 	oldest, latest := view.OldestLedger(), view.LatestLedger()
-	resp, err := serve(ctx, view, limits, req, oldest, latest)
+	resp, err := serve(ctx, view, limits, metrics, req, oldest, latest)
 	if err != nil {
-		return protocol.QueryEventsResponse{}, responseError(err, oldest, latest, logger)
+		return protocol.QueryEventsResponse{}, responseError(err, oldest, latest, metrics, logger)
 	}
 	return resp, nil
 }
 
 func serve(
-	ctx context.Context, view *query.ReadView, limits QueryEventsLimits,
+	ctx context.Context, view *query.ReadView, limits QueryEventsLimits, metrics *Metrics,
 	req *protocol.QueryEventsRequest, oldest, latest uint32,
 ) (protocol.QueryEventsResponse, error) {
 	cursor, limit, err := requestCursor(limits, req, oldest, latest)
@@ -158,33 +162,62 @@ func serve(
 	}
 	// Checked on the cursor path too: a cursor carries the filters and is
 	// not signed, so a hand-built one could ask for any number of lookups.
-	if err := checkTermBudget(cursor.Scope.Filters, limits.TermBudget); err != nil {
+	// Sampled before the budget check, so the metric has the requests
+	// that the check rejects. A cursor continues a query, so only the
+	// first request is a sample.
+	terms := event.CountDistinctTerms(cursor.Scope.Filters)
+	if req.Cursor == "" {
+		metrics.observeDistinctTerms(terms)
+	}
+	if err := checkTermBudget(terms, limits.TermBudget); err != nil {
 		return protocol.QueryEventsResponse{}, err
 	}
 	// A range with no ledgers in it is finished before it starts. Only a
 	// below-genesis max produces one; the pager would call it inverted.
+	var page *query.EventPage
+	events := []protocol.EventInfo{}
 	if s := &cursor.Scope; s.MaxLedger != nil && s.MinLedger > *s.MaxLedger {
-		return response(&query.EventPage{Next: cursor, Status: query.ScanComplete}, []protocol.EventInfo{}, oldest, latest)
+		page = &query.EventPage{Next: cursor, Status: query.ScanComplete}
+	} else if page, events, err = scanPage(ctx, view, limits, req.Format, cursor, limit); err != nil {
+		return protocol.QueryEventsResponse{}, err
 	}
+	resp, err := response(page, events, oldest, latest)
+	if err != nil {
+		return protocol.QueryEventsResponse{}, err
+	}
+	// The duration limiter answers the client at its limit and leaves this
+	// handler running. A page that finishes after that was never received.
+	if ctx.Err() == nil {
+		metrics.observePage(page)
+	}
+	return resp, nil
+}
+
+// scanPage walks one page and converts its events. It returns the page
+// that the response is built from.
+func scanPage(
+	ctx context.Context, view *query.ReadView, limits QueryEventsLimits, format string,
+	cursor query.EventCursor, limit int,
+) (*query.EventPage, []protocol.EventInfo, error) {
 	page, err := view.QueryEvents(ctx, cursor, limit)
 	if err != nil {
-		return protocol.QueryEventsResponse{}, err
+		return nil, nil, err
 	}
-	events, err := eventInfos(ctx, page.Events, req.Format, limits.MaxResponseBytes)
+	events, err := eventInfos(ctx, page.Events, format, limits.MaxResponseBytes)
 	if err != nil {
-		return protocol.QueryEventsResponse{}, err
+		return nil, nil, err
 	}
 	if len(events) < len(page.Events) {
 		// Not every event fit, so mint the cursor from a walk limited to those that did.
 		if page, err = view.QueryEvents(ctx, cursor, len(events)); err != nil {
-			return protocol.QueryEventsResponse{}, err
+			return nil, nil, err
 		}
 		if len(page.Events) != len(events) {
-			return protocol.QueryEventsResponse{}, fmt.Errorf("rpcv2: second walk served %d events, want %d",
+			return nil, nil, fmt.Errorf("rpcv2: second walk served %d events, want %d",
 				len(page.Events), len(events))
 		}
 	}
-	return response(page, events, oldest, latest)
+	return page, events, nil
 }
 
 // requestCursor turns either request shape into the cursor the pager
@@ -254,8 +287,8 @@ func validateCursorFilters(filters []event.Filter) error {
 
 // checkTermBudget reports both numbers on rejection. A client needs them
 // to see how far over it is and split the query.
-func checkTermBudget(filters []event.Filter, budget uint32) error {
-	used := uint32(event.CountDistinctTerms(filters)) //nolint:gosec // a term count cannot be negative
+func checkTermBudget(terms int, budget uint32) error {
+	used := uint32(terms) //nolint:gosec // a term count cannot be negative
 	if used <= budget {
 		return nil
 	}
@@ -311,14 +344,23 @@ func responseScannedLedger(next *query.EventCursor) uint32 {
 
 // responseError maps the pager's and the SDK's errors onto the three
 // machine-readable reasons. Anything else becomes an internal error; jrpc2
-// would otherwise code a plain error as SystemError.
-func responseError(err error, oldest, latest uint32, logger *supportlog.Entry) error {
+// would otherwise code a plain error as SystemError. It also counts each
+// rejection, since this is where a failure gets its reason.
+func responseError(err error, oldest, latest uint32, metrics *Metrics, logger *supportlog.Entry) error {
 	var invalid *protocol.InvalidParamsError
 	if errors.As(err, &invalid) {
+		// Only a term-budget rejection carries the term count. On the
+		// wire it is an invalid_params error like the others.
+		reason := protocol.ErrorReasonInvalidParams
+		if invalid.Data.TermsUsed != 0 {
+			reason = reasonTermBudgetExceeded
+		}
+		metrics.countRejection(reason)
 		return jrpcError(invalid.Message, invalid.Data)
 	}
 	var outOfRange *query.RangeError
 	if errors.As(err, &outOfRange) {
+		metrics.countRejection(protocol.ErrorReasonLedgerOutOfRange)
 		return jrpcError(clientMessage(err), protocol.LedgerOutOfRangeErrorData{
 			MissingLedger: outOfRange.Requested,
 			OldestLedger:  outOfRange.Oldest,
@@ -329,12 +371,14 @@ func responseError(err error, oldest, latest uint32, logger *supportlog.Entry) e
 	case errors.Is(err, query.ErrCursorMalformed),
 		errors.Is(err, query.ErrCursorUnknownVersion),
 		errors.Is(err, query.ErrPositionMismatch):
+		metrics.countRejection(protocol.ErrorReasonCursorMalformed)
 		return jrpcError(clientMessage(err), protocol.CursorMalformedErrorData{
 			OldestLedger: oldest,
 			LatestLedger: latest,
 		})
 	case errors.Is(err, query.ErrInvalidLimit),
 		errors.Is(err, errJSONInputFormatUnsupported):
+		metrics.countRejection(protocol.ErrorReasonInvalidParams)
 		return invalidParams(clientMessage(err))
 	}
 	// Cancellation and the deadline pass through. jrpc2 codes them
