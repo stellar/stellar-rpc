@@ -1,6 +1,7 @@
 package config
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"reflect"
@@ -31,7 +32,7 @@ func (options Options) Validate() error {
 				missingOptions = append(missingOptions, missingOptionErr)
 				continue
 			}
-			return fmt.Errorf("invalid config value for %s: %w", option.Name, err)
+			return fmt.Errorf("invalid config value for %s: %w", cmp.Or(option.Name, option.TomlKey), err)
 		}
 	}
 	if len(missingOptions) > 0 {
