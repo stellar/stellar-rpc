@@ -131,13 +131,13 @@ destination_bucket_path = "bucket/ledgers"
 			name:    "explicit zero workers",
 			toml:    datastore + section + "num_workers = 0\n",
 			want:    ledgerbackend.BufferedStorageBackendConfig{BufferSize: 100},
-			wantErr: "invalid [buffered_storage_backend_config]: number of workers must be > 0",
+			wantErr: "invalid config value for buffered_storage_backend_config: number of workers must be > 0",
 		},
 		{
 			name:    "more workers than buffer size",
 			toml:    datastore + section + "buffer_size = 5\n",
 			want:    ledgerbackend.BufferedStorageBackendConfig{BufferSize: 5, NumWorkers: 10},
-			wantErr: "invalid [buffered_storage_backend_config]: number of workers must be <= BufferSize",
+			wantErr: "invalid config value for buffered_storage_backend_config: number of workers must be <= BufferSize",
 		},
 		{
 			name: "datastore serving off",
