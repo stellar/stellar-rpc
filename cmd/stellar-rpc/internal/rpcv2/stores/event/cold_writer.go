@@ -44,7 +44,7 @@ import (
 //     processes LCMs. Hand it to Finish.
 //
 // ColdWriter doesn't produce the index files (index.pack +
-// index.hash). Those come from WriteColdIndex below.
+// index.hash). Those come from ColdIndexBuilder (cold_index.go).
 //
 // Concurrency: ColdWriter is not safe for concurrent use. Append,
 // Finish, and Close must be called from a single goroutine (or with
