@@ -170,18 +170,6 @@ func (cfg *Config) SetValues(lookupEnv func(string) (string, bool)) error {
 		//nolint:gosec // runtime.GOMAXPROCS(0) is always positive and realistically well below uint limits
 		cfg.PreflightWorkerQueueSize = max(uint(runtime.GOMAXPROCS(0)), cfg.MaxRequestBatchSize)
 	}
-
-	// [buffered_storage_backend_config] has no DefaultValue, so a config that
-	// omits the section, or some of its keys, gets the defaults here. The
-	// backend needs at least as many buffer slots as workers.
-	bsb := &cfg.BufferedStorageBackendConfig
-	defaults := defaultBufferedStorageBackendConfig()
-	if bsb.BufferSize == 0 {
-		bsb.BufferSize = defaults.BufferSize
-	}
-	if bsb.NumWorkers == 0 {
-		bsb.NumWorkers = min(defaults.NumWorkers, bsb.BufferSize)
-	}
 	return nil
 }
 
