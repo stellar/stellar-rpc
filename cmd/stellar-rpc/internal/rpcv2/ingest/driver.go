@@ -56,6 +56,9 @@ func drain(ledgers iter.Seq2[[]byte, error], chunkID chunk.ID, cc *coldChunk) er
 type ColdDirs struct {
 	LedgerPack string
 	TxhashBin  string
+	// TxhashRuns is the directory the txhash writer spills sorted runs into
+	// and removes.
+	TxhashRuns string
 	Events     event.ColdDirs
 }
 
