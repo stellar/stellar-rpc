@@ -34,10 +34,7 @@ import (
 // read-back assertions (closed via t.Cleanup).
 func openCatalogAt(t *testing.T, dataDir string) *catalog.Catalog {
 	t.Helper()
-	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	require.NoError(t, err)
-	cat, err := catalog.Open(
-		filepath.Join(dataDir, "catalog", "rocksdb"), geometry.NewLayout(dataDir), txLayout, silentLogger())
+	cat, err := catalog.Open(filepath.Join(dataDir, "catalog", "rocksdb"), geometry.NewLayout(dataDir), silentLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cat.Close() })
 	return cat

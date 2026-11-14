@@ -119,7 +119,7 @@ A `.bin` is kept while it is still a rebuild input — every rebuild re-merges t
 
 ### 6.2 The per-window index: `.idx`
 
-The `.idx` lives at `txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx`, tracked by the catalog key `index:{window:08d}:{lo:08d}:{hi:08d}`. There is one minimal-perfect-hash file per **coverage** — a coverage being the chunk range `[lo, hi]` the file actually hashes. Streamhash's `SortedBuilder` builds it from the k-way merge of `.bin[lo..hi]`. The index carries two per-entry fields:
+The `.idx` lives at `hot/txhash-index-{window:08d}/{lo:08d}-{hi:08d}.idx` while its window is still being rebuilt, and at `txhash/index/{window:08d}/{lo:08d}-{hi:08d}.idx` once the window is complete, tracked by the catalog key `index:{window:08d}:{lo:08d}:{hi:08d}`. There is one minimal-perfect-hash file per **coverage** — a coverage being the chunk range `[lo, hi]` the file actually hashes. Streamhash's `SortedBuilder` builds it from the k-way merge of `.bin[lo..hi]`. The index carries two per-entry fields:
 
 - **Payload (3 bytes): the answer the hash maps to — a ledger seq.** It is stored as an offset from the coverage's first ledger (`MinLedger = chunkFirstLedger(lo)`) rather than as a full seq, to save bytes. A window spans 10,000,000 ledgers, so the largest offset (`10_000_000 - 1`) fits in a 24-bit field. Streamhash writes the payload width into the index file's header; the coverage's ledger range `[MinLedger, MaxLedger]`, which streamhash does not model itself, rides in the file's user-metadata slot behind a leading version byte, as two 4-byte little-endian values followed by the 16-byte routing secret. All of it is read back when the index is opened, so there is no separate sidecar file.
 - **Fingerprint (1 byte, fixed by the format): screens out wrong hashes** before the expensive fetch-and-verify. One byte rejects ~255/256 of foreign hashes per window probe (§8.2), costing one byte per transaction.
@@ -137,7 +137,7 @@ A window has exactly **one live index** at a time, and a lookup resolves "the wi
 
 So the index hashes exactly the transactions in chunks `[lo, hi]`. Chunks below `lo` are out of scope — cut off by the floor. Chunks above `hi` aren't folded in yet, and are served from their hot tables until the next rebuild advances `hi`.
 
-**Example** (1,000 chunks per window): the tip is in chunk 5350, so window 5 (chunks 5000–5999) is the current window, and the floor is at chunk 5100. The live index covers chunks 5100–5349, in the file `txhash/index/00000005/00005100-00005349.idx`; chunk 5350 is still in its hot table, and chunks 5000–5099 are below the floor. At the next boundary the index is rebuilt to cover 5100–5350, and the old file is deleted.
+**Example** (1,000 chunks per window): the tip is in chunk 5350, so window 5 (chunks 5000–5999) is the current window, and the floor is at chunk 5100. The live index covers chunks 5100–5349, in the file `hot/txhash-index-00000005/00005100-00005349.idx`; chunk 5350 is still in its hot table, and chunks 5000–5099 are below the floor. At the next boundary the index is rebuilt to cover 5100–5350, and the old file is deleted.
 
 ## 7. The rolling rebuild
 
@@ -145,7 +145,7 @@ So the index hashes exactly the transactions in chunks `[lo, hi]`. Chunks below 
 
 The current window's index is **rebuilt from scratch on every chunk boundary**, to fold in the chunk that just froze; it grows until the window is complete. In steady state only the current window is rebuilt; startup backfill also rebuilds a past window's non-terminal index after downtime crosses its boundary, and retention widening rebuilds a finalized one (§7.3). Outside those, a finalized window's index never changes.
 
-This is affordable because the rebuild is cheap relative to its cadence: a full-window build takes ≈1 minute, against a boundary only every ~14 hours at mainnet rates (Part 4). Rebuilding the whole index each time keeps every `.idx` on disk a complete index for its coverage, with no half-updated state.
+This is affordable because the rebuild is cheap relative to its cadence: a full-window build takes about a minute when it reads its inputs from local NVMe, and about 8 minutes from a gp3 volume at the baseline 125 MiB/s (§7.4), against a boundary only every ~14 hours at mainnet rates (Part 4). Rebuilding the whole index each time keeps every `.idx` on disk a complete index for its coverage, with no half-updated state.
 
 ### 7.2 The rebuild
 
@@ -175,7 +175,7 @@ When a window's last chunk is folded in, its index is final: it covers the windo
 
 A rebuild writes a whole new index file before the old one is removed, so a window directory briefly holds ~2× the index size (~25 GB at the end of a dense window). The window's `.bin` files are also all on disk together, since the rebuild merges them at once — about 60 GB for a dense window. Both are transient. During a multi-window catch-up (a first start, or backfill after long downtime) the executor does not serialize windows, so several windows' `.bin` sets can be on disk at once: the transient scales with the backlog, up to every window in the plan — size a full-history first start for that, not for one window.
 
-The window-end rebuild writes ~12.5 GB in ~1 minute (~200 MB/s burst) — trivial on instance NVMe, but worth provisioning for on throughput-capped volumes like EBS gp3.
+Every rebuild reads all of its window's `.bin` files, so where they live matters. In a deployment with a local NVMe disk and EBS, they go on an EBS volume of their own. On the local disk they would be lost with it, and regenerating a window's `.bin` files from the ledger packs takes hours. On the volume that serves cold queries, a rebuild reading at the volume's limit would make every query read wait behind its own reads. On a volume of their own, that volume's throughput setting is what paces the rebuild: reading a dense window's ~60 GB takes about 8 minutes at the gp3 baseline of 125 MiB/s. The window-end rebuild also writes its ~12.5 GB index to the volume that holds terminal indexes.
 
 ## 8. Query path
 
