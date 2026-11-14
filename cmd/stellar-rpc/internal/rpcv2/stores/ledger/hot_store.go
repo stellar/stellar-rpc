@@ -9,6 +9,7 @@ import (
 	"iter"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
@@ -36,21 +37,26 @@ type Entry struct {
 // before freezing; it does not itself range-check writes (the driver's drain loop
 // already validates every sequence against the chunk).
 //
-// Concurrency: all methods are safe for concurrent use, including use alongside
-// the caller-owned rocksdb.Store.Close. A read/write racing Close either completes
-// first or observes the closed store and returns stores.ErrStoreClosed. HotStore
-// adds no unguarded state of its own — the compressor pool and decompressor are
-// both concurrent-safe.
+// Concurrency: the read methods are safe for concurrent use, including use
+// alongside the caller-owned rocksdb.Store.Close. A read/write racing Close either
+// completes first or observes the closed store and returns stores.ErrStoreClosed.
+// The writes compress one ledger at a time: StartCompress panics while another
+// compression is in flight.
 type HotStore struct {
 	store *rocksdb.Store
 	dec   *zstd.Decompressor
-	// compPool — per-store pool of zstd.Compressors; each concurrent
-	// AddLedgerToBatch borrows one for its Encode call.
-	compPool sync.Pool
+	// comp compresses every ledger into buf, which keeps the largest
+	// compressed ledger's capacity for the next one.
+	comp     *zstd.Compressor
+	buf      []byte
+	inFlight atomic.Bool
 	// scratch — decode buffers WithLedger lends. Pooled as *[]byte so a buffer
 	// the decode had to grow goes back in place of the one that was lent.
 	scratch sync.Pool
 }
+
+// zstdWorkers is how many libzstd threads compress each ledger.
+const zstdWorkers = 2
 
 // maxPooledLedgerBytes is the largest decode buffer this store keeps. Capacity
 // only ratchets upward and sync.Pool accepts whatever it is given, so without a
@@ -66,30 +72,79 @@ func NewWithStore(store *rocksdb.Store) *HotStore {
 	return &HotStore{
 		store: store,
 		dec:   zstd.NewDecompressor(),
-		compPool: sync.Pool{
-			New: func() any { return zstd.NewCompressor() },
-		},
+		comp:  zstd.NewCompressor(zstd.WithWorkers(zstdWorkers)),
 		scratch: sync.Pool{
 			New: func() any { return new([]byte) },
 		},
 	}
 }
 
-// AddLedgerToBatch compresses one ledger and queues its Put into b on LedgersCF
-// — the building block hotchunk uses to fold the ledger write into the one
-// shared per-ledger WriteBatch (decision (a)). Does not commit (caller owns the
-// batch). Compresses into a fresh buffer BatchWriter.Put copies, so e.Bytes need
-// not outlive this call. The caller runs inside Store.Batch, whose lifecycle
-// RLock + checkOpen is the authoritative closed-store guard, so this adds none.
-func (h *HotStore) AddLedgerToBatch(b *rocksdb.BatchWriter, e Entry) error {
-	c, _ := h.compPool.Get().(*zstd.Compressor)
-	defer h.compPool.Put(c)
-	compressed, err := c.Encode(nil, e.Bytes)
-	if err != nil {
-		return err
+// PendingCompression is a ledger StartCompress is compressing in the
+// background. AddPendingToBatch or Discard must join it, and both block until
+// the compression is done with the ledger's bytes. Discard after
+// AddPendingToBatch does nothing, so it can be deferred.
+type PendingCompression struct {
+	h          *HotStore
+	seq        uint32
+	done       chan struct{}
+	compressed []byte
+	err        error
+	joined     bool
+}
+
+// StartCompress compresses e.Bytes on its own goroutine, so the caller can
+// read the ledger meanwhile. e.Bytes must stay valid until the pending is
+// joined.
+func (h *HotStore) StartCompress(e Entry) *PendingCompression {
+	if !h.inFlight.CompareAndSwap(false, true) {
+		panic("ledger: StartCompress while another compression is in flight")
 	}
-	b.Put(LedgersCF, rocksdb.EncodeUint32(e.Seq), compressed)
+	p := &PendingCompression{h: h, seq: e.Seq, done: make(chan struct{})}
+	dst := h.buf[:0]
+	go func() {
+		defer close(p.done)
+		p.compressed, p.err = h.comp.Encode(dst, e.Bytes)
+	}()
+	return p
+}
+
+// AddPendingToBatch joins p and queues its compressed ledger into b on
+// LedgersCF, the ledger's part of the one shared per-ledger WriteBatch
+// (decision (a)). Does not commit (caller owns the batch). The caller runs
+// inside Store.Batch, whose lifecycle RLock + checkOpen is the authoritative
+// closed-store guard, so this adds none.
+func (h *HotStore) AddPendingToBatch(b *rocksdb.BatchWriter, p *PendingCompression) error {
+	<-p.done
+	defer p.release()
+	if p.err != nil {
+		return p.err
+	}
+	b.Put(LedgersCF, rocksdb.EncodeUint32(p.seq), p.compressed)
 	return nil
+}
+
+// Discard joins p unless AddPendingToBatch has, dropping its result.
+func (p *PendingCompression) Discard() {
+	if !p.joined {
+		<-p.done
+		p.release()
+	}
+}
+
+// release returns the buffer, which BatchWriter.Put has copied, for the next
+// ledger.
+func (p *PendingCompression) release() {
+	p.joined = true
+	if p.err == nil {
+		p.h.buf = p.compressed[:cap(p.compressed)]
+	}
+	p.h.inFlight.Store(false)
+}
+
+// AddLedgerToBatch compresses one ledger and queues its Put into b, as
+// StartCompress and AddPendingToBatch do.
+func (h *HotStore) AddLedgerToBatch(b *rocksdb.BatchWriter, e Entry) error {
+	return h.AddPendingToBatch(b, h.StartCompress(e))
 }
 
 // WithLedger calls fn with seq's decoded bytes; see query.LedgerReader for the

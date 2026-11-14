@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -326,13 +327,14 @@ func TestHotStore_ConcurrentOpsAndCloseRaceFree(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var stop atomic.Bool
-	const workers = 4
-	for w := range workers {
-		wg.Go(func() {
-			for i := uint32(0); !stop.Load(); i++ {
-				_ = addLedgers(h, Entry{Seq: uint32(w)*1_000_000 + i, Bytes: []byte("v")})
-			}
-		})
+	// One writer, as the writes require; the reads are concurrent.
+	wg.Go(func() {
+		for i := uint32(0); !stop.Load(); i++ {
+			_ = addLedgers(h, Entry{Seq: 1_000_000 + i, Bytes: []byte("v")})
+		}
+	})
+	const readers = 4
+	for range readers {
 		wg.Go(func() {
 			for i := uint32(0); !stop.Load(); i++ {
 				_, _ = readLedgerRaw(h, i%50)
@@ -543,4 +545,32 @@ func readLedgerRaw(r interface {
 		return nil
 	})
 	return out, err
+}
+
+// A second compression in flight panics; joining the first releases the
+// store for the next.
+func TestStartCompress_OneInFlight(t *testing.T) {
+	h := NewWithStore(nil) // compressing never touches the store
+	first := h.StartCompress(Entry{Seq: 1, Bytes: []byte("x")})
+	require.Panics(t, func() { h.StartCompress(Entry{Seq: 2, Bytes: []byte("x")}) })
+	first.Discard()
+	h.StartCompress(Entry{Seq: 3, Bytes: []byte("x")}).Discard()
+}
+
+// Every ledger is compressed into the one buffer the store keeps, across
+// garbage collections.
+func TestStartCompress_ReusesItsBuffer(t *testing.T) {
+	h := NewWithStore(nil)
+	payload := bytes.Repeat([]byte("ledger bytes "), 1<<16)
+	h.StartCompress(Entry{Seq: 1, Bytes: payload}).Discard()
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for i := range uint32(20) {
+		runtime.GC()
+		h.StartCompress(Entry{Seq: i + 2, Bytes: payload}).Discard()
+	}
+	runtime.ReadMemStats(&after)
+	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(len(payload)))
 }
