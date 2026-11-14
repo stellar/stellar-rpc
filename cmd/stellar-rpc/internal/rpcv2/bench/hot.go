@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"path/filepath"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -14,6 +17,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
 )
 
 // hotOptions configures one hot-ingest benchmark run.
@@ -50,6 +54,13 @@ type hotOptions struct {
 
 	// OutDir receives the CSV report.
 	OutDir string
+
+	// Trace writes a per-ledger trace to OutDir/trace.csv.
+	Trace bool
+
+	// Txindex, when its BinDir is set, rebuilds a tx-hash window index back
+	// to back beside the ingest loop and writes OutDir/txindex.csv.
+	Txindex hotTxindexOptions
 }
 
 // validate checks the flags and chunk range before runHot touches the
@@ -79,7 +90,7 @@ func (o hotOptions) validate() error {
 	if o.CloseInterval < 0 {
 		return fmt.Errorf("--close-interval must be >= 0, got %s", o.CloseInterval)
 	}
-	return nil
+	return o.Txindex.validate()
 }
 
 // runHot times the daemon's ingestion loop over the range's ledgers into new
@@ -119,9 +130,19 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	sink := newCSVSink()
 	stream, schedule := buildHotStream(backend, first, last, opts.CloseInterval)
 	sink.schedule = schedule
+	if opts.Trace {
+		if sink.trace, err = newHotTrace(filepath.Join(opts.OutDir, traceFile)); err != nil {
+			return err
+		}
+		// A failed run keeps the rows of the ledgers it committed.
+		defer func() {
+			if cerr := sink.trace.close(); cerr != nil {
+				logger.Warnf("--trace: %v", cerr)
+			}
+		}()
+	}
 
-	start := time.Now()
-	err = rpcv2.RunBoundedIngestionLoop(ctx, rpcv2.BoundedIngestConfig{
+	wall, err := ingestRange(ctx, rpcv2.BoundedIngestConfig{
 		Stream:   stream,
 		Resume:   first,
 		Catalog:  cat,
@@ -129,7 +150,9 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		Logger:   logger,
 		Metrics:  sink,
 		Sink:     sink,
-	})
+		// The daemon's loop always holds a gate.
+		Gate: new(ingest.Gate),
+	}, opts.Txindex, opts.OutDir)
 	// The loop cannot tell a complete bounded stream from one that ran dry;
 	// the sink's last-committed gauge (set once per ingested ledger) can.
 	if err == nil && sink.lastCommittedSeq() != last {
@@ -139,7 +162,7 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		writePartialCSVs(logger, sink, opts.OutDir)
 		return err
 	}
-	sink.observe(fileDriver, driverRunWall, time.Since(start), int(last-first+1))
+	sink.observe(fileDriver, driverRunWall, wall, int(last-first+1))
 	if err := finishIngest(cat, opts.StartChunk, logger); err != nil {
 		return err
 	}
@@ -150,6 +173,36 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	}
 	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)
 	return nil
+}
+
+// ingestRange runs the bounded ingestion loop and returns its wall time. With
+// txindex.BinDir set, the txindex builds run beside the loop and txindexFile
+// is written under outDir: the build in flight when the loop returns is
+// canceled and waited for, and a failed build stops the loop and is returned.
+func ingestRange(
+	ctx context.Context, cfg rpcv2.BoundedIngestConfig, txindex hotTxindexOptions, outDir string,
+) (time.Duration, error) {
+	g, gctx := errgroup.WithContext(ctx)
+	buildCtx, stopBuilds := context.WithCancel(gctx)
+	var rows [][]string
+	if txindex.BinDir != "" {
+		g.Go(func() error {
+			var err error
+			rows, err = runTxindexBuilds(buildCtx, txindex, cfg.Logger, cfg.Gate, cfg.Metrics)
+			return err
+		})
+	}
+	start := time.Now()
+	err := rpcv2.RunBoundedIngestionLoop(gctx, cfg)
+	wall := time.Since(start)
+	stopBuilds()
+	if berr := g.Wait(); berr != nil {
+		err = berr
+	}
+	if txindex.BinDir != "" {
+		err = errors.Join(err, writeCSVTable(filepath.Join(outDir, txindexFile), txindexHeader, rows))
+	}
+	return wall, err
 }
 
 // buildHotStream wraps backend for a bounded hot run. With closeInterval == 0
