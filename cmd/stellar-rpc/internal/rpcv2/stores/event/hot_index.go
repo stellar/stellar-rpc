@@ -239,8 +239,10 @@ func sealedHotSlabs(store *rocksdb.Store) (uint32, error) {
 // seal writes one full slab into IndexCF.
 func (x *hotIndex) seal(s *hotSlab) error {
 	err := x.store.LoadSorted(IndexCF, func(yield func(key, value []byte) bool) {
+		key := hotIndexKey(s.slab, TermKey{})
 		for term, bitmap := range s.terms() {
-			if !yield(hotIndexKey(s.slab, term), bitmap) {
+			copy(key[2:], term[:])
+			if !yield(key, bitmap) {
 				return
 			}
 		}
