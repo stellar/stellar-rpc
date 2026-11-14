@@ -932,7 +932,7 @@ func sweepIndexKey(cat Catalog, key IndexKey) error {
 
 Two writer goroutines and read-only readers. The catalog partitions their domains at the **live chunk** — the highest chunk with a `hot:chunk` key:
 
-- **Ingestion** owns the live chunk: the writer of its hot DB (its ledger batches, and the events index seal it starts in the background one slab at a time; warmup on any read-write open may seal a slab a crash left unsealed), and the creator of each `hot:chunk` key (via `openHotDBForChunk` at the boundary).
+- **Ingestion** owns the live chunk. It is the writer of its hot DB: it commits each ledger's batch and seals the events index one slab at a time in the background. It also creates each `hot:chunk` key (via `openHotDBForChunk` at the boundary). Any read-write open of a hot DB can also seal a slab that a crash left unsealed.
 - **The lifecycle** owns everything below it: handed-off hot DBs (freeze + discard), all `chunk:*` and `index:*` keys, and the deletion side of `hot:chunk` keys.
 
 Their only link is the boundary notification. The handoff is by write ordering — ingestion closes the chunk and opens the next (moving the partition) *before* notifying — so the lifecycle never freezes a chunk a writer still holds. Both write the catalog at the same time but never the same key (RocksDB handles concurrent writes safely). And because the chunk ids ingestion hands over only increase, a chunk completing while a lifecycle run is already in progress just bumps the starting point of the *next* run — it can't disturb the one underway. Readers hold their own read-only handles and resolve files through keys, so writer activity never races them.

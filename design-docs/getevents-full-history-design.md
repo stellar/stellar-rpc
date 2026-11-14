@@ -144,17 +144,15 @@ The exact storage backend for hot event data is an implementation detail (TODO: 
 
 ### 8.2 Hot Index Storage
 
-The slab being filled lives in memory as an append-only posting list with per-bucket chains (a bucket is the term key's leading 16 bits); one goroutine appends and readers walk the chains without a lock. When a slab is full it is written as one sorted file of (slab ‖ term) → serialized bitmap and loaded into the index column family in the background while the next slab fills; a lookup reads a sealed slab's bitmaps from that column family. The writer waits for the previous seal before it starts the next one, so at most two slabs are in memory.
+Event IDs are cut into **slabs** of 65,536. The index handles one slab at a time.
 
-The term in each key, and so its bucket, is the routed key: the term key blinded under the chunk secret, as in the cold index (Section 9.2).
+- **Filling.** The slab receiving events lives in memory as a list of **postings** (one term on one event), appended in arrival order. Adding an event's terms is one append each, with no I/O.
+- **Sealing.** When a slab is full, its postings are grouped by term, each term's event IDs are serialized as one bitmap, and the slab is written as one sorted file of (slab ‖ term) → bitmap and loaded into the index column family. This runs in the background while the next slab fills.
+- **Bound.** The writer waits for the previous seal before starting another, so at most two slabs are in memory.
+- **Lookups.** A sealed slab is read from the column family. A slab still in memory is read without a lock: postings that share the leading 16 bits of their key form a chain, and a lookup walks one chain.
+- **Keys.** Each term is filed under its routed key, the term key blinded under the chunk secret, as in the cold index (Section 9.2).
 
-During ingestion, every ledger requires adding new event IDs to the relevant bitmaps (~4,000 adds per ledger assuming ~1,000 events with ~4 indexed fields each).
-
-If bitmaps lived on disk or in the embedded DB, each add would require deserializing the bitmap, updating it, and re-serializing it back. For dense terms like "transfer" that can grow to millions of entries, this serialize/deserialize cycle on every ledger would be far too slow.
-
-Each add is one append to the live slab; a term's bitmap is serialized once, when its slab is sealed.
-
-Sealed slabs are durable in the index column family. On startup the events after the last sealed slab (at most about two slabs) are indexed again from the events data column family, and a full slab among them is sealed when a later event follows it.
+After a restart, the events after the last sealed slab (at most about two slabs) are indexed again from the events data column family.
 
 ### 8.3 Hot Write Path
 
@@ -330,7 +328,7 @@ flowchart TD
 The cold segment read path follows the same workflow as the hot segment (steps 2, 3, and 5 are identical). The two differences are:
 
 ```
-1. Load bitmaps from the immutable index files instead of the in-memory concurrent map:
+1. Load bitmaps from the immutable index files instead of the hot index:
    * Hash the term key, query the MPHF in index.hash to get a slot, and
      find the slot's position in index.pack from the app data's rows (§9.2).
    * Read the entry at that position, or for a split term the slab entries
@@ -375,7 +373,10 @@ On startup:
 
 3. Ensure no hot segment data exists beyond last_committed_ledger.
 
-4. Read the last sealed slab from the index column family, check it against the committed event count, and index the events after it again from the events data column family, sealing a full slab if a later event follows it.
+4. Rebuild the index:
+   a. Read the number of sealed slabs from the last key of the index column family.
+   b. Fail if that is more slabs than the committed events fill.
+   c. Index the events after the last sealed slab again from the events data column family, sealing each slab once the next one has its first event.
 
 5. Load ledger offset array.
 
@@ -459,7 +460,16 @@ The average uncompressed event size (~250 bytes) includes the raw event XDR and 
 
 This section covers memory usage of the hot segment's index. It does not account for memory used during query execution against cold segments (e.g., decompressing packfile records, loading MPHF and bitmaps from disk) which occurs concurrently with ingestion.
 
-The hot index holds at most two slabs in memory: the one being filled and the one being sealed. A slab is 65,536 × 7 postings of 24 bytes plus 65,536 four-byte chain heads, about 11 MiB, so the index costs about 22 MiB per hot segment and does not grow with the number of unique terms (a segment with 1.8M unique terms used to cost about 370 MB). Sealed slabs live in the index column family and are read through the RocksDB block cache, which also holds their index and filter blocks, so a segment's many sealed files cost bounded memory.
+The hot index holds at most two slabs in memory: the one being filled and the one being sealed.
+
+| Item | Size |
+|---|---|
+| Postings: 65,536 events × 7 terms × 24 bytes | 10.5 MiB |
+| Chain heads: 65,536 × 4 bytes | 0.25 MiB |
+| One slab | about 11 MiB |
+| Hot index: 2 slabs | about 22 MiB |
+
+It does not grow with the number of unique terms: a segment with 1.8M unique terms used to cost about 370 MB. Sealed slabs live in the index column family and are read through the RocksDB block cache, which also holds their index and filter blocks, so a segment's many sealed files cost bounded memory.
 
 **Other in-memory structures:**
 
