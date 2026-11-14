@@ -36,8 +36,8 @@ func hotIndexKey(slab uint32, k TermKey) []byte {
 	return key
 }
 
-// A posting's id within its slab, the slab number in an IndexCF key and a
-// hash bucket are 16 bits each.
+// Compile-time check that indexSlabShift is 16: a posting's id within its
+// slab, the slab number in an IndexCF key and a hash bucket each take 16 bits.
 const (
 	_ uint = indexSlabShift - 16
 	_ uint = 16 - indexSlabShift
@@ -69,8 +69,20 @@ func newHotSlab(slab uint32) *hotSlab {
 	}
 }
 
-func (s *hotSlab) head(k TermKey) *atomic.Uint32 {
-	return &s.heads[binary.BigEndian.Uint16(k[:])]
+// bucketOf is k's hash bucket, its leading 16 bits.
+func bucketOf(k TermKey) int { return int(binary.BigEndian.Uint16(k[:])) }
+
+func (s *hotSlab) head(k TermKey) *atomic.Uint32 { return &s.heads[bucketOf(k)] }
+
+// chain yields bucket b's postings, newest first.
+func (s *hotSlab) chain(b int) iter.Seq[*hotPosting] {
+	return func(yield func(*hotPosting) bool) {
+		for p := s.heads[b].Load(); p != 0; p = s.posts[p-1].next {
+			if !yield(&s.posts[p-1]) {
+				return
+			}
+		}
+	}
 }
 
 // add appends one posting. The head is stored last: a reader that loads it
@@ -86,8 +98,8 @@ func (s *hotSlab) add(k TermKey, id uint32) {
 func (s *hotSlab) bitmap(k TermKey) *roaring.Bitmap {
 	var bits [hotSlabEvents / 64]uint64
 	found := false
-	for p := s.head(k).Load(); p != 0; p = s.posts[p-1].next {
-		if e := &s.posts[p-1]; e.key == k {
+	for e := range s.chain(bucketOf(k)) {
+		if e.key == k {
 			bits[e.id>>6] |= 1 << (e.id & 63)
 			found = true
 		}
@@ -109,26 +121,25 @@ func (s *hotSlab) terms() iter.Seq2[TermKey, []byte] {
 	}
 	return func(yield func(TermKey, []byte) bool) {
 		var (
-			chain []entry
-			ids   []uint32
-			buf   bytes.Buffer
+			entries []entry
+			ids     []uint32
+			buf     bytes.Buffer
 		)
 		bm := roaring.New()
 		base := s.slab << indexSlabShift
 		for b := range s.heads {
-			chain = chain[:0]
-			for p := s.heads[b].Load(); p != 0; p = s.posts[p-1].next {
-				e := &s.posts[p-1]
-				chain = append(chain, entry{e.key, base | uint32(e.id)})
+			entries = entries[:0]
+			for e := range s.chain(b) {
+				entries = append(entries, entry{e.key, base | uint32(e.id)})
 			}
-			slices.SortFunc(chain, func(x, y entry) int {
+			slices.SortFunc(entries, func(x, y entry) int {
 				return cmp.Or(bytes.Compare(x.key[:], y.key[:]), cmp.Compare(x.id, y.id))
 			})
-			for i := 0; i < len(chain); {
-				k := chain[i].key
+			for i := 0; i < len(entries); {
+				k := entries[i].key
 				ids = ids[:0]
-				for ; i < len(chain) && chain[i].key == k; i++ {
-					ids = append(ids, chain[i].id)
+				for ; i < len(entries) && entries[i].key == k; i++ {
+					ids = append(ids, entries[i].id)
 				}
 				bm.Clear()
 				bm.AddMany(ids)
@@ -157,9 +168,42 @@ type hotIndex struct {
 	// routedKey(secret, term), so callers cannot pick a term's bucket.
 	secret [stores.SecretLen]byte
 
-	// sealed holds the outcome of the last seal once it is over. rotate takes
-	// it before it starts the next seal, so at most one seal is in flight.
-	sealed chan error
+	sealer sealer
+}
+
+// sealer runs one slab's seal at a time in the background and keeps the
+// first failure. done holds the last outcome whenever no seal is running.
+type sealer struct{ done chan error }
+
+func newSealer() sealer {
+	s := sealer{done: make(chan error, 1)}
+	s.done <- nil
+	return s
+}
+
+// failed returns the outcome of a seal that is over, without waiting for one
+// still running.
+func (s sealer) failed() error {
+	select {
+	case err := <-s.done:
+		s.done <- err
+		return err
+	default:
+		return nil
+	}
+}
+
+// wait waits for the seal running, if any, and returns the last outcome.
+func (s sealer) wait() error {
+	err := <-s.done
+	s.done <- err
+	return err
+}
+
+// start runs seal in the background. Call it only after wait returned nil.
+func (s sealer) start(seal func() error) {
+	<-s.done
+	go func() { s.done <- seal() }()
 }
 
 // hotIndexView is what a lookup reads from memory. Every slab before live is
@@ -172,9 +216,8 @@ type hotIndexView struct {
 // newHotIndex returns the index of a chunk whose IndexCF holds the slabs
 // before sealed; its live slab is empty.
 func newHotIndex(store *rocksdb.Store, sealed uint32, secret [stores.SecretLen]byte) *hotIndex {
-	x := &hotIndex{store: store, secret: secret, sealed: make(chan error, 1)}
+	x := &hotIndex{store: store, secret: secret, sealer: newSealer()}
 	x.view.Store(&hotIndexView{live: newHotSlab(sealed)})
-	x.sealed <- nil
 	return x
 }
 
@@ -222,14 +265,33 @@ func (x *hotIndex) sealedBitmap(slab uint32, k TermKey) (*roaring.Bitmap, error)
 	return bm, nil
 }
 
+// slabBitmap returns a term's event ids in one slab, nil if it has none:
+// from memory while v holds the slab, from IndexCF once it is sealed. k is
+// the term's routed key.
+func (x *hotIndex) slabBitmap(v *hotIndexView, slab uint32, k TermKey) (*roaring.Bitmap, error) {
+	switch {
+	case slab == v.live.slab:
+		return v.live.bitmap(k), nil
+	case v.prev != nil && slab == v.prev.slab:
+		return v.prev.bitmap(k), nil
+	}
+	return x.sealedBitmap(slab, k)
+}
+
 // ledgerTerms are consecutive events' term keys, event i's at
 // keys[ends[i-1]:ends[i]].
 type ledgerTerms struct {
 	keys []TermKey
 	ends []uint32
+	// routed closes once routeAsync's routing is done.
+	routed chan struct{}
 }
 
-func (t *ledgerTerms) reset() { t.keys, t.ends = t.keys[:0], t.ends[:0] }
+// reset empties t once the last routeAsync is done.
+func (t *ledgerTerms) reset() {
+	t.waitRouted()
+	t.keys, t.ends = t.keys[:0], t.ends[:0]
+}
 
 // appendEvent appends the next event's terms.
 func (t *ledgerTerms) appendEvent(eventBytes []byte) error {
@@ -249,18 +311,31 @@ func (t *ledgerTerms) route(secret [stores.SecretLen]byte) {
 	}
 }
 
+// routeAsync routes the terms on another goroutine; waitRouted waits for it.
+func (t *ledgerTerms) routeAsync(secret [stores.SecretLen]byte) {
+	routed := make(chan struct{})
+	t.routed = routed
+	go func() {
+		defer close(routed)
+		t.route(secret)
+	}()
+}
+
+// waitRouted waits until the last routeAsync is done.
+func (t *ledgerTerms) waitRouted() {
+	if t.routed != nil {
+		<-t.routed
+		t.routed = nil
+	}
+}
+
 // add indexes committed events, the first of which has id startID, from
 // their routed terms. Only the ingest goroutine calls it. It fails once a
 // seal has failed; the unsealed slabs stay readable from memory, and the
 // next open indexes them again.
 func (x *hotIndex) add(startID uint32, t *ledgerTerms) error {
-	select {
-	case err := <-x.sealed: // the last seal is over
-		x.sealed <- err
-		if err != nil {
-			return err
-		}
-	default:
+	if err := x.sealer.failed(); err != nil {
+		return err
 	}
 	live := x.view.Load().live
 	var start uint32
@@ -283,29 +358,24 @@ func (x *hotIndex) add(startID uint32, t *ledgerTerms) error {
 // rotate waits for the last seal, then starts the next slab and seals the
 // full one in the background.
 func (x *hotIndex) rotate(full *hotSlab) (*hotSlab, error) {
-	if err := <-x.sealed; err != nil {
-		x.sealed <- err // final: every later rotate fails the same way
+	if err := x.sealer.wait(); err != nil {
 		return nil, err
 	}
 	next := newHotSlab(full.slab + 1)
 	x.view.Store(&hotIndexView{live: next, prev: full})
-	go func() {
+	x.sealer.start(func() error {
 		err := x.seal(full)
 		if err == nil {
-			// The writer rotates again only after it takes this outcome.
+			// The writer rotates again only after this seal is over.
 			x.view.Store(&hotIndexView{live: next})
 		}
-		x.sealed <- err
-	}()
+		return err
+	})
 	return next, nil
 }
 
 // settle waits for the seal in flight, if any, and returns its outcome.
-func (x *hotIndex) settle() error {
-	err := <-x.sealed
-	x.sealed <- err
-	return err
-}
+func (x *hotIndex) settle() error { return x.sealer.wait() }
 
 // lookup returns each key's event ids in the slabs the window touches, and
 // the id range those slabs span.
@@ -332,22 +402,10 @@ func (x *hotIndex) lookup(ctx context.Context, keys []TermKey, window IDRange) (
 		if err := ctx.Err(); err != nil {
 			return nil, IDRange{}, err
 		}
-		var inMemory *hotSlab
-		switch {
-		case slab == v.live.slab:
-			inMemory = v.live
-		case v.prev != nil && slab == v.prev.slab:
-			inMemory = v.prev
-		}
 		for i, k := range routed {
-			var bm *roaring.Bitmap
-			if inMemory != nil {
-				bm = inMemory.bitmap(k)
-			} else {
-				var err error
-				if bm, err = x.sealedBitmap(slab, k); err != nil {
-					return nil, IDRange{}, err
-				}
+			bm, err := x.slabBitmap(v, slab, k)
+			if err != nil {
+				return nil, IDRange{}, err
 			}
 			if bm != nil {
 				out[i].Or(bm)

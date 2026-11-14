@@ -232,10 +232,9 @@ func (d *DB) Txhash() *txhash.HotStore { return d.txhash }
 // ingestion; the read side serves hot events through it (query.ReadView.Events).
 //
 // Panics on a read-only DB: OpenReadOnly composes a ledgers-only view with no
-// events facade (#834), so reaching for events there is a programming error — a
-// caller that needs a warmed events surface must open read-WRITE (warmup may
-// seal a slab, so a read-only variant would need #772 to settle how), never
-// silently read a cold, unwarmed store.
+// events facade (#834), so reaching for events there is a programming error.
+// A caller that needs events must open read-write, because warmup can seal a
+// slab. A read-only events view is #772's to design.
 func (d *DB) Events() *event.HotStore {
 	if d.events == nil {
 		panic(fmt.Sprintf("hotchunk: Events() on read-only chunk %s: no events facade (ledgers-only view)", d.chunkID))

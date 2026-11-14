@@ -31,13 +31,12 @@ const (
 //     typically 2-3× on XDR) and read in batches via
 //     BatchedMultiGetCF. Larger blocks give zstd more context per
 //     compression unit and align with batch-fetch shapes.
-//   - IndexCF stores one (slab || routed term) -> bitmap entry per term of
-//     each sealed slab, loaded one sorted file per slab (see hotIndex).
-//     Auto compaction is off, and the files never overlap so it would have
-//     nothing to do; their index and filter blocks sit in the block cache so
-//     a chunk's many files cost bounded memory. A lookup probes every sealed
-//     slab its window touches for every term, and the bloom filter answers
-//     a slab that lacks the term without reading a block.
+//   - IndexCF holds one sorted file per sealed slab, of (slab || routed
+//     term) -> bitmap entries (see hotIndex). Auto compaction is off: the
+//     files never overlap. Index and filter blocks sit in the block cache:
+//     a chunk has many files, and the cache bounds their memory. The bloom
+//     filter answers a slab that lacks a term without a block read, and a
+//     lookup probes every sealed slab in its window.
 //   - OffsetsCF stores 8-byte (ledger_seq -> event_count) rows in
 //     the tens-of-thousands per chunk; small blocks waste less I/O per
 //     point read.
@@ -112,9 +111,8 @@ type HotStore struct {
 	index      *hotIndex
 	offsets    *ConcurrentLedgerOffsets
 	// terms are the last ingested ledger's, routed on another goroutine
-	// while the ledger commits; routed closes when that is done.
-	terms  ledgerTerms
-	routed chan struct{}
+	// while the ledger commits.
+	terms ledgerTerms
 }
 
 // Compile-time guard: *HotStore satisfies Reader.
@@ -125,8 +123,7 @@ var _ Reader = (*HotStore)(nil)
 // term index + offsets. The store is owned by the caller — in production,
 // hotchunk.DB composes this facade over the shared per-chunk DB and closes that
 // DB once. The store must have CFNames() registered + CFOptions() applied, and
-// be writable: warmup seals a full slab it indexes again as soon as the next
-// one starts. A warmup failure returns the error WITHOUT closing the
+// be writable, because warmup can seal a slab. A warmup failure returns the error WITHOUT closing the
 // caller-owned store. The index files terms under the chunk's cold index
 // secret, ColdIndexSecret(catalogSecret, chunkID), so its keys are the cold
 // build's.
@@ -420,7 +417,6 @@ func (h *HotStore) IngestLedgerToBatch(
 
 	// Derive term keys per payload up front (a TermsForBytes error rejects the
 	// ledger without any Put) and retain them for the post-commit index update.
-	h.awaitRouting()
 	h.terms.reset()
 	for i := range payloads {
 		if err := h.terms.appendEvent(payloads[i].ContractEventBytes); err != nil {
@@ -434,12 +430,7 @@ func (h *HotStore) IngestLedgerToBatch(
 			h.chunkID, ledgerSeq)
 	}
 
-	routed := make(chan struct{})
-	h.routed = routed
-	go func() {
-		defer close(routed)
-		h.terms.route(h.index.secret)
-	}()
+	h.terms.routeAsync(h.index.secret)
 
 	// Marshal + queue each event directly into b. BatchWriter.Put copies
 	// synchronously, so ONE reused scratch buffer and key serve every event —
@@ -462,17 +453,9 @@ func (h *HotStore) IngestLedgerToBatch(
 	b.Put(OffsetsCF, encodeOffsetKey(ledgerSeq), encodeLedgerEventCount(uint32(len(payloads))))
 
 	return func() error {
-		h.awaitRouting()
+		h.terms.waitRouted()
 		return h.applyLedger(startID, &h.terms)
 	}, nil
-}
-
-// awaitRouting waits until the last ledger's terms are routed.
-func (h *HotStore) awaitRouting() {
-	if h.routed != nil {
-		<-h.routed
-		h.routed = nil
-	}
 }
 
 // applyLedger updates the index + offsets for a ledger whose rows are durable.
@@ -504,8 +487,8 @@ func (h *HotStore) applyLedger(startID uint32, terms *ledgerTerms) error {
 //     offset cache.
 //   - events_index + events_data → *hotIndex — the sealed slabs stay
 //     in events_index; the events after them are indexed again from
-//     their events_data rows, and a full slab a later event follows is
-//     sealed.
+//     their events_data rows, and a slab is sealed once the next slab
+//     has its first event.
 //
 // chunkID seeds ConcurrentLedgerOffsets.StartLedger for empty
 // chunks; on-disk rows carry the full ledger sequence themselves.
@@ -536,8 +519,8 @@ func replayUnsealed(chunkStore *rocksdb.Store, index *hotIndex, from, total uint
 	if from == total {
 		return nil
 	}
-	// The scan holds the store's lifecycle lock, which a seal takes too, so
-	// the events are indexed after the scan.
+	// Collect the terms first and index them after the scan: indexing can
+	// seal, and a seal takes the lifecycle lock the scan holds.
 	var terms ledgerTerms
 	for entry, err := range chunkStore.IterateRange(DataCF, encodeDataKey(from), encodeDataKey(total-1)) {
 		if err != nil {
