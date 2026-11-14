@@ -12,18 +12,15 @@ libc = "0.2.147"
 anyhow = "1.0.75"
 serde_json = "1.0"
 
-# Keep each host's `version` line directly after `package`:
-# scripts/check-dependencies.bash reads the protocol from it.
 [workspace.dependencies.soroban-env-host-prev]
 package = "soroban-env-host"
 version = "=29.0.2"
 
 [workspace.dependencies.soroban-env-host-curr]
 package = "soroban-env-host"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "5fdf6e6275bd3822bdb981df2c140751075e1502"
 version = "=30.0.0"
-# `next` makes this host report (and simulate) protocol 31, matching
-# stellar-core built with --enable-next-protocol-version-unsafe-for-production.
-features = ["next"]
 
 [workspace.dependencies.soroban-simulation-prev]
 package = "soroban-simulation"
@@ -31,15 +28,13 @@ version = "=29.0.2"
 
 [workspace.dependencies.soroban-simulation-curr]
 package = "soroban-simulation"
-version = "=30.0.0"
+git = "https://github.com/stellar/rs-soroban-env"
+rev = "5fdf6e6275bd3822bdb981df2c140751075e1502"
 features = ["unstable-next-api"]
+version = "=30.0.0"
 
 [workspace.dependencies.stellar-xdr]
-# The stellar-xdr release soroban-env-host-curr depends on.
 version = "=30.0.0"
-# `serde`: `Serialize`/`Deserialize` on every XDR type, the XDR-to-JSON direction of xdr2json.
-# `type_enum`: the `Type`/`TypeVariant` reflection enums xdr2json walks (opt-in since v27).
-# `serde_json`: `Type::from_json`, the JSON-to-XDR direction of xdr2json.
 features = ["serde", "type_enum", "serde_json"]
 
 [workspace.dependencies.rand]
