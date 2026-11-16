@@ -15,10 +15,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"iter"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/RoaringBitmap/roaring/v2"
 
@@ -221,7 +223,7 @@ func (b *ColdIndexBuilder) writePack(
 		return err
 	}
 	defer r.f.Close()
-	w := newIndexPackWriter(pw, slabs, m.idx.MaxBlockKeys())
+	w := newIndexPackWriter(pw, r.f, slabs, m.idx.MaxBlockKeys())
 	for i := 0; !r.done; i++ {
 		if i%buildCtxEvery == 0 {
 			if err := ctx.Err(); err != nil {
@@ -232,7 +234,7 @@ func (b *ColdIndexBuilder) writePack(
 		if err != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", err)
 		}
-		if err := w.add(indexEntry{slot: slot, fp: fp}, r.value); err != nil {
+		if err := w.add(indexEntry{slot: slot, fp: fp, off: r.at}, r.value); err != nil {
 			return err
 		}
 		if err := r.next(); err != nil {
@@ -378,39 +380,48 @@ func (e *termEncoder) unite(parts []runPart) error {
 	return nil
 }
 
-// indexEntry is a term waiting for its slot, its entries held by the writer.
+// indexEntry is a term on its way to its slot: its tagged entries are n
+// bytes at off in the terms file.
 type indexEntry struct {
-	slot       uint32
-	fp         [IndexRecordFingerprintLen]byte
-	start, end int
+	slot uint32
+	fp   [IndexRecordFingerprintLen]byte
+	off  int64
+	n    int
 }
 
 // indexPackWriter writes entries in slot order as they arrive in key order.
 // Keys in order map to MPHF blocks in order and a block's slots are
 // contiguous, so an entry is held for at most one block, in a ring at its
-// slot.
+// slot. The ring keeps only where a held entry is in the terms file, and the
+// entry is read back when its slot comes, so the writer's memory doesn't
+// grow with a block's entries.
 type indexPackWriter struct {
 	pw      *packfile.Writer
+	terms   io.ReaderAt // the terms file, which held entries are read back from
 	layout  indexLayout
 	next    uint32       // the slot to write next
 	ring    []indexEntry // a held slot s at ring[s % len(ring)]
 	pending int          // how many entries the ring holds
-	held    []byte       // the pending entries' tagged entries
+	buf     []byte       // a held entry, read back
 }
 
 // newIndexPackWriter returns a writer whose slots arrive at most hold past
 // the next one to write: streamhash's MaxBlockKeys.
-func newIndexPackWriter(pw *packfile.Writer, slabs, hold uint32) *indexPackWriter {
-	return &indexPackWriter{pw: pw, layout: indexLayout{slabs: slabs}, ring: make([]indexEntry, hold)}
+func newIndexPackWriter(pw *packfile.Writer, terms io.ReaderAt, slabs, hold uint32) *indexPackWriter {
+	return &indexPackWriter{pw: pw, terms: terms, layout: indexLayout{slabs: slabs}, ring: make([]indexEntry, hold)}
 }
 
-// add writes e with its tagged entries, or holds them until its slot comes.
+// add writes e with its tagged entries, or holds e until its slot comes.
 func (w *indexPackWriter) add(e indexEntry, entries []byte) error {
 	if e.slot < w.next || e.slot-w.next >= uint32(len(w.ring)) { //nolint:gosec // a ring of at most MaxBlockKeys
 		return fmt.Errorf("events: MPHF slot %d out of reach of slot %d", e.slot, w.next)
 	}
+	if len(entries) == 0 {
+		return fmt.Errorf("events: slot %d has no entries", e.slot)
+	}
 	if e.slot != w.next {
-		return w.hold(e, entries)
+		e.n = len(entries)
+		return w.hold(e)
 	}
 	if err := w.write(e, entries); err != nil {
 		return err
@@ -418,43 +429,41 @@ func (w *indexPackWriter) add(e indexEntry, entries []byte) error {
 	return w.drain()
 }
 
-// hold keeps e's tagged entries in the ring at e's slot.
-func (w *indexPackWriter) hold(e indexEntry, entries []byte) error {
+// hold keeps e in the ring at its slot.
+func (w *indexPackWriter) hold(e indexEntry) error {
 	r := &w.ring[int(e.slot)%len(w.ring)]
-	if r.end != 0 {
+	if r.n != 0 {
 		return fmt.Errorf("events: MPHF slot %d repeated", e.slot)
 	}
-	e.start = len(w.held)
-	w.held = append(w.held, entries...)
-	e.end = len(w.held)
 	*r = e
 	w.pending++
 	return nil
 }
 
-// drain writes the held entries whose slots come next.
+// drain writes the held entries whose slots come next, reading each back
+// from the terms file.
 func (w *indexPackWriter) drain() error {
 	for w.pending > 0 {
 		r := &w.ring[int(w.next)%len(w.ring)]
-		if r.end == 0 {
+		if r.n == 0 {
 			return nil
 		}
 		e := *r
 		*r = indexEntry{}
 		w.pending--
-		if err := w.write(e, w.held[e.start:e.end]); err != nil {
+		w.buf = slices.Grow(w.buf[:0], e.n)[:e.n]
+		if _, err := w.terms.ReadAt(w.buf, e.off); err != nil {
+			return fmt.Errorf("events: read back slot %d's entries: %w", e.slot, err)
+		}
+		if err := w.write(e, w.buf); err != nil {
 			return err
 		}
 	}
-	w.held = w.held[:0]
 	return nil
 }
 
 // write appends e's tagged entries to index.pack as the next slot.
 func (w *indexPackWriter) write(e indexEntry, entries []byte) error {
-	if len(entries) == 0 {
-		return fmt.Errorf("events: slot %d has no entries", e.slot)
-	}
 	tag, body := entries[0], entries[1:]
 	switch tag {
 	case termWhole:

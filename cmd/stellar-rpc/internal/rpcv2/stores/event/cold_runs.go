@@ -213,11 +213,25 @@ const runValueMax = 1 << 20
 type entryReader struct {
 	f     *os.File // set by open; nil for a run in the runs file
 	name  string   // what errors call the entries' source
+	src   posReader
 	br    *bufio.Reader
 	max   uint64 // the longest value accepted
 	key   TermKey
 	value []byte // valid until the next call to next
+	at    int64  // where value starts in the source
 	done  bool
+}
+
+// posReader keeps its position in the source it reads.
+type posReader struct {
+	r   io.Reader
+	pos int64
+}
+
+func (p *posReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	p.pos += int64(n)
+	return n, err
 }
 
 // open opens path and reads its first entry.
@@ -236,7 +250,8 @@ func (r *entryReader) open(path string, bufSize int, maxValue uint64) error {
 
 // start reads entries from src, called name in errors, and reads the first.
 func (r *entryReader) start(src io.Reader, name string, bufSize int, maxValue uint64) error {
-	r.name, r.br, r.max = name, bufio.NewReaderSize(src, bufSize), maxValue
+	r.src = posReader{r: src}
+	r.name, r.br, r.max = name, bufio.NewReaderSize(&r.src, bufSize), maxValue
 	return r.next()
 }
 
@@ -253,6 +268,7 @@ func (r *entryReader) next() error {
 		if n > r.max {
 			return fmt.Errorf("events: %s: entry of %d bytes", r.name, n)
 		}
+		r.at = r.src.pos - int64(r.br.Buffered())
 		r.value = slices.Grow(r.value[:0], int(n))[:n] //nolint:gosec // n is at most r.max
 		_, err = io.ReadFull(r.br, r.value)
 	}
