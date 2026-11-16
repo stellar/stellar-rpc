@@ -1,6 +1,7 @@
 package event
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -523,7 +524,7 @@ func TestColdIndexBuilder_RemovesRuns(t *testing.T) {
 		for id := range uint32(hotSlabEvents + 1) {
 			require.NoError(t, b.Add(id, []TermKey{{1}}))
 		}
-		require.NoError(t, b.awaitSpill())
+		require.NoError(t, b.spiller.wait())
 		runsDir := filepath.Join(dir, IndexRunsDirName(chunk.ID(0)))
 		require.DirExists(t, runsDir)
 		return b, dir, runsDir
@@ -567,12 +568,22 @@ func TestTermEncoder_WholeAndSplitTerms(t *testing.T) {
 		return raw
 	}
 	var enc termEncoder
+	encode := func(parts []runPart, slabs uint32) []byte {
+		var buf bytes.Buffer
+		w := bufio.NewWriter(&buf)
+		_, err := enc.write(w, TermKey{}, parts, slabs)
+		require.NoError(t, err)
+		require.NoError(t, w.Flush())
+		entries, rest, ok := cutPrefixed(buf.Bytes()[len(TermKey{}):])
+		require.True(t, ok)
+		require.Empty(t, rest)
+		return entries
+	}
 
-	got, err := enc.encode([]runPart{
+	got := encode([]runPart{
 		{slab: 0, bitmap: serialize([]uint32{1, 5})},
 		{slab: 3, bitmap: serialize([]uint32{3<<16 + 7})},
 	}, 10)
-	require.NoError(t, err)
 	require.Equal(t, append([]byte{termWhole}, serialize([]uint32{1, 5, 3<<16 + 7})...), got)
 
 	// Every other id of nine of ten slabs is past indexSplitBytes, and slab 2
@@ -589,8 +600,7 @@ func TestTermEncoder_WholeAndSplitTerms(t *testing.T) {
 		parts = append(parts, runPart{slab: x, bitmap: serialize(everyOther(x, x+1))})
 		want = append(want, parts[len(parts)-1].bitmap)
 	}
-	got, err = enc.encode(parts, 10)
-	require.NoError(t, err)
+	got = encode(parts, 10)
 	require.Equal(t, termSplit, got[0])
 	body := got[1:]
 	for x, w := range want {
@@ -622,7 +632,7 @@ func TestIndexPackWriter_RejectsSlotGapsAndRepeats(t *testing.T) {
 		require.NoError(t, err)
 		w := newIndexPackWriter(pw, bytes.NewReader(entries), 0, 4)
 		for _, slot := range tc.slots {
-			if err = w.add(indexEntry{slot: slot}, entries); err != nil {
+			if err = w.add(indexEntry{slot: slot, n: len(entries)}); err != nil {
 				break
 			}
 		}
@@ -632,4 +642,14 @@ func TestIndexPackWriter_RejectsSlotGapsAndRepeats(t *testing.T) {
 		require.ErrorContains(t, err, tc.want, "slots %v", tc.slots)
 		require.NoError(t, pw.Close())
 	}
+}
+
+// cutPrefixed cuts a uvarint-length-prefixed slice off the front of b.
+func cutPrefixed(b []byte) ([]byte, []byte, bool) {
+	n, k := binary.Uvarint(b)
+	if k <= 0 || n > uint64(len(b)-k) { //nolint:gosec // k is at most len(b)
+		return nil, nil, false
+	}
+	end := k + int(n) //nolint:gosec // n is at most len(b)-k
+	return b[k:end], b[end:], true
 }
