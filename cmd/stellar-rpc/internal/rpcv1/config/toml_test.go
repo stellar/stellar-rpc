@@ -173,12 +173,13 @@ func TestRoundTrip(t *testing.T) {
 func TestRoundTripDataStoreConfig(t *testing.T) {
 	cfg := Config{}
 	require.NoError(t, cfg.loadDefaults())
-	require.Equal(t, ledgerbackend.BufferedStorageBackendConfig{}, cfg.BufferedStorageBackendConfig)
+	require.Equal(t, defaultBufferedStorageBackendConfig(), cfg.BufferedStorageBackendConfig)
 	require.Equal(t, datastore.DataStoreConfig{}, cfg.DataStoreConfig)
 
 	outBytes, err := marshalTOML(&cfg)
 	require.NoError(t, err)
 
+	cfg.BufferedStorageBackendConfig = ledgerbackend.BufferedStorageBackendConfig{}
 	require.NoError(t, parseToml(bytes.NewReader(outBytes), false, &cfg))
 	require.Equal(t, defaultBufferedStorageBackendConfig(), cfg.BufferedStorageBackendConfig)
 	require.Equal(t, defaultDataStoreConfig(), cfg.DataStoreConfig)
