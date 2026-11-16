@@ -95,7 +95,7 @@ func TestColdRuns_ReportTruncation(t *testing.T) {
 func TestColdRuns_RejectOversizedEntries(t *testing.T) {
 	runs := coldRuns{dir: filepath.Join(t.TempDir(), "runs")}
 	require.NoError(t, os.MkdirAll(runs.dir, 0o755))
-	entry := binary.AppendUvarint(make([]byte, len(TermKey{})), runValueMax+1)
+	entry := binary.AppendUvarint(make([]byte, len(TermKey{})), slabEntryMaxBytes+1)
 	f, err := os.Create(filepath.Join(runs.dir, "runs"))
 	require.NoError(t, err)
 	_, err = f.Write(entry)
@@ -104,6 +104,26 @@ func TestColdRuns_RejectOversizedEntries(t *testing.T) {
 	_, err = mergedTerms(&runs)
 	require.ErrorContains(t, err, "entry of")
 	require.NoError(t, runs.remove())
+}
+
+// A slab serializes within roaring's bound whatever RunOptimize keeps: one run,
+// the 2,055 runs it still keeps as runs, or the bitmap one more run turns into.
+func TestSlabEntryMaxBytesIsRoaringsBound(t *testing.T) {
+	bound := roaring.BoundSerializedSizeInBytes(1<<indexSlabShift, 1<<indexSlabShift)
+	require.Equal(t, bound, uint64(slabEntryMaxBytes))
+	full, runs, bitmap := roaring.New(), roaring.New(), roaring.New()
+	full.AddRange(0, 1<<indexSlabShift)
+	for i := range uint64(2056) {
+		bitmap.AddRange(i*31, i*31+3)
+		if i < 2055 {
+			runs.AddRange(i*31, i*31+3)
+		}
+	}
+	for _, bm := range []*roaring.Bitmap{full, runs, bitmap} {
+		bm.RunOptimize()
+		require.LessOrEqual(t, bm.GetSerializedSizeInBytes(), bound)
+	}
+	require.Equal(t, uint64(8231), runs.GetSerializedSizeInBytes(), "2,055 runs stay runs")
 }
 
 // Every run lands in one file, each runGap past the one before, and the merge

@@ -153,9 +153,9 @@ const maxIndexSlabs = 1 << (32 - indexSlabShift)
 const indexSplitBytes = 64 << 10
 
 const (
-	// slabEntryMaxBytes is the largest slab entry: one 8 KiB bitmap container
-	// in roaring's portable format, which adds a 16-byte header.
-	slabEntryMaxBytes = 8<<10 + 16
+	// slabEntryMaxBytes is the largest slab entry, roaring's bound on a serialized
+	// slab: BoundSerializedSizeInBytes(1<<indexSlabShift, 1<<indexSlabShift).
+	slabEntryMaxBytes = 8240
 	// indexPackMaxRecordBytes closes index.pack's records, with no item limit.
 	// Two of the largest slab entries fit, so a dense split term's slabs pair up.
 	indexPackMaxRecordBytes = 2 * slabEntryMaxBytes

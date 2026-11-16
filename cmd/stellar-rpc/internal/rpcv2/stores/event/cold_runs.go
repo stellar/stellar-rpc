@@ -73,21 +73,30 @@ func (r *coldRuns) spill(slab uint32, terms iter.Seq2[TermKey, []byte]) error {
 func writeRun(f *os.File, terms iter.Seq2[TermKey, []byte]) error {
 	w := bufio.NewWriterSize(f, 1<<16)
 	for key, bitmap := range terms {
-		writeEntry(w, key, bitmap)
+		writeHead(w, &key, len(bitmap))
+		_, _ = w.Write(bitmap)
 	}
 	return w.Flush()
 }
 
-// writeEntry writes key || uvarint(len(value)) || value. A bufio.Writer
-// keeps the first error and reports it from Flush.
-func writeEntry(w *bufio.Writer, key TermKey, value []byte) {
-	var length [binary.MaxVarintLen64]byte
-	_, _ = w.Write(key[:])
-	_, _ = w.Write(length[:binary.PutUvarint(length[:], uint64(len(value)))])
-	_, _ = w.Write(value)
+// writeHead writes the head of an entry, key || uvarint(n), n being the
+// length of what follows. A bufio.Writer keeps the first error and reports it
+// from Flush.
+func writeHead(w *bufio.Writer, key *TermKey, n int) {
+	b := append(w.AvailableBuffer(), key[:]...)
+	_, _ = w.Write(binary.AppendUvarint(b, uint64(n)))
 }
 
-// removeRuns deletes the runs file and leaves the directory.
+// slabs is how many slabs the runs cover: up to the last one spilled.
+func (r *coldRuns) slabs() uint32 {
+	if len(r.spans) == 0 {
+		return 0
+	}
+	return r.spans[len(r.spans)-1].slab + 1
+}
+
+// removeRuns deletes the runs file and leaves the directory, which also
+// holds the terms file.
 func (r *coldRuns) removeRuns() error {
 	if r.f == nil {
 		return nil
@@ -100,17 +109,13 @@ func (r *coldRuns) removeRuns() error {
 
 // remove deletes the runs and the directory holding them.
 func (r *coldRuns) remove() error {
-	if r.f != nil {
-		_ = r.f.Close()
-	}
-	r.f, r.spans = nil, nil
-	return os.RemoveAll(r.dir)
+	return errors.Join(r.removeRuns(), os.RemoveAll(r.dir))
 }
 
 // runTerm is one term of the merged runs.
 type runTerm struct {
 	key   TermKey
-	parts []runPart // in run order, so in slab order
+	parts []runPart // in slab order
 }
 
 // runPart is a term's bitmap in one run, valid until the merge yields the
@@ -156,25 +161,21 @@ func (r *coldRuns) merge() iter.Seq2[runTerm, error] {
 	}
 }
 
-// runMerge holds the open runs with entries left, the smallest key first
-// and, among equal keys, the earliest run.
-type runMerge struct {
-	heapOf[*runReader]
-}
-
-func (r *coldRuns) open() (*runMerge, error) {
-	m := &runMerge{}
-	m.less = func(a, b *runReader) bool {
-		return cmp.Or(bytes.Compare(a.key[:], b.key[:]), cmp.Compare(a.run, b.run)) < 0
-	}
+// open reads the first entry of every run and returns the runs with entries
+// left in a heap: the smallest key first and, among equal keys, the earliest
+// slab.
+func (r *coldRuns) open() (*heapOf[*runReader], error) {
+	m := &heapOf[*runReader]{less: func(a, b *runReader) bool {
+		return cmp.Or(bytes.Compare(a.key[:], b.key[:]), cmp.Compare(a.slab, b.slab)) < 0
+	}}
 	// Each run reads through a buffer of 16 MiB over the number of runs, kept
 	// between 4 KiB and 64 KiB: 16 MiB in all up to 4,096 runs, 4 KiB a run
 	// beyond that.
 	bufSize := min(max(16<<20/max(len(r.spans), 1), 4<<10), 64<<10)
-	for i, s := range r.spans {
-		rr := &runReader{run: i, slab: s.slab}
-		name := fmt.Sprintf("%s run %d", r.f.Name(), i)
-		if err := rr.start(io.NewSectionReader(r.f, s.off, s.n), name, bufSize, runValueMax); err != nil {
+	for _, s := range r.spans {
+		rr := &runReader{slab: s.slab}
+		name := fmt.Sprintf("%s, slab %d's run", r.f.Name(), s.slab)
+		if err := rr.start(io.NewSectionReader(r.f, s.off, s.n), name, bufSize, slabEntryMaxBytes); err != nil {
 			return nil, err
 		}
 		if !rr.done {
@@ -188,13 +189,8 @@ func (r *coldRuns) open() (*runMerge, error) {
 type runReader struct {
 	entryReader
 
-	run  int
 	slab uint32
 }
-
-// runValueMax bounds one entry's bitmap: a slab's ids serialize to a few
-// kilobytes, so anything larger is a corrupt run.
-const runValueMax = 1 << 20
 
 // entryReader reads key || uvarint(len) || value entries in order.
 type entryReader struct {
@@ -241,27 +237,34 @@ func (r *entryReader) next() error {
 		}
 		return fmt.Errorf("events: %s: %w", r.name, err)
 	}
-	n, err := binary.ReadUvarint(r.br)
-	if err == nil {
-		if n > r.max {
-			return fmt.Errorf("events: %s: entry of %d bytes", r.name, n)
-		}
-		pos, _ := r.src.Seek(0, io.SeekCurrent)
-		r.at, r.n = pos-int64(r.br.Buffered()), int(n) //nolint:gosec // n is at most r.max
-		if r.keysOnly {
-			_, err = r.br.Discard(r.n)
-		} else {
-			r.value = slices.Grow(r.value[:0], r.n)[:r.n]
-			_, err = io.ReadFull(r.br, r.value)
-		}
-	}
-	if err != nil {
+	if err := r.readValue(); err != nil {
 		if errors.Is(err, io.EOF) {
 			err = io.ErrUnexpectedEOF // a key without its entry
 		}
 		return fmt.Errorf("events: %s: %w", r.name, err)
 	}
 	return nil
+}
+
+// readValue reads the length and the value after a key, skipping the value
+// with keysOnly.
+func (r *entryReader) readValue() error {
+	n, err := binary.ReadUvarint(r.br)
+	if err != nil {
+		return err
+	}
+	if n > r.max {
+		return fmt.Errorf("entry of %d bytes", n)
+	}
+	pos, _ := r.src.Seek(0, io.SeekCurrent)
+	r.at, r.n = pos-int64(r.br.Buffered()), int(n) //nolint:gosec // n is at most r.max
+	if r.keysOnly {
+		_, err = r.br.Discard(r.n)
+		return err
+	}
+	r.value = slices.Grow(r.value[:0], r.n)[:r.n]
+	_, err = io.ReadFull(r.br, r.value)
+	return err
 }
 
 // heapOf is a binary min-heap by less.
