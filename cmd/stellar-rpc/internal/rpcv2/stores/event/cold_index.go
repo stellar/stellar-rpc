@@ -18,7 +18,6 @@ import (
 	"io"
 	"io/fs"
 	"iter"
-	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -235,9 +234,7 @@ const (
 )
 
 // writeTerms writes terms to path, each as key || uvarint(len) || its tagged
-// index.pack entries, and returns how many it wrote. It fails as soon as
-// index.pack would need more items than it can count: one per whole term and
-// one per slab per split term.
+// index.pack entries, and returns how many it wrote.
 func writeTerms(
 	ctx context.Context, path string, terms iter.Seq2[runTerm, error], slabs uint32,
 ) (_ uint64, err error) {
@@ -255,8 +252,8 @@ func writeTerms(
 	}()
 	w := bufio.NewWriterSize(f, 1<<20)
 	var (
-		enc      termEncoder
-		n, items uint64
+		enc termEncoder
+		n   uint64
 	)
 	for term, err := range terms {
 		if err != nil {
@@ -265,17 +262,8 @@ func writeTerms(
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
-		split, err := enc.write(w, term.key, term.parts, slabs)
-		if err != nil {
+		if err := enc.write(w, term.key, term.parts, slabs); err != nil {
 			return 0, fmt.Errorf("term %x: %w", term.key, err)
-		}
-		if split {
-			items += uint64(slabs)
-		} else {
-			items++
-		}
-		if items > math.MaxUint32 {
-			return 0, fmt.Errorf("index.pack holds at most %d items", uint64(math.MaxUint32))
 		}
 		n++
 	}
@@ -321,23 +309,22 @@ type termEncoder struct {
 }
 
 // write writes a term to w as key || uvarint(len) || its tagged index.pack
-// entries and reports whether it split the term. The bitmaps are in their
-// final form, so a term in one run is copied as it is, as is each slab of a
-// split term, which goes straight to w.
-func (e *termEncoder) write(w *bufio.Writer, key TermKey, parts []runPart, slabs uint32) (bool, error) {
+// entries. The bitmaps are in their final form, so a term in one run is
+// copied as it is, as is each slab of a split term, which goes straight to w.
+func (e *termEncoder) write(w *bufio.Writer, key TermKey, parts []runPart, slabs uint32) error {
 	if len(parts) == 1 {
 		// One slab's bitmap is far under indexSplitBytes.
-		return false, writeTagged(w, &key, termWhole, parts[0].bitmap)
+		return writeTagged(w, &key, termWhole, parts[0].bitmap)
 	}
 	if err := e.unite(parts); err != nil {
-		return false, err
+		return err
 	}
 	if e.union.GetSerializedSizeInBytes() <= indexSplitBytes {
 		e.whole.Reset()
 		_, _ = e.union.WriteTo(&e.whole) // a bytes.Buffer write cannot fail
-		return false, writeTagged(w, &key, termWhole, e.whole.Bytes())
+		return writeTagged(w, &key, termWhole, e.whole.Bytes())
 	}
-	return true, writeSplit(w, &key, parts, slabs)
+	return writeSplit(w, &key, parts, slabs)
 }
 
 // writeTagged writes key || uvarint(len) || tag || body.
