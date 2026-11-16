@@ -174,7 +174,8 @@ func (r *coldRuns) open() (*heapOf[*runReader], error) {
 	for _, s := range r.spans {
 		rr := &runReader{slab: s.slab}
 		name := fmt.Sprintf("%s, slab %d's run", r.f.Name(), s.slab)
-		if err := rr.start(io.NewSectionReader(r.f, s.off, s.n), name, bufSize, slabEntryMaxBytes); err != nil {
+		sec := io.NewSectionReader(r.f, s.off, s.n)
+		if err := rr.start(sec, name, bufSize, slabEntryMaxBytes, slabEntryMaxBytes); err != nil {
 			return nil, err
 		}
 		if !rr.done {
@@ -199,12 +200,13 @@ type entryReader struct {
 	br    *bufio.Reader
 	max   uint64 // the longest value accepted
 	key   TermKey
-	value []byte // valid until the next call to next; nil with keysOnly
+	value []byte // valid until the next call to next, unless it was skipped
 	at    int64  // where the value starts in the source
 	n     int    // the value's length
-	done  bool
-	// keysOnly skips the values, leaving at and n to say where each one is.
-	keysOnly bool
+	// keep is the longest value read into value. Longer ones are skipped,
+	// leaving at and n to say where they are.
+	keep int
+	done bool
 }
 
 // posReader keeps its position in the source it reads.
@@ -220,13 +222,13 @@ func (p *posReader) Read(b []byte) (int, error) {
 }
 
 // open opens path and reads its first entry.
-func (r *entryReader) open(path string, bufSize int, maxValue uint64) error {
+func (r *entryReader) open(path string, bufSize int, maxValue uint64, keep int) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	r.f = f
-	if err := r.start(f, f.Name(), bufSize, maxValue); err != nil {
+	if err := r.start(f, f.Name(), bufSize, maxValue, keep); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -234,9 +236,9 @@ func (r *entryReader) open(path string, bufSize int, maxValue uint64) error {
 }
 
 // start reads entries from src, called name in errors, and reads the first.
-func (r *entryReader) start(src io.Reader, name string, bufSize int, maxValue uint64) error {
+func (r *entryReader) start(src io.Reader, name string, bufSize int, maxValue uint64, keep int) error {
 	r.src = posReader{r: src}
-	r.name, r.br, r.max = name, bufio.NewReaderSize(&r.src, bufSize), maxValue
+	r.name, r.br, r.max, r.keep = name, bufio.NewReaderSize(&r.src, bufSize), maxValue, keep
 	return r.next()
 }
 
@@ -257,8 +259,8 @@ func (r *entryReader) next() error {
 	return nil
 }
 
-// readValue reads the length and the value after a key, skipping the value
-// with keysOnly.
+// readValue reads the length and the value after a key, skipping a value
+// longer than keep.
 func (r *entryReader) readValue() error {
 	n, err := binary.ReadUvarint(r.br)
 	if err != nil {
@@ -268,7 +270,7 @@ func (r *entryReader) readValue() error {
 		return fmt.Errorf("entry of %d bytes", n)
 	}
 	r.at, r.n = r.src.pos-int64(r.br.Buffered()), int(n) //nolint:gosec // n is at most r.max
-	if r.keysOnly {
+	if r.n > r.keep {
 		_, err = r.br.Discard(r.n)
 		return err
 	}
