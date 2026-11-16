@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -213,10 +214,12 @@ const runValueMax = 1 << 20
 type entryReader struct {
 	f     *os.File // set by open; nil for a run in the runs file
 	name  string   // what errors call the entries' source
+	src   io.SectionReader
 	br    *bufio.Reader
 	max   uint64 // the longest value accepted
 	key   TermKey
 	value []byte // valid until the next call to next
+	at    int64  // where value starts in the source
 	done  bool
 }
 
@@ -227,7 +230,7 @@ func (r *entryReader) open(path string, bufSize int, maxValue uint64) error {
 		return err
 	}
 	r.f = f
-	if err := r.start(f, f.Name(), bufSize, maxValue); err != nil {
+	if err := r.start(io.NewSectionReader(f, 0, math.MaxInt64), f.Name(), bufSize, maxValue); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -235,8 +238,9 @@ func (r *entryReader) open(path string, bufSize int, maxValue uint64) error {
 }
 
 // start reads entries from src, called name in errors, and reads the first.
-func (r *entryReader) start(src io.Reader, name string, bufSize int, maxValue uint64) error {
-	r.name, r.br, r.max = name, bufio.NewReaderSize(src, bufSize), maxValue
+func (r *entryReader) start(src *io.SectionReader, name string, bufSize int, maxValue uint64) error {
+	r.src = *src
+	r.name, r.br, r.max = name, bufio.NewReaderSize(&r.src, bufSize), maxValue
 	return r.next()
 }
 
@@ -253,6 +257,8 @@ func (r *entryReader) next() error {
 		if n > r.max {
 			return fmt.Errorf("events: %s: entry of %d bytes", r.name, n)
 		}
+		pos, _ := r.src.Seek(0, io.SeekCurrent)
+		r.at = pos - int64(r.br.Buffered())
 		r.value = slices.Grow(r.value[:0], int(n))[:n] //nolint:gosec // n is at most r.max
 		_, err = io.ReadFull(r.br, r.value)
 	}
