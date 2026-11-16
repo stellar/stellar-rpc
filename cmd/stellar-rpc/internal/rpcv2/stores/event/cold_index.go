@@ -18,6 +18,7 @@ import (
 	"io"
 	"io/fs"
 	"iter"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -41,9 +42,10 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 }
 
 // ColdIndexBuilder builds a chunk's index.hash and index.pack from its
-// postings with bounded memory. One slab of postings is in memory; when the
-// next slab starts, it is written as a run in a directory beside the index
-// files in the background while the next fills, and Write merges the runs.
+// postings with bounded memory. The slab being filled is in memory; when the
+// next slab starts, the full one is written as a run in a directory beside
+// the index files in the background while the next fills, so at most two
+// slabs are in memory, and Write merges the runs.
 // Both cold backfill and the live-chunk freeze feed it single-threaded,
 // re-deriving terms from raw LCMs (Terms.AppendEvent). The directory is the
 // chunk's, so one builder works on a chunk at a time, which the backfill plan
@@ -55,12 +57,10 @@ type ColdIndexBuilder struct {
 	runs    coldRuns
 	live    *hotSlab
 	// spare is the slab being spilled, or a free one once that spill is over.
-	spare *hotSlab
-	// spilling yields the outcome of the spill in flight. At most one runs.
-	spilling chan error
-	spillErr error
-	slabs    uint32 // how many slabs the index covers
-	written  bool
+	spare   *hotSlab
+	spiller sealer // runs one spill at a time, in the background
+	slabs   uint32 // how many slabs the index covers
+	written bool
 }
 
 // NewColdIndexBuilder returns a builder that writes chunkID's index into
@@ -73,6 +73,7 @@ func NewColdIndexBuilder(chunkID chunk.ID, bucketDir string, secret [stores.Secr
 		secret:  secret,
 		runs:    coldRuns{dir: filepath.Join(bucketDir, IndexRunsDirName(chunkID))},
 		live:    newHotSlab(0),
+		spiller: newSealer(),
 	}
 }
 
@@ -105,7 +106,7 @@ func (b *ColdIndexBuilder) Add(eventID uint32, terms *Terms) error {
 
 // Close removes the runs of a build that is not written.
 func (b *ColdIndexBuilder) Close() error {
-	_ = b.awaitSpill() // the build is abandoned, so a spill error doesn't matter
+	_ = b.spiller.wait() // the build is abandoned, so a spill error doesn't matter
 	return b.runs.remove()
 }
 
@@ -124,7 +125,7 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 	}
 	b.written = true
 	defer func() {
-		_ = b.awaitSpill() // wait for a spill in flight before deleting the runs it writes
+		_ = b.spiller.wait() // wait for a spill in flight before deleting the runs it writes
 		if rerr := b.runs.remove(); rerr != nil {
 			err = errors.Join(err, fmt.Errorf("events: remove index runs: %w", rerr))
 		}
@@ -135,7 +136,7 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 	if err := b.spill(); err != nil {
 		return err
 	}
-	if err := b.awaitSpill(); err != nil {
+	if err := b.spiller.wait(); err != nil {
 		return err
 	}
 	slabs := b.slabs
@@ -158,7 +159,7 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 			err = errors.Join(err, fmt.Errorf("events: remove orphan %s: %w", indexHashPath, rmErr))
 		}
 	}()
-	m, err := buildMPHF(ctx, termKeys(termsPath, slabs), terms, indexHashPath, b.secret)
+	m, err := buildMPHF(ctx, termKeys(ctx, termsPath, slabs), terms, indexHashPath, b.secret)
 	if err != nil {
 		return fmt.Errorf("events: build MPHF: %w", err)
 	}
@@ -173,7 +174,7 @@ func (b *ColdIndexBuilder) spill() error {
 	if b.live.n == 0 {
 		return nil
 	}
-	if err := b.awaitSpill(); err != nil {
+	if err := b.spiller.wait(); err != nil {
 		return err
 	}
 	full := b.live
@@ -181,25 +182,13 @@ func (b *ColdIndexBuilder) spill() error {
 		b.spare = newHotSlab(0)
 	}
 	b.live, b.spare = b.spare, full
-	done := make(chan error, 1)
-	b.spilling = done
-	go func() {
+	b.spiller.start(func() error {
 		if err := b.runs.spill(full.slab, full.terms()); err != nil {
-			done <- fmt.Errorf("events: spill index slab %d: %w", full.slab, err)
+			return fmt.Errorf("events: spill index slab %d: %w", full.slab, err)
 		}
-		close(done)
-	}()
+		return nil
+	})
 	return nil
-}
-
-// awaitSpill waits for the spill in flight, if any. A spill error fails
-// every later call.
-func (b *ColdIndexBuilder) awaitSpill() error {
-	if b.spilling != nil {
-		b.spillErr = <-b.spilling
-		b.spilling = nil
-	}
-	return b.spillErr
 }
 
 // writePack writes every term of the terms file at the slot m gives it.
@@ -218,23 +207,21 @@ func (b *ColdIndexBuilder) writePack(
 			}
 		}
 	}()
-	var r entryReader
+	r := entryReader{keysOnly: true}
 	if err := r.open(termsPath, termsFileBufferBytes, termsValueMax(slabs)); err != nil {
 		return err
 	}
 	defer r.f.Close()
 	w := newIndexPackWriter(pw, r.f, slabs, m.idx.MaxBlockKeys())
-	for i := 0; !r.done; i++ {
-		if i%buildCtxEvery == 0 {
-			if err := ctx.Err(); err != nil {
-				return fmt.Errorf("events: build index: %w", err)
-			}
+	for !r.done {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("events: build index: %w", err)
 		}
 		slot, fp, err := m.lookupKey(r.key)
 		if err != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", err)
 		}
-		if err := w.add(indexEntry{slot: slot, fp: fp, off: r.at}, r.value); err != nil {
+		if err := w.add(indexEntry{slot: slot, fp: fp, off: r.at, n: r.n}); err != nil {
 			return err
 		}
 		if err := r.next(); err != nil {
@@ -251,14 +238,12 @@ const (
 	termSplit             // per slab: uvarint(len) || the term's bitmap in the slab, empty without one
 )
 
-// buildCtxEvery is how many terms the merge and the index.pack write handle
-// between checks of the build's context.
-const buildCtxEvery = 1 << 12
-
 const termsFileBufferBytes = 1 << 20
 
 // writeTerms writes terms to path, each as key || uvarint(len) || its tagged
-// index.pack entries, and returns how many it wrote.
+// index.pack entries, and returns how many it wrote. It fails as soon as
+// index.pack would need more items than it can count: one per whole term and
+// one per slab per split term.
 func writeTerms(
 	ctx context.Context, path string, terms iter.Seq2[runTerm, error], slabs uint32,
 ) (_ uint64, err error) {
@@ -276,23 +261,28 @@ func writeTerms(
 	}()
 	w := bufio.NewWriterSize(f, termsFileBufferBytes)
 	var (
-		enc termEncoder
-		n   uint64
+		enc      termEncoder
+		n, items uint64
 	)
 	for term, err := range terms {
 		if err != nil {
 			return 0, err
 		}
-		if n%buildCtxEvery == 0 {
-			if err := ctx.Err(); err != nil {
-				return 0, err
-			}
+		if err := ctx.Err(); err != nil {
+			return 0, err
 		}
-		entries, err := enc.encode(term.parts, slabs)
+		split, err := enc.write(w, term.key, term.parts, slabs)
 		if err != nil {
 			return 0, fmt.Errorf("term %x: %w", term.key, err)
 		}
-		writeEntry(w, term.key, entries)
+		if split {
+			items += uint64(slabs)
+		} else {
+			items++
+		}
+		if items > math.MaxUint32 {
+			return 0, fmt.Errorf("index.pack holds at most %d items", uint64(math.MaxUint32))
+		}
 		n++
 	}
 	return n, w.Flush()
@@ -305,15 +295,19 @@ func termsValueMax(slabs uint32) uint64 {
 }
 
 // termKeys yields the keys of a terms file of a chunk of slabs, in order.
-func termKeys(path string, slabs uint32) iter.Seq2[TermKey, error] {
+func termKeys(ctx context.Context, path string, slabs uint32) iter.Seq2[TermKey, error] {
 	return func(yield func(TermKey, error) bool) {
-		var r entryReader
+		r := entryReader{keysOnly: true}
 		if err := r.open(path, termsFileBufferBytes, termsValueMax(slabs)); err != nil {
 			yield(TermKey{}, err)
 			return
 		}
 		defer r.f.Close()
 		for !r.done {
+			if err := ctx.Err(); err != nil {
+				yield(TermKey{}, err)
+				return
+			}
 			if !yield(r.key, nil) {
 				return
 			}
@@ -325,46 +319,73 @@ func termKeys(path string, slabs uint32) iter.Seq2[TermKey, error] {
 	}
 }
 
-// termEncoder encodes merged terms as index.pack stores them, reusing its
-// bitmaps and buffers from term to term.
+// termEncoder writes merged terms as index.pack stores them, reusing its
+// bitmaps and buffer from term to term.
 type termEncoder struct {
 	union, part roaring.Bitmap
-	out         bytes.Buffer
+	whole       bytes.Buffer // a whole term's union, serialized
 }
 
-// encode returns a term's tagged entries from its bitmap in each run, valid
-// until the next call. The bitmaps are in their final form, so a term in one
-// run is copied as it is, as is each slab of a split term.
-func (e *termEncoder) encode(parts []runPart, slabs uint32) ([]byte, error) {
-	e.out.Reset()
+// write writes a term to w as key || uvarint(len) || its tagged index.pack
+// entries and reports whether it split the term. The bitmaps are in their
+// final form, so a term in one run is copied as it is, as is each slab of a
+// split term, which goes straight to w.
+func (e *termEncoder) write(w *bufio.Writer, key TermKey, parts []runPart, slabs uint32) (bool, error) {
 	if len(parts) == 1 {
 		// One slab's bitmap is far under indexSplitBytes.
-		e.out.WriteByte(termWhole)
-		e.out.Write(parts[0].bitmap)
-		return e.out.Bytes(), nil
+		writeTagged(w, key, termWhole, parts[0].bitmap)
+		return false, nil
 	}
 	if err := e.unite(parts); err != nil {
-		return nil, err
+		return false, err
 	}
 	if e.union.GetSerializedSizeInBytes() <= indexSplitBytes {
-		e.out.WriteByte(termWhole)
-		_, _ = e.union.WriteTo(&e.out) // a bytes.Buffer write cannot fail
-		return e.out.Bytes(), nil
+		e.whole.Reset()
+		_, _ = e.union.WriteTo(&e.whole) // a bytes.Buffer write cannot fail
+		writeTagged(w, key, termWhole, e.whole.Bytes())
+		return false, nil
 	}
-	e.out.WriteByte(termSplit)
-	var length [binary.MaxVarintLen32]byte
+	return true, writeSplit(w, key, parts, slabs)
+}
+
+// writeTagged writes key || uvarint(len) || tag || body. A bufio.Writer keeps
+// the first error and reports it from Flush.
+func writeTagged(w *bufio.Writer, key TermKey, tag byte, body []byte) {
+	var length [binary.MaxVarintLen64]byte
+	_, _ = w.Write(key[:])
+	_, _ = w.Write(length[:binary.PutUvarint(length[:], uint64(1+len(body)))])
+	_ = w.WriteByte(tag)
+	_, _ = w.Write(body)
+}
+
+// writeSplit writes a split term as writeTagged would, its body being, per
+// slab, uvarint(len) || the term's bitmap in the slab, empty without one. It
+// sizes the body from the parts first, so no slab is copied twice.
+func writeSplit(w *bufio.Writer, key TermKey, parts []runPart, slabs uint32) error {
+	var length [binary.MaxVarintLen64]byte
+	n, rest := 1, parts
+	for x := range slabs {
+		size := 0
+		if len(rest) > 0 && rest[0].slab == x {
+			size, rest = len(rest[0].bitmap), rest[1:]
+		}
+		n += binary.PutUvarint(length[:], uint64(size)) + size
+	}
+	if len(rest) > 0 {
+		return fmt.Errorf("bitmap in slab %d of %d", rest[0].slab, slabs)
+	}
+	_, _ = w.Write(key[:])
+	_, _ = w.Write(length[:binary.PutUvarint(length[:], uint64(n))])
+	_ = w.WriteByte(termSplit)
 	for x := range slabs {
 		var bitmap []byte
 		if len(parts) > 0 && parts[0].slab == x {
 			bitmap, parts = parts[0].bitmap, parts[1:]
 		}
-		e.out.Write(length[:binary.PutUvarint(length[:], uint64(len(bitmap)))])
-		e.out.Write(bitmap)
+		_, _ = w.Write(length[:binary.PutUvarint(length[:], uint64(len(bitmap)))])
+		_, _ = w.Write(bitmap)
 	}
-	if len(parts) > 0 {
-		return nil, fmt.Errorf("bitmap in slab %d of %d", parts[0].slab, slabs)
-	}
-	return e.out.Bytes(), nil
+	return nil
 }
 
 // unite sets e.union to the union of parts, borrowing their bytes.
@@ -391,8 +412,8 @@ type indexEntry struct {
 
 // indexPackWriter writes entries in slot order as they arrive in key order.
 // Keys in order map to MPHF blocks in order and a block's slots are
-// contiguous, so an entry is held for at most one block, in a ring at its
-// slot. The ring keeps only where a held entry is in the terms file, and the
+// contiguous, so an entry waits for at most one block, in a ring at its
+// slot. The ring keeps only where an entry is in the terms file, and the
 // entry is read back when its slot comes, so the writer's memory doesn't
 // grow with a block's entries.
 type indexPackWriter struct {
@@ -402,28 +423,30 @@ type indexPackWriter struct {
 	next    uint32       // the slot to write next
 	ring    []indexEntry // a held slot s at ring[s % len(ring)]
 	pending int          // how many entries the ring holds
-	buf     []byte       // a held entry, read back
+	sec     io.SectionReader
+	entry   *bufio.Reader // the entry being written, read back from the terms file
+	buf     []byte        // the item being written
 }
 
 // newIndexPackWriter returns a writer whose slots arrive at most hold past
 // the next one to write: streamhash's MaxBlockKeys.
 func newIndexPackWriter(pw *packfile.Writer, terms io.ReaderAt, slabs, hold uint32) *indexPackWriter {
-	return &indexPackWriter{pw: pw, terms: terms, layout: indexLayout{slabs: slabs}, ring: make([]indexEntry, hold)}
+	return &indexPackWriter{
+		pw: pw, terms: terms, layout: indexLayout{slabs: slabs}, ring: make([]indexEntry, hold),
+		entry: bufio.NewReaderSize(nil, 64<<10),
+	}
 }
 
-// add writes e with its tagged entries, or holds e until its slot comes.
-func (w *indexPackWriter) add(e indexEntry, entries []byte) error {
+// add holds e until its slot comes, then writes it and every held entry
+// whose slot follows.
+func (w *indexPackWriter) add(e indexEntry) error {
 	if e.slot < w.next || e.slot-w.next >= uint32(len(w.ring)) { //nolint:gosec // a ring of at most MaxBlockKeys
 		return fmt.Errorf("events: MPHF slot %d out of reach of slot %d", e.slot, w.next)
 	}
-	if len(entries) == 0 {
+	if e.n == 0 {
 		return fmt.Errorf("events: slot %d has no entries", e.slot)
 	}
-	if e.slot != w.next {
-		e.n = len(entries)
-		return w.hold(e)
-	}
-	if err := w.write(e, entries); err != nil {
+	if err := w.hold(e); err != nil {
 		return err
 	}
 	return w.drain()
@@ -440,8 +463,7 @@ func (w *indexPackWriter) hold(e indexEntry) error {
 	return nil
 }
 
-// drain writes the held entries whose slots come next, reading each back
-// from the terms file.
+// drain writes the held entries whose slots come next.
 func (w *indexPackWriter) drain() error {
 	for w.pending > 0 {
 		r := &w.ring[int(w.next)%len(w.ring)]
@@ -451,35 +473,50 @@ func (w *indexPackWriter) drain() error {
 		e := *r
 		*r = indexEntry{}
 		w.pending--
-		w.buf = slices.Grow(w.buf[:0], e.n)[:e.n]
-		if _, err := w.terms.ReadAt(w.buf, e.off); err != nil {
-			return fmt.Errorf("events: read back slot %d's entries: %w", e.slot, err)
-		}
-		if err := w.write(e, w.buf); err != nil {
+		if err := w.write(e); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// write appends e's tagged entries to index.pack as the next slot.
-func (w *indexPackWriter) write(e indexEntry, entries []byte) error {
-	tag, body := entries[0], entries[1:]
+// write reads e's tagged entries back from the terms file and appends them to
+// index.pack as the next slot, a split term one slab at a time.
+func (w *indexPackWriter) write(e indexEntry) error {
+	w.sec = *io.NewSectionReader(w.terms, e.off, int64(e.n))
+	w.entry.Reset(&w.sec)
+	tag, err := w.entry.ReadByte()
+	if err != nil {
+		return fmt.Errorf("events: read back slot %d: %w", e.slot, err)
+	}
 	switch tag {
 	case termWhole:
+		if e.n-1 > indexSplitBytes {
+			return fmt.Errorf("events: slot %d: whole entry of %d bytes", e.slot, e.n-1)
+		}
+		body, err := w.read(e.n - 1)
+		if err != nil {
+			return fmt.Errorf("events: read back slot %d: %w", e.slot, err)
+		}
 		if err := w.pw.AppendItem(e.fp[:], body); err != nil {
 			return fmt.Errorf("events: write slot %d to index.pack: %w", e.slot, err)
 		}
 	case termSplit:
 		for x := range w.layout.slabs {
-			bitmap, rest, ok := cutPrefixed(body)
-			if !ok {
-				return fmt.Errorf("events: slot %d: corrupt entry for slab %d", e.slot, x)
+			n, err := binary.ReadUvarint(w.entry)
+			if err == nil && n > runValueMax {
+				err = fmt.Errorf("bitmap of %d bytes", n)
+			}
+			var bitmap []byte
+			if err == nil {
+				bitmap, err = w.read(int(n)) //nolint:gosec // n is at most runValueMax
+			}
+			if err != nil {
+				return fmt.Errorf("events: slot %d: corrupt entry for slab %d: %w", e.slot, x, err)
 			}
 			if err := w.pw.AppendItem(bitmap); err != nil {
 				return fmt.Errorf("events: write split slot %d to index.pack: %w", e.slot, err)
 			}
-			body = rest
 		}
 		w.layout.rows = appendIndexRow(w.layout.rows, e.slot, e.fp)
 	default:
@@ -489,14 +526,11 @@ func (w *indexPackWriter) write(e indexEntry, entries []byte) error {
 	return nil
 }
 
-// cutPrefixed cuts a uvarint-length-prefixed slice off the front of b.
-func cutPrefixed(b []byte) ([]byte, []byte, bool) {
-	n, k := binary.Uvarint(b)
-	if k <= 0 || n > uint64(len(b)-k) { //nolint:gosec // k is at most len(b)
-		return nil, nil, false
-	}
-	end := k + int(n) //nolint:gosec // n is at most len(b)-k
-	return b[k:end], b[end:], true
+// read reads the next n bytes of the entry being written.
+func (w *indexPackWriter) read(n int) ([]byte, error) {
+	w.buf = slices.Grow(w.buf[:0], n)[:n]
+	_, err := io.ReadFull(w.entry, w.buf)
+	return w.buf, err
 }
 
 // finish writes the layout and closes the pack. streamhash's MPHF is

@@ -57,7 +57,7 @@ func TestSweepChunkArtifactsRemovesScratch(t *testing.T) {
 	cat, _ := testCatalog(t)
 	runs := cat.layout.ScratchPaths(4, geometry.KindEvents)[0]
 	require.NoError(t, os.MkdirAll(runs, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(runs, "00000"), []byte("run"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(runs, "runs"), []byte("run"), 0o600))
 	require.NoError(t, cat.MarkChunkFreezing(4, geometry.KindEvents))
 
 	require.NoError(t, cat.SweepChunkArtifacts([]ArtifactRef{

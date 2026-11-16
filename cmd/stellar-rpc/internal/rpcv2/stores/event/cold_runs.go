@@ -129,29 +129,27 @@ func (r *coldRuns) merge() iter.Seq2[runTerm, error] {
 		}
 		var (
 			term runTerm
-			held []byte
-			ends []int
+			runs []*runReader // the runs holding term, out of the heap while it is yielded
 		)
 		for len(m.items) > 0 {
 			term.key = m.items[0].key
-			term.parts, held, ends = term.parts[:0], held[:0], ends[:0]
+			term.parts, runs = term.parts[:0], runs[:0]
 			for len(m.items) > 0 && m.items[0].key == term.key {
-				rr := m.items[0]
-				held = append(held, rr.value...)
-				ends = append(ends, len(held))
-				term.parts = append(term.parts, runPart{slab: rr.slab})
-				if err := m.advance(); err != nil {
-					yield(runTerm{}, err)
-					return
-				}
-			}
-			start := 0
-			for i, end := range ends {
-				term.parts[i].bitmap = held[start:end:end]
-				start = end
+				rr := m.pop()
+				runs = append(runs, rr)
+				term.parts = append(term.parts, runPart{slab: rr.slab, bitmap: rr.value})
 			}
 			if !yield(term, nil) {
 				return
+			}
+			for _, rr := range runs {
+				if err := rr.next(); err != nil {
+					yield(runTerm{}, err)
+					return
+				}
+				if !rr.done {
+					m.push(rr)
+				}
 			}
 		}
 	}
@@ -168,7 +166,9 @@ func (r *coldRuns) open() (*runMerge, error) {
 	m.less = func(a, b *runReader) bool {
 		return cmp.Or(bytes.Compare(a.key[:], b.key[:]), cmp.Compare(a.run, b.run)) < 0
 	}
-	// The runs share 16 MiB of read buffers, between 4 KiB and 64 KiB each.
+	// Each run reads through a buffer of 16 MiB over the number of runs, kept
+	// between 4 KiB and 64 KiB: 16 MiB in all up to 4,096 runs, 4 KiB a run
+	// beyond that.
 	bufSize := min(max(16<<20/max(len(r.spans), 1), 4<<10), 64<<10)
 	for i, s := range r.spans {
 		rr := &runReader{run: i, slab: s.slab}
@@ -181,20 +181,6 @@ func (r *coldRuns) open() (*runMerge, error) {
 		}
 	}
 	return m, nil
-}
-
-// advance moves the smallest run to its next entry.
-func (m *runMerge) advance() error {
-	rr := m.items[0]
-	if err := rr.next(); err != nil {
-		return err
-	}
-	if rr.done {
-		m.pop()
-	} else {
-		m.down()
-	}
-	return nil
 }
 
 // runReader reads one run's entries in order.
@@ -217,9 +203,12 @@ type entryReader struct {
 	br    *bufio.Reader
 	max   uint64 // the longest value accepted
 	key   TermKey
-	value []byte // valid until the next call to next
-	at    int64  // where value starts in the source
+	value []byte // valid until the next call to next; nil with keysOnly
+	at    int64  // where the value starts in the source
+	n     int    // the value's length
 	done  bool
+	// keysOnly skips the values, leaving at and n to say where each one is.
+	keysOnly bool
 }
 
 // posReader keeps its position in the source it reads.
@@ -268,9 +257,13 @@ func (r *entryReader) next() error {
 		if n > r.max {
 			return fmt.Errorf("events: %s: entry of %d bytes", r.name, n)
 		}
-		r.at = r.src.pos - int64(r.br.Buffered())
-		r.value = slices.Grow(r.value[:0], int(n))[:n] //nolint:gosec // n is at most r.max
-		_, err = io.ReadFull(r.br, r.value)
+		r.at, r.n = r.src.pos-int64(r.br.Buffered()), int(n) //nolint:gosec // n is at most r.max
+		if r.keysOnly {
+			_, err = r.br.Discard(r.n)
+		} else {
+			r.value = slices.Grow(r.value[:0], r.n)[:r.n]
+			_, err = io.ReadFull(r.br, r.value)
+		}
 	}
 	if err != nil {
 		if errors.Is(err, io.EOF) {
