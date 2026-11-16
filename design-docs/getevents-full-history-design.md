@@ -407,7 +407,7 @@ For each segment (10,000 ledgers):
    c. Mark segment as available in DB.
 ```
 
-Only the ledger offset array is retained for the whole segment (the packfile metadata needs it). The index build holds at most two slabs of postings in memory, the one filling and the one being written; everything else waits on disk in the runs until step 2 merges them.
+Only the ledger offset array is retained for the whole segment (the packfile metadata needs it). The index build holds at most two slabs of postings in memory, the one filling and the one being written; everything else waits on disk in the runs until step 2 merges them. The merge keeps about 12 KB of read buffers per run: about 50 MB for a sac-9000 chunk's 4,120 runs, about 350 MB at 29,600.
 
 If a backfill worker fails mid-segment, the incomplete segment is discarded and restarted. Segments are independent so backfill can be parallelized across multiple workers. The cold segments produced are identical in format to those produced by freeze.
 
