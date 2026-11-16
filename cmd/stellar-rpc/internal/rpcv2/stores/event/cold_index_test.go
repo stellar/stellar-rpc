@@ -47,17 +47,14 @@ func termsOf(ts ...Term) *Terms {
 
 // addKeys is Add for fixture keys already made under the builder's secret.
 func addKeys(b *ColdIndexBuilder, eventID uint32, keys []TermKey) error {
-	slab := eventID >> indexSlabShift
+	if err := b.Add(eventID, &Terms{}); err != nil { // moves the builder to eventID's slab
+		return err
+	}
 	for _, k := range keys {
-		if slab != b.live.slab || b.live.n == hotSlabPostings {
-			if err := b.spill(slab); err != nil {
-				return err
-			}
-		}
 		b.live.add(k, eventID)
 	}
 	if len(keys) > 0 {
-		b.maxID, b.any = max(b.maxID, eventID), true
+		b.slabs = eventID>>indexSlabShift + 1
 	}
 	return nil
 }
@@ -407,14 +404,23 @@ func TestIndexPack_IndexCostsAtMostFourBytesPerRecord(t *testing.T) {
 		{"singletons", func() Bitmaps { return buildIndex(t, 30_000) }},
 		{"split terms", func() Bitmaps { return newSplitFixture().bitmaps }},
 		{"a record per term", func() Bitmaps {
-			// Over half a record each, so no two share one.
+			// Over half a record each, so no two share one: a bitset container
+			// in one slab and up to 499 ids in the next. maxTermsPerEvent terms
+			// share each span of ids, the most an event carries.
+			const span = 2 * 4_097 // 4,097 even ids make one bitset container
+			const spansPerSlab = hotSlabEvents / span
 			b := NewBitmaps()
-			base := roaring.New()
-			base.AddMany(everyOther(0, 1)[:4097]) // one bitset container
-			more := everyOther(1, 2)
-			for i := range 2_000 {
-				bm := base.Clone()
-				bm.AddMany(more[:i%500])
+			for i := range uint32(2_000) {
+				group := i / maxTermsPerEvent
+				slab := 2 * (group / spansPerSlab)
+				start := slab<<indexSlabShift + group%spansPerSlab*span
+				bm := roaring.New()
+				for id := start; id < start+span; id += 2 {
+					bm.Add(id)
+				}
+				for k := range i % 500 {
+					bm.Add(start + hotSlabEvents + 2*k)
+				}
 				b[NewTerm(FieldContractID, fmt.Appendf(nil, "term-%d", i)).Key(testIndexSecret)] = bm
 			}
 			return b
@@ -508,48 +514,6 @@ func binaryID(id uint32) []byte {
 	return []byte{byte(id >> 24), byte(id >> 16), byte(id >> 8), byte(id)}
 }
 
-// An event may carry more terms than the buffer holds per event: the slab
-// spills when the buffer fills, and the merge unites the two runs of one
-// slab.
-func TestColdIndexBuilder_SpillsAFullBuffer(t *testing.T) {
-	dir, _ := buildColdFixture(t, indexTestChunkID, 1, 1)
-	b := NewColdIndexBuilder(indexTestChunkID, dir, testIndexSecret)
-	pool := make([]Term, 100)
-	for i := range pool {
-		pool[i] = NewTerm(FieldContractID, fmt.Appendf(nil, "pool-%d", i))
-	}
-	every := NewTerm(FieldContractID, []byte("every"))
-	want := NewBitmaps()
-	for id := range uint32(hotSlabEvents) {
-		terms := make([]Term, 0, 1+maxTermsPerEvent)
-		terms = append(terms, every)
-		for j := range uint32(maxTermsPerEvent) {
-			terms = append(terms, pool[(id*7+j*13)%100])
-		}
-		for _, tm := range terms {
-			want.AddTo(tm.Key(testIndexSecret), id)
-		}
-		require.NoError(t, b.Add(id, termsOf(terms...)))
-	}
-	runsDir := filepath.Join(dir, IndexRunsDirName(indexTestChunkID))
-	require.NoError(t, b.awaitSpill())
-	require.FileExists(t, filepath.Join(runsDir, "runs"), "the buffer spilled before the slab ended")
-	require.NoError(t, b.Write(context.Background()))
-
-	cr, err := OpenColdReader(indexTestChunkID, ColdDirs{Data: dir, Index: dir}, ColdReaderOptions{Concurrency: 2})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cr.Close() })
-	terms := append([]Term{every}, pool...)
-	got, _, err := cr.LookupTerms(context.Background(), terms, IDRange{End: hotSlabEvents})
-	require.NoError(t, err)
-	for i, tm := range terms {
-		require.True(t, want[tm.Key(testIndexSecret)].Equals(got[i]), "term %d", i)
-	}
-	m, err := cr.waitMPHF()
-	require.NoError(t, err)
-	require.Equal(t, uint64(len(want)), m.numKeys())
-}
-
 // A slab spills in the background, and a failed spill fails the build at
 // its next spill or at Write.
 func TestColdIndexBuilder_FailedSpillFailsTheBuild(t *testing.T) {
@@ -607,8 +571,7 @@ func TestColdIndexBuilder_RemovesRuns(t *testing.T) {
 }
 
 // A term's run bitmaps become its index.pack entries: a term in several
-// slabs is united, and a split term keeps each slab's bitmap, uniting a slab
-// spilled in several runs.
+// slabs is united, and a split term keeps each slab's bitmap.
 func TestTermEncoder_WholeAndSplitTerms(t *testing.T) {
 	serialize := func(ids []uint32) []byte {
 		bm := roaring.BitmapOf(ids...)
@@ -626,23 +589,19 @@ func TestTermEncoder_WholeAndSplitTerms(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, append([]byte{termWhole}, serialize([]uint32{1, 5, 3<<16 + 7})...), got)
 
-	// Every other id of nine of ten slabs is past indexSplitBytes. Slab 0
-	// spilled in two runs, and slab 2 holds none of the term.
-	slab0 := everyOther(0, 1)
-	parts := []runPart{
-		{slab: 0, bitmap: serialize(slab0[:len(slab0)/2])},
-		{slab: 0, bitmap: serialize(slab0[len(slab0)/2:])},
-	}
-	want := [][]byte{serialize(slab0)}
+	// Every other id of nine of ten slabs is past indexSplitBytes, and slab 2
+	// holds none of the term.
+	var (
+		parts []runPart
+		want  [][]byte
+	)
 	for x := range uint32(10) {
-		switch x {
-		case 0:
-		case 2:
+		if x == 2 {
 			want = append(want, nil)
-		default:
-			parts = append(parts, runPart{slab: x, bitmap: serialize(everyOther(x, x+1))})
-			want = append(want, parts[len(parts)-1].bitmap)
+			continue
 		}
+		parts = append(parts, runPart{slab: x, bitmap: serialize(everyOther(x, x+1))})
+		want = append(want, parts[len(parts)-1].bitmap)
 	}
 	got, err = enc.encode(parts, 10)
 	require.NoError(t, err)
