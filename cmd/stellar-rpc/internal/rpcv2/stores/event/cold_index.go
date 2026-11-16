@@ -329,8 +329,7 @@ type termEncoder struct {
 func (e *termEncoder) write(w *bufio.Writer, key TermKey, parts []runPart, slabs uint32) (bool, error) {
 	if len(parts) == 1 {
 		// One slab's bitmap is far under indexSplitBytes.
-		writeTagged(w, &key, termWhole, parts[0].bitmap)
-		return false, nil
+		return false, writeTagged(w, &key, termWhole, parts[0].bitmap)
 	}
 	if err := e.unite(parts); err != nil {
 		return false, err
@@ -338,24 +337,23 @@ func (e *termEncoder) write(w *bufio.Writer, key TermKey, parts []runPart, slabs
 	if e.union.GetSerializedSizeInBytes() <= indexSplitBytes {
 		e.whole.Reset()
 		_, _ = e.union.WriteTo(&e.whole) // a bytes.Buffer write cannot fail
-		writeTagged(w, &key, termWhole, e.whole.Bytes())
-		return false, nil
+		return false, writeTagged(w, &key, termWhole, e.whole.Bytes())
 	}
-	writeSplit(w, &key, parts, slabs)
-	return true, nil
+	return true, writeSplit(w, &key, parts, slabs)
 }
 
 // writeTagged writes key || uvarint(len) || tag || body.
-func writeTagged(w *bufio.Writer, key *TermKey, tag byte, body []byte) {
+func writeTagged(w *bufio.Writer, key *TermKey, tag byte, body []byte) error {
 	writeHead(w, key, 1+len(body))
 	_ = w.WriteByte(tag)
-	_, _ = w.Write(body)
+	_, err := w.Write(body)
+	return err
 }
 
 // writeSplit writes a split term as writeTagged would, its body being, per
 // slab, uvarint(len) || the term's bitmap in the slab, empty without one. A
 // slab without one takes one byte, its zero length.
-func writeSplit(w *bufio.Writer, key *TermKey, parts []runPart, slabs uint32) {
+func writeSplit(w *bufio.Writer, key *TermKey, parts []runPart, slabs uint32) error {
 	var length [binary.MaxVarintLen64]byte
 	n := 1 + int(slabs) - len(parts)
 	for _, p := range parts {
@@ -369,8 +367,11 @@ func writeSplit(w *bufio.Writer, key *TermKey, parts []runPart, slabs uint32) {
 			bitmap, parts = parts[0].bitmap, parts[1:]
 		}
 		_, _ = w.Write(binary.AppendUvarint(w.AvailableBuffer(), uint64(len(bitmap))))
-		_, _ = w.Write(bitmap)
+		if _, err := w.Write(bitmap); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // unite sets e.union to the union of parts, borrowing their bytes.
