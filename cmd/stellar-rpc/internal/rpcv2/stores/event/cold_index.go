@@ -40,26 +40,24 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 
 // ColdIndexBuilder builds a chunk's index.hash and index.pack from its
 // postings with bounded memory. One slab of postings is in memory; when the
-// next slab starts or the buffer fills, it is written as a run in a
-// directory beside the index files in the background while the next fills,
-// and Write merges the runs. Both cold backfill and the live-chunk freeze
-// feed it single-threaded, re-deriving terms from raw LCMs
-// (Terms.AppendEvent). The directory is the chunk's, so one builder works
-// on a chunk at a time, which the backfill plan guarantees: it builds a chunk
-// once per pass.
+// next slab starts, it is written as a run in a directory beside the index
+// files in the background while the next fills, and Write merges the runs.
+// Both cold backfill and the live-chunk freeze feed it single-threaded,
+// re-deriving terms from raw LCMs (Terms.AppendEvent). The directory is the
+// chunk's, so one builder works on a chunk at a time, which the backfill plan
+// guarantees: it builds a chunk once per pass.
 type ColdIndexBuilder struct {
 	chunkID chunk.ID
 	dir     string
 	secret  [stores.SecretLen]byte
 	runs    coldRuns
 	live    *hotSlab
-	// spare is the slab being spilled, or the free one once that is over;
-	// spilling yields the outcome of the spill in flight, at most one.
-	spare    *hotSlab
+	// spare is the slab being spilled, or a free one once that spill is over.
+	spare *hotSlab
+	// spilling yields the outcome of the spill in flight. At most one runs.
 	spilling chan error
 	spillErr error
-	maxID    uint32
-	any      bool
+	slabs    uint32 // how many slabs the index covers
 	written  bool
 }
 
@@ -81,46 +79,50 @@ func (b *ColdIndexBuilder) Add(eventID uint32, terms *Terms) error {
 	if b.written {
 		return errors.New("events: index already written")
 	}
+	if terms.Len() > maxTermsPerEvent {
+		return fmt.Errorf("events: event %d has %d terms", eventID, terms.Len())
+	}
 	slab := eventID >> indexSlabShift
 	if slab < b.live.slab {
 		return fmt.Errorf("events: event %d added after slab %d", eventID, b.live.slab)
 	}
-	for i := range terms.Len() {
-		if slab != b.live.slab || b.live.n == hotSlabPostings {
-			if err := b.spill(slab); err != nil {
-				return err
-			}
+	if slab > b.live.slab {
+		if err := b.spill(); err != nil {
+			return err
 		}
+		b.live.reset(slab)
+	}
+	for i := range terms.Len() {
 		b.live.add(terms.Key(i, b.secret), eventID)
 	}
 	if terms.Len() > 0 {
-		b.maxID, b.any = max(b.maxID, eventID), true
+		b.slabs = slab + 1
 	}
 	return nil
 }
 
 // Close removes the runs of a build that is not written.
 func (b *ColdIndexBuilder) Close() error {
-	_ = b.awaitSpill() // a spill error fails the build Close abandons
+	_ = b.awaitSpill() // the build is abandoned, so a spill error doesn't matter
 	return b.runs.remove()
 }
 
 // Write produces index.pack + index.hash and removes the runs. Both files
 // are fsync'd before it returns. A chunk without terms gets a real (empty)
-// index.hash and a zero-record index.pack. The runs are merged once, into a
-// scratch file holding each term's index.pack entries; index.hash is built
-// from that file's keys in order, and index.pack is written from it again in
-// slot order, a big term as one entry per slab (layout in cold_format.go).
-// On error, any index.hash or index.pack produced is removed. A
-// streamhash.ErrBlockOverflow is not retryable: the same secret routes the
-// same keys to the same blocks.
+// index.hash and a zero-record index.pack. Write merges the runs once, into
+// the terms file, which holds each term's index.pack entries. It builds
+// index.hash from that file's keys, in order, then reads the file again to
+// write index.pack in slot order, a big term as one entry per slab (layout in
+// cold_format.go). On error, any index.hash or index.pack produced is
+// removed. A streamhash.ErrBlockOverflow is not retryable: the same secret
+// routes the same keys to the same blocks.
 func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 	if b.written {
 		return errors.New("events: index already written")
 	}
 	b.written = true
 	defer func() {
-		_ = b.awaitSpill() // a spill in flight writes the runs remove deletes
+		_ = b.awaitSpill() // wait for a spill in flight before deleting the runs it writes
 		if rerr := b.runs.remove(); rerr != nil {
 			err = errors.Join(err, fmt.Errorf("events: remove index runs: %w", rerr))
 		}
@@ -128,16 +130,13 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("events: build index: %w", err)
 	}
-	if err := b.spill(0); err != nil {
+	if err := b.spill(); err != nil {
 		return err
 	}
 	if err := b.awaitSpill(); err != nil {
 		return err
 	}
-	var slabs uint32
-	if b.any {
-		slabs = b.maxID>>indexSlabShift + 1
-	}
+	slabs := b.slabs
 	termsPath := filepath.Join(b.runs.dir, "terms")
 	terms, err := writeTerms(ctx, termsPath, b.runs.merge(), slabs)
 	if err != nil {
@@ -165,12 +164,11 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 	return b.writePack(ctx, m, termsPath, slabs, filepath.Join(b.dir, IndexPackName(b.chunkID)))
 }
 
-// spill starts writing the postings in memory, if any, as the next run and
-// empties a slab for slab. The spill before it is over first, so the runs
-// keep their order.
-func (b *ColdIndexBuilder) spill(slab uint32) error {
+// spill starts writing the live slab's postings, if any, as the next run,
+// and swaps in the spare slab for the caller to reset. The spill before it
+// is over first, so the runs keep their order.
+func (b *ColdIndexBuilder) spill() error {
 	if b.live.n == 0 {
-		b.live.reset(slab)
 		return nil
 	}
 	if err := b.awaitSpill(); err != nil {
@@ -178,10 +176,9 @@ func (b *ColdIndexBuilder) spill(slab uint32) error {
 	}
 	full := b.live
 	if b.spare == nil {
-		b.spare = newHotSlab(slab)
+		b.spare = newHotSlab(0)
 	}
 	b.live, b.spare = b.spare, full
-	b.live.reset(slab)
 	done := make(chan error, 1)
 	b.spilling = done
 	go func() {
@@ -329,8 +326,8 @@ func termKeys(path string, slabs uint32) iter.Seq2[TermKey, error] {
 // termEncoder encodes merged terms as index.pack stores them, reusing its
 // bitmaps and buffers from term to term.
 type termEncoder struct {
-	union, part, slab roaring.Bitmap
-	out, slabOut      bytes.Buffer
+	union, part roaring.Bitmap
+	out         bytes.Buffer
 }
 
 // encode returns a term's tagged entries from its bitmap in each run, valid
@@ -344,7 +341,7 @@ func (e *termEncoder) encode(parts []runPart, slabs uint32) ([]byte, error) {
 		e.out.Write(parts[0].bitmap)
 		return e.out.Bytes(), nil
 	}
-	if err := e.unite(&e.union, parts); err != nil {
+	if err := e.unite(parts); err != nil {
 		return nil, err
 	}
 	if e.union.GetSerializedSizeInBytes() <= indexSplitBytes {
@@ -355,24 +352,10 @@ func (e *termEncoder) encode(parts []runPart, slabs uint32) ([]byte, error) {
 	e.out.WriteByte(termSplit)
 	var length [binary.MaxVarintLen32]byte
 	for x := range slabs {
-		n := 0
-		for n < len(parts) && parts[n].slab == x {
-			n++
-		}
 		var bitmap []byte
-		switch n {
-		case 0:
-		case 1:
-			bitmap = parts[0].bitmap
-		default: // a slab spilled in several runs
-			if err := e.unite(&e.slab, parts[:n]); err != nil {
-				return nil, err
-			}
-			e.slabOut.Reset()
-			_, _ = e.slab.WriteTo(&e.slabOut)
-			bitmap = e.slabOut.Bytes()
+		if len(parts) > 0 && parts[0].slab == x {
+			bitmap, parts = parts[0].bitmap, parts[1:]
 		}
-		parts = parts[n:]
 		e.out.Write(length[:binary.PutUvarint(length[:], uint64(len(bitmap)))])
 		e.out.Write(bitmap)
 	}
@@ -382,16 +365,16 @@ func (e *termEncoder) encode(parts []runPart, slabs uint32) ([]byte, error) {
 	return e.out.Bytes(), nil
 }
 
-// unite sets bm to the union of parts, borrowing their bytes.
-func (e *termEncoder) unite(bm *roaring.Bitmap, parts []runPart) error {
-	bm.Clear()
+// unite sets e.union to the union of parts, borrowing their bytes.
+func (e *termEncoder) unite(parts []runPart) error {
+	e.union.Clear()
 	for _, p := range parts {
 		if _, err := e.part.FromBuffer(p.bitmap); err != nil {
 			return fmt.Errorf("decode bitmap of slab %d: %w", p.slab, err)
 		}
-		bm.Or(&e.part)
+		e.union.Or(&e.part)
 	}
-	bm.RunOptimize()
+	e.union.RunOptimize()
 	return nil
 }
 
@@ -427,36 +410,47 @@ func (w *indexPackWriter) add(e indexEntry, entries []byte) error {
 		return fmt.Errorf("events: MPHF slot %d out of reach of slot %d", e.slot, w.next)
 	}
 	if e.slot != w.next {
-		r := &w.ring[int(e.slot)%len(w.ring)]
-		if r.end != 0 {
-			return fmt.Errorf("events: MPHF slot %d repeated", e.slot)
-		}
-		e.start = len(w.held)
-		w.held = append(w.held, entries...)
-		e.end = len(w.held)
-		*r = e
-		w.pending++
-		return nil
+		return w.hold(e, entries)
 	}
-	for {
-		if err := w.write(e, entries); err != nil {
-			return err
-		}
-		w.next++
-		r := &w.ring[int(w.next)%len(w.ring)]
-		if w.pending == 0 || r.end == 0 {
-			break
-		}
-		e, *r = *r, indexEntry{}
-		w.pending--
-		entries = w.held[e.start:e.end]
+	if err := w.write(e, entries); err != nil {
+		return err
 	}
-	if w.pending == 0 {
-		w.held = w.held[:0]
+	return w.drain()
+}
+
+// hold keeps e's tagged entries in the ring at e's slot.
+func (w *indexPackWriter) hold(e indexEntry, entries []byte) error {
+	r := &w.ring[int(e.slot)%len(w.ring)]
+	if r.end != 0 {
+		return fmt.Errorf("events: MPHF slot %d repeated", e.slot)
 	}
+	e.start = len(w.held)
+	w.held = append(w.held, entries...)
+	e.end = len(w.held)
+	*r = e
+	w.pending++
 	return nil
 }
 
+// drain writes the held entries whose slots come next.
+func (w *indexPackWriter) drain() error {
+	for w.pending > 0 {
+		r := &w.ring[int(w.next)%len(w.ring)]
+		if r.end == 0 {
+			return nil
+		}
+		e := *r
+		*r = indexEntry{}
+		w.pending--
+		if err := w.write(e, w.held[e.start:e.end]); err != nil {
+			return err
+		}
+	}
+	w.held = w.held[:0]
+	return nil
+}
+
+// write appends e's tagged entries to index.pack as the next slot.
 func (w *indexPackWriter) write(e indexEntry, entries []byte) error {
 	if len(entries) == 0 {
 		return fmt.Errorf("events: slot %d has no entries", e.slot)
@@ -467,7 +461,6 @@ func (w *indexPackWriter) write(e indexEntry, entries []byte) error {
 		if err := w.pw.AppendItem(e.fp[:], body); err != nil {
 			return fmt.Errorf("events: write slot %d to index.pack: %w", e.slot, err)
 		}
-		return nil
 	case termSplit:
 		for x := range w.layout.slabs {
 			bitmap, rest, ok := cutPrefixed(body)
@@ -480,10 +473,11 @@ func (w *indexPackWriter) write(e indexEntry, entries []byte) error {
 			body = rest
 		}
 		w.layout.rows = appendIndexRow(w.layout.rows, e.slot, e.fp)
-		return nil
 	default:
 		return fmt.Errorf("events: slot %d: entries tagged %d", e.slot, tag)
 	}
+	w.next++
+	return nil
 }
 
 // cutPrefixed cuts a uvarint-length-prefixed slice off the front of b.
