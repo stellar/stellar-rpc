@@ -32,10 +32,11 @@ type runSpan struct {
 	slab   uint32
 }
 
-// runGap is the hole left before each run after the first. Readahead near a
-// run's end reads past it: a hole reads as zeros without touching the disk,
-// where the start of the next run, which the merge read long before, would be
-// read from disk again once memory pressure had evicted it.
+// runGap is the hole left before each run after the first. Near a run's end,
+// readahead reads on past it, and a hole reads as zeros without touching the
+// disk. Without the hole, readahead would read the start of the next run,
+// which the merge read long before, from disk a second time once memory
+// pressure had evicted it.
 const runGap = 1 << 20
 
 // spill appends slab's terms, in key order with their serialized bitmaps, to

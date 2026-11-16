@@ -600,19 +600,6 @@ func (m *mphf) Lookup(keys []TermKey) []slotLookup {
 	return results
 }
 
-// Close unmaps the index file; callers must call it (see openMPHF).
-func (m *mphf) Close() error {
-	return m.idx.Close()
-}
-
-// isEmpty reports whether the index holds zero terms (an eventless chunk).
-func (m *mphf) isEmpty() bool { return m.numKeys() == 0 }
-
-// numKeys returns the number of keys the MPHF was built over (0 for an
-// eventless chunk); the cold reader cross-checks it against index.pack's
-// record count.
-func (m *mphf) numKeys() uint64 { return m.idx.NumKeys() }
-
 // lookupRouted is Lookup's answer for one key already routed.
 func (m *mphf) lookupRouted(rk TermKey) (uint32, [IndexRecordFingerprintLen]byte, error) {
 	slot, err := slotOf(m.idx.QueryRank(rk[:]))
@@ -643,3 +630,16 @@ func slotOf(rank uint64, err error) (uint32, error) {
 	}
 	return uint32(rank), nil
 }
+
+// Close unmaps the index file; callers must call it (see openMPHF).
+func (m *mphf) Close() error {
+	return m.idx.Close()
+}
+
+// isEmpty reports whether the index holds zero terms (an eventless chunk).
+func (m *mphf) isEmpty() bool { return m.numKeys() == 0 }
+
+// numKeys returns the number of keys the MPHF was built over (0 for an
+// eventless chunk); the cold reader cross-checks it against index.pack's
+// record count.
+func (m *mphf) numKeys() uint64 { return m.idx.NumKeys() }
