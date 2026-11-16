@@ -597,13 +597,11 @@ func newCaptiveCoreOpeners(
 	// One set of params for both openers; the HTTP settings are applied per toml
 	// below, not passed here.
 	params := ledgerbackend.CaptiveCoreTomlParams{
-		HistoryArchiveURLs:                 ing.HistoryArchiveURLs,
-		NetworkPassphrase:                  peek.NetworkPassphrase,
-		Strict:                             true,
-		EnforceSorobanDiagnosticEvents:     true,
-		EnforceSorobanTransactionMetaExtV1: true,
-		EmitUnifiedEvents:                  true,
-		CoreBinaryPath:                     binaryPath,
+		HistoryArchiveURLs: ing.HistoryArchiveURLs,
+		NetworkPassphrase:  peek.NetworkPassphrase,
+		Strict:             true,
+		EmitVerboseMeta:    true, // matches the meta flags galexie writes the datalake with
+		CoreBinaryPath:     binaryPath,
 	}
 
 	backfillOpener, err := newCaptiveCoreOpener(
