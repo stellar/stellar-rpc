@@ -80,8 +80,8 @@ func writeRun(f *os.File, terms iter.Seq2[TermKey, []byte]) error {
 }
 
 // writeHead writes the head of an entry, key || uvarint(n), n being the
-// length of what follows. A bufio.Writer keeps the first error and reports it
-// from Flush.
+// length of what follows. A bufio.Writer keeps its first error and returns it
+// from every later write and from Flush.
 func writeHead(w *bufio.Writer, key *TermKey, n int) {
 	b := append(w.AvailableBuffer(), key[:]...)
 	_, _ = w.Write(binary.AppendUvarint(b, uint64(n))) //nolint:gosec // n is a length
