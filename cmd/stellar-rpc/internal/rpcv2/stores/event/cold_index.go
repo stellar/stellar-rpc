@@ -202,8 +202,8 @@ func (b *ColdIndexBuilder) writePack(
 			}
 		}
 	}()
-	r := entryReader{keysOnly: true}
-	if err := r.open(termsPath, termsFileBufferBytes, termsValueMax(slabs)); err != nil {
+	var r entryReader
+	if err := r.open(termsPath, termsFileBufferBytes, termsValueMax(slabs), heldEntryMax); err != nil {
 		return err
 	}
 	defer r.f.Close()
@@ -216,7 +216,7 @@ func (b *ColdIndexBuilder) writePack(
 		if err != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", err)
 		}
-		if err := w.add(indexEntry{slot: slot, fp: fp, off: r.at, n: r.n}); err != nil {
+		if err := w.add(indexEntry{slot: slot, fp: fp, off: r.at, n: r.n}, r.value); err != nil {
 			return err
 		}
 		if err := r.next(); err != nil {
@@ -281,8 +281,8 @@ func termsValueMax(slabs uint32) uint64 {
 // termKeys yields the keys of a terms file of a chunk of slabs, in order.
 func termKeys(ctx context.Context, path string, slabs uint32) iter.Seq2[TermKey, error] {
 	return func(yield func(TermKey, error) bool) {
-		r := entryReader{keysOnly: true}
-		if err := r.open(path, termsFileBufferBytes, termsValueMax(slabs)); err != nil {
+		var r entryReader
+		if err := r.open(path, termsFileBufferBytes, termsValueMax(slabs), 0); err != nil {
 			yield(TermKey{}, err)
 			return
 		}
@@ -373,8 +373,13 @@ func (e *termEncoder) unite(parts []runPart) error {
 	return nil
 }
 
+// heldEntryMax is the longest entry the index.pack writer keeps in memory
+// until its slot comes. It reads longer ones back from the terms file then.
+const heldEntryMax = 64
+
 // indexEntry is a term on its way to its slot: its tagged entries are n
-// bytes at off in the terms file.
+// bytes at off, in the writer's held bytes if n is at most heldEntryMax and
+// in the terms file otherwise.
 type indexEntry struct {
 	slot uint32
 	fp   [IndexRecordFingerprintLen]byte
@@ -385,18 +390,20 @@ type indexEntry struct {
 // indexPackWriter writes entries in slot order as they arrive in key order.
 // Keys in order map to MPHF blocks in order and a block's slots are
 // contiguous, so an entry waits for at most one block, in a ring at its
-// slot. The ring keeps only where an entry is in the terms file, and the
-// entry is read back when its slot comes, so the writer's memory doesn't
-// grow with a block's entries.
+// slot. The writer keeps the bytes of entries of at most heldEntryMax and
+// only where longer ones are in the terms file, so its memory grows by at
+// most heldEntryMax per entry of a block.
 type indexPackWriter struct {
 	pw      *packfile.Writer
-	terms   io.ReaderAt // the terms file, which held entries are read back from
+	terms   io.ReaderAt // the terms file, which longer entries are read back from
 	layout  indexLayout
 	next    uint32       // the slot to write next
 	ring    []indexEntry // a held slot s at ring[s % len(ring)]
 	pending int          // how many entries the ring holds
+	held    []byte       // the short entries the ring holds, emptied with it
+	short   bytes.Reader
 	sec     io.SectionReader
-	entry   *bufio.Reader // the entry being written, read back from the terms file
+	entry   *bufio.Reader // the entry being written
 	buf     []byte        // the item being written
 }
 
@@ -409,14 +416,19 @@ func newIndexPackWriter(pw *packfile.Writer, terms io.ReaderAt, slabs, hold uint
 	}
 }
 
-// add holds e until its slot comes, then writes it and every held entry
-// whose slot follows.
-func (w *indexPackWriter) add(e indexEntry) error {
+// add holds e, whose bytes are value if it is at most heldEntryMax long,
+// until its slot comes, then writes it and every held entry whose slot
+// follows.
+func (w *indexPackWriter) add(e indexEntry, value []byte) error {
 	if e.slot < w.next || e.slot-w.next >= uint32(len(w.ring)) { //nolint:gosec // a ring of at most MaxBlockKeys
 		return fmt.Errorf("events: MPHF slot %d out of reach of slot %d", e.slot, w.next)
 	}
 	if e.n == 0 {
 		return fmt.Errorf("events: slot %d has no entries", e.slot)
+	}
+	if e.n <= heldEntryMax {
+		e.off = int64(len(w.held))
+		w.held = append(w.held, value...)
 	}
 	if err := w.hold(e); err != nil {
 		return err
@@ -449,14 +461,21 @@ func (w *indexPackWriter) drain() error {
 			return err
 		}
 	}
+	w.held = w.held[:0]
 	return nil
 }
 
-// write reads e's tagged entries back from the terms file and appends them to
-// index.pack as the next slot, a split term one slab at a time.
+// write reads e's tagged entries, from its held bytes or back from the terms
+// file, and appends them to index.pack as the next slot, a split term one
+// slab at a time.
 func (w *indexPackWriter) write(e indexEntry) error {
-	w.sec = *io.NewSectionReader(w.terms, e.off, int64(e.n))
-	w.entry.Reset(&w.sec)
+	if e.n <= heldEntryMax {
+		w.short.Reset(w.held[e.off : e.off+int64(e.n)])
+		w.entry.Reset(&w.short)
+	} else {
+		w.sec = *io.NewSectionReader(w.terms, e.off, int64(e.n))
+		w.entry.Reset(&w.sec)
+	}
 	tag, err := w.entry.ReadByte()
 	if err != nil {
 		return fmt.Errorf("events: read back slot %d: %w", e.slot, err)

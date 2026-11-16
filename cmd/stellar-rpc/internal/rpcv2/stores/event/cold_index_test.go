@@ -638,7 +638,7 @@ func TestIndexPackWriter_RejectsSlotGapsAndRepeats(t *testing.T) {
 		require.NoError(t, err)
 		w := newIndexPackWriter(pw, bytes.NewReader(entries), 0, 4)
 		for _, slot := range tc.slots {
-			if err = w.add(indexEntry{slot: slot, n: len(entries)}); err != nil {
+			if err = w.add(indexEntry{slot: slot, n: len(entries)}, entries); err != nil {
 				break
 			}
 		}
