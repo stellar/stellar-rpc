@@ -642,9 +642,9 @@ func TestIndexPackWriter_RejectsSlotGapsAndRepeats(t *testing.T) {
 // cutPrefixed cuts a uvarint-length-prefixed slice off the front of b.
 func cutPrefixed(b []byte) ([]byte, []byte, bool) {
 	n, k := binary.Uvarint(b)
-	if k <= 0 || n > uint64(len(b)-k) { //nolint:gosec // k is at most len(b)
+	if k <= 0 || n > uint64(len(b)-k) {
 		return nil, nil, false
 	}
-	end := k + int(n) //nolint:gosec // n is at most len(b)-k
+	end := k + int(n)
 	return b[k:end], b[end:], true
 }

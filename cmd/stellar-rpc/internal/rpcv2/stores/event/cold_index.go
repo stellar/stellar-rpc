@@ -498,7 +498,7 @@ func (w *indexPackWriter) readSlab() ([]byte, error) {
 	if n > slabEntryMaxBytes {
 		return nil, fmt.Errorf("bitmap of %d bytes", n)
 	}
-	return w.read(int(n)) //nolint:gosec // n is at most slabEntryMaxBytes
+	return w.read(int(n))
 }
 
 // read reads the next n bytes of the entry being written.
