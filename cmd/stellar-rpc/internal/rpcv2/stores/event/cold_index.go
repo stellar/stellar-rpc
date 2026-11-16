@@ -59,7 +59,6 @@ type ColdIndexBuilder struct {
 	// spare is the slab being spilled, or a free one once that spill is over.
 	spare   *hotSlab
 	spiller sealer // runs one spill at a time, in the background
-	slabs   uint32 // how many slabs the index covers
 	written bool
 }
 
@@ -98,13 +97,10 @@ func (b *ColdIndexBuilder) Add(eventID uint32, terms *Terms) error {
 	for i := range terms.Len() {
 		b.live.add(terms.Key(i, b.secret), eventID)
 	}
-	if terms.Len() > 0 {
-		b.slabs = slab + 1
-	}
 	return nil
 }
 
-// Close removes the runs of a build that is not written.
+// Close waits for the spill in flight, if any, and removes the runs.
 func (b *ColdIndexBuilder) Close() error {
 	_ = b.spiller.wait() // the build is abandoned, so a spill error doesn't matter
 	return b.runs.remove()
@@ -125,9 +121,8 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 	}
 	b.written = true
 	defer func() {
-		_ = b.spiller.wait() // wait for a spill in flight before deleting the runs it writes
-		if rerr := b.runs.remove(); rerr != nil {
-			err = errors.Join(err, fmt.Errorf("events: remove index runs: %w", rerr))
+		if cerr := b.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("events: remove index runs: %w", cerr))
 		}
 	}()
 	if err := ctx.Err(); err != nil {
@@ -139,7 +134,8 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 	if err := b.spiller.wait(); err != nil {
 		return err
 	}
-	slabs := b.slabs
+	b.live, b.spare = nil, nil // the slabs are all in the runs now
+	slabs := b.runs.slabs()
 	termsPath := filepath.Join(b.runs.dir, "terms")
 	terms, err := writeTerms(ctx, termsPath, b.runs.merge(), slabs)
 	if err != nil {
@@ -291,7 +287,7 @@ func writeTerms(
 // termsValueMax bounds one term's tagged entries in the terms file of a
 // chunk of slabs: its bitmap in every slab.
 func termsValueMax(slabs uint32) uint64 {
-	return 1 + uint64(slabs)*(binary.MaxVarintLen32+runValueMax)
+	return 1 + uint64(slabs)*(binary.MaxVarintLen32+slabEntryMaxBytes)
 }
 
 // termKeys yields the keys of a terms file of a chunk of slabs, in order.
@@ -333,7 +329,7 @@ type termEncoder struct {
 func (e *termEncoder) write(w *bufio.Writer, key TermKey, parts []runPart, slabs uint32) (bool, error) {
 	if len(parts) == 1 {
 		// One slab's bitmap is far under indexSplitBytes.
-		writeTagged(w, key, termWhole, parts[0].bitmap)
+		writeTagged(w, &key, termWhole, parts[0].bitmap)
 		return false, nil
 	}
 	if err := e.unite(parts); err != nil {
@@ -342,50 +338,39 @@ func (e *termEncoder) write(w *bufio.Writer, key TermKey, parts []runPart, slabs
 	if e.union.GetSerializedSizeInBytes() <= indexSplitBytes {
 		e.whole.Reset()
 		_, _ = e.union.WriteTo(&e.whole) // a bytes.Buffer write cannot fail
-		writeTagged(w, key, termWhole, e.whole.Bytes())
+		writeTagged(w, &key, termWhole, e.whole.Bytes())
 		return false, nil
 	}
-	return true, writeSplit(w, key, parts, slabs)
+	writeSplit(w, &key, parts, slabs)
+	return true, nil
 }
 
-// writeTagged writes key || uvarint(len) || tag || body. A bufio.Writer keeps
-// the first error and reports it from Flush.
-func writeTagged(w *bufio.Writer, key TermKey, tag byte, body []byte) {
-	var length [binary.MaxVarintLen64]byte
-	_, _ = w.Write(key[:])
-	_, _ = w.Write(length[:binary.PutUvarint(length[:], uint64(1+len(body)))])
+// writeTagged writes key || uvarint(len) || tag || body.
+func writeTagged(w *bufio.Writer, key *TermKey, tag byte, body []byte) {
+	writeHead(w, key, 1+len(body))
 	_ = w.WriteByte(tag)
 	_, _ = w.Write(body)
 }
 
 // writeSplit writes a split term as writeTagged would, its body being, per
-// slab, uvarint(len) || the term's bitmap in the slab, empty without one. It
-// sizes the body from the parts first, so no slab is copied twice.
-func writeSplit(w *bufio.Writer, key TermKey, parts []runPart, slabs uint32) error {
+// slab, uvarint(len) || the term's bitmap in the slab, empty without one. A
+// slab without one takes one byte, its zero length.
+func writeSplit(w *bufio.Writer, key *TermKey, parts []runPart, slabs uint32) {
 	var length [binary.MaxVarintLen64]byte
-	n, rest := 1, parts
-	for x := range slabs {
-		size := 0
-		if len(rest) > 0 && rest[0].slab == x {
-			size, rest = len(rest[0].bitmap), rest[1:]
-		}
-		n += binary.PutUvarint(length[:], uint64(size)) + size
+	n := 1 + int(slabs) - len(parts)
+	for _, p := range parts {
+		n += binary.PutUvarint(length[:], uint64(len(p.bitmap))) + len(p.bitmap)
 	}
-	if len(rest) > 0 {
-		return fmt.Errorf("bitmap in slab %d of %d", rest[0].slab, slabs)
-	}
-	_, _ = w.Write(key[:])
-	_, _ = w.Write(length[:binary.PutUvarint(length[:], uint64(n))])
+	writeHead(w, key, n)
 	_ = w.WriteByte(termSplit)
 	for x := range slabs {
 		var bitmap []byte
 		if len(parts) > 0 && parts[0].slab == x {
 			bitmap, parts = parts[0].bitmap, parts[1:]
 		}
-		_, _ = w.Write(length[:binary.PutUvarint(length[:], uint64(len(bitmap)))])
+		_, _ = w.Write(binary.AppendUvarint(w.AvailableBuffer(), uint64(len(bitmap))))
 		_, _ = w.Write(bitmap)
 	}
-	return nil
 }
 
 // unite sets e.union to the union of parts, borrowing their bytes.
@@ -397,7 +382,6 @@ func (e *termEncoder) unite(parts []runPart) error {
 		}
 		e.union.Or(&e.part)
 	}
-	e.union.RunOptimize()
 	return nil
 }
 
@@ -503,14 +487,7 @@ func (w *indexPackWriter) write(e indexEntry) error {
 		}
 	case termSplit:
 		for x := range w.layout.slabs {
-			n, err := binary.ReadUvarint(w.entry)
-			if err == nil && n > runValueMax {
-				err = fmt.Errorf("bitmap of %d bytes", n)
-			}
-			var bitmap []byte
-			if err == nil {
-				bitmap, err = w.read(int(n)) //nolint:gosec // n is at most runValueMax
-			}
+			bitmap, err := w.readSlab()
 			if err != nil {
 				return fmt.Errorf("events: slot %d: corrupt entry for slab %d: %w", e.slot, x, err)
 			}
@@ -524,6 +501,18 @@ func (w *indexPackWriter) write(e indexEntry) error {
 	}
 	w.next++
 	return nil
+}
+
+// readSlab reads the next slab's bitmap of the split entry being written.
+func (w *indexPackWriter) readSlab() ([]byte, error) {
+	n, err := binary.ReadUvarint(w.entry)
+	if err != nil {
+		return nil, err
+	}
+	if n > slabEntryMaxBytes {
+		return nil, fmt.Errorf("bitmap of %d bytes", n)
+	}
+	return w.read(int(n)) //nolint:gosec // n is at most slabEntryMaxBytes
 }
 
 // read reads the next n bytes of the entry being written.

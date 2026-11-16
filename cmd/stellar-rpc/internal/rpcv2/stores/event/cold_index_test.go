@@ -54,9 +54,6 @@ func addKeys(b *ColdIndexBuilder, eventID uint32, keys []TermKey) error {
 	for _, k := range keys {
 		b.live.add(k, eventID)
 	}
-	if len(keys) > 0 {
-		b.slabs = eventID>>indexSlabShift + 1
-	}
 	return nil
 }
 
@@ -508,11 +505,7 @@ func TestColdIndexBuilder_BuildsAcrossSlabs(t *testing.T) {
 
 // uniqueTopicTerm is a term no other event carries.
 func uniqueTopicTerm(id uint32) Term {
-	return NewTerm(FieldTopic1, binaryID(id))
-}
-
-func binaryID(id uint32) []byte {
-	return []byte{byte(id >> 24), byte(id >> 16), byte(id >> 8), byte(id)}
+	return NewTerm(FieldTopic1, binary.BigEndian.AppendUint32(nil, id))
 }
 
 // A slab spills in the background, and a failed spill fails the build at
