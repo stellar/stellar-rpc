@@ -578,8 +578,7 @@ func TestTermEncoder_WholeAndSplitTerms(t *testing.T) {
 	encode := func(parts []runPart, slabs uint32) []byte {
 		var buf bytes.Buffer
 		w := bufio.NewWriter(&buf)
-		_, err := enc.write(w, TermKey{}, parts, slabs)
-		require.NoError(t, err)
+		require.NoError(t, enc.write(w, TermKey{}, parts, slabs))
 		require.NoError(t, w.Flush())
 		entries, rest, ok := cutPrefixed(buf.Bytes()[len(TermKey{}):])
 		require.True(t, ok)
