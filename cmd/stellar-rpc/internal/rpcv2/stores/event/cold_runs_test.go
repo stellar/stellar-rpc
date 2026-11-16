@@ -95,7 +95,7 @@ func TestColdRuns_ReportTruncation(t *testing.T) {
 func TestColdRuns_RejectOversizedEntries(t *testing.T) {
 	runs := coldRuns{dir: filepath.Join(t.TempDir(), "runs")}
 	require.NoError(t, os.MkdirAll(runs.dir, 0o755))
-	entry := binary.AppendUvarint(make([]byte, len(TermKey{})), runValueMax+1)
+	entry := binary.AppendUvarint(make([]byte, len(TermKey{})), slabEntryMaxBytes+1)
 	f, err := os.Create(filepath.Join(runs.dir, "runs"))
 	require.NoError(t, err)
 	_, err = f.Write(entry)

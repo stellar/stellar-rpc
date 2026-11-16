@@ -494,11 +494,7 @@ func TestColdIndexBuilder_BuildsAcrossSlabs(t *testing.T) {
 
 // uniqueTopicKey is a term no other event carries.
 func uniqueTopicKey(id uint32) TermKey {
-	return ComputeTermKey(binaryID(id), FieldTopic1)
-}
-
-func binaryID(id uint32) []byte {
-	return []byte{byte(id >> 24), byte(id >> 16), byte(id >> 8), byte(id)}
+	return ComputeTermKey(binary.BigEndian.AppendUint32(nil, id), FieldTopic1)
 }
 
 // A slab spills in the background, and a failed spill fails the build at
