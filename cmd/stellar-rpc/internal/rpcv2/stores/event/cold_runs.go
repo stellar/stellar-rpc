@@ -84,7 +84,7 @@ func writeRun(f *os.File, terms iter.Seq2[TermKey, []byte]) error {
 // from Flush.
 func writeHead(w *bufio.Writer, key *TermKey, n int) {
 	b := append(w.AvailableBuffer(), key[:]...)
-	_, _ = w.Write(binary.AppendUvarint(b, uint64(n)))
+	_, _ = w.Write(binary.AppendUvarint(b, uint64(n))) //nolint:gosec // n is a length
 }
 
 // slabs is how many slabs the runs cover: up to the last one spilled.
