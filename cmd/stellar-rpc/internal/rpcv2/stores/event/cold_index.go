@@ -82,6 +82,9 @@ func (b *ColdIndexBuilder) Add(eventID uint32, terms *Terms) error {
 		return errors.New("events: index already written")
 	}
 	slab := eventID >> indexSlabShift
+	if slab < b.live.slab {
+		return fmt.Errorf("events: event %d added after slab %d", eventID, b.live.slab)
+	}
 	for i := range terms.Len() {
 		if slab != b.live.slab || b.live.n == hotSlabPostings {
 			if err := b.spill(slab); err != nil {
@@ -136,7 +139,7 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 		slabs = b.maxID>>indexSlabShift + 1
 	}
 	termsPath := filepath.Join(b.runs.dir, "terms")
-	terms, err := writeTerms(termsPath, b.runs.merge(), slabs)
+	terms, err := writeTerms(ctx, termsPath, b.runs.merge(), slabs)
 	if err != nil {
 		return fmt.Errorf("events: merge index runs: %w", err)
 	}
@@ -159,7 +162,7 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 		return fmt.Errorf("events: build MPHF: %w", err)
 	}
 	defer m.Close()
-	return b.writePack(m, termsPath, slabs, filepath.Join(b.dir, IndexPackName(b.chunkID)))
+	return b.writePack(ctx, m, termsPath, slabs, filepath.Join(b.dir, IndexPackName(b.chunkID)))
 }
 
 // spill starts writing the postings in memory, if any, as the next run and
@@ -201,7 +204,9 @@ func (b *ColdIndexBuilder) awaitSpill() error {
 }
 
 // writePack writes every term of the terms file at the slot m gives it.
-func (b *ColdIndexBuilder) writePack(m *mphf, termsPath string, slabs uint32, path string) (err error) {
+func (b *ColdIndexBuilder) writePack(
+	ctx context.Context, m *mphf, termsPath string, slabs uint32, path string,
+) (err error) {
 	pw, err := packfile.Create(path, indexPackWriterOptions())
 	if err != nil {
 		return fmt.Errorf("events: create index.pack at %s: %w", path, err)
@@ -220,7 +225,12 @@ func (b *ColdIndexBuilder) writePack(m *mphf, termsPath string, slabs uint32, pa
 	}
 	defer r.f.Close()
 	w := newIndexPackWriter(pw, slabs, m.idx.MaxBlockKeys())
-	for !r.done {
+	for i := 0; !r.done; i++ {
+		if i%buildCtxEvery == 0 {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("events: build index: %w", err)
+			}
+		}
 		slot, fp, err := m.lookupKey(r.key)
 		if err != nil {
 			return fmt.Errorf("events: MPHF lookup during index.pack build: %w", err)
@@ -242,11 +252,17 @@ const (
 	termSplit             // per slab: uvarint(len) || the term's bitmap in the slab, empty without one
 )
 
+// buildCtxEvery is how many terms the merge and the index.pack write handle
+// between checks of the build's context.
+const buildCtxEvery = 1 << 12
+
 const termsFileBufferBytes = 1 << 20
 
 // writeTerms writes terms to path, each as key || uvarint(len) || its tagged
 // index.pack entries, and returns how many it wrote.
-func writeTerms(path string, terms iter.Seq2[runTerm, error], slabs uint32) (_ uint64, err error) {
+func writeTerms(
+	ctx context.Context, path string, terms iter.Seq2[runTerm, error], slabs uint32,
+) (_ uint64, err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return 0, err
 	}
@@ -267,6 +283,11 @@ func writeTerms(path string, terms iter.Seq2[runTerm, error], slabs uint32) (_ u
 	for term, err := range terms {
 		if err != nil {
 			return 0, err
+		}
+		if n%buildCtxEvery == 0 {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
 		}
 		entries, err := enc.encode(term.parts, slabs)
 		if err != nil {
