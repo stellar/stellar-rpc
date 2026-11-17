@@ -113,7 +113,7 @@ history_archive_urls = [
 | `ledgers` | `{data_dir}/ledgers` | Ledger data for completed chunks (large) |
 | `events` | `{data_dir}/events/data` | Event data for completed chunks (large) |
 | `events_index` | `{data_dir}/events/index` | Indexes for event queries |
-| `txhash_raw` | `{data_dir}/txhash/raw` | Temporary files used to build the transaction-hash indexes |
+| `txhashes` | `{data_dir}/txhash/raw` | Temporary files used to build the transaction-hash indexes |
 | `txhash_index` | `{data_dir}/txhash/index` | Indexes for looking up transactions by hash |
 | `hot` | `{data_dir}/hot` | The hot tier: one RocksDB database per chunk not yet moved to flat files |
 

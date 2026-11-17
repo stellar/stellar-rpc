@@ -107,7 +107,7 @@ Every TOML leaf is also settable from the command line:
 | `ledgers` | `{data_dir}/ledgers` | `.pack` files |
 | `events` | `{data_dir}/events/data` | events `.pack` segments |
 | `events_index` | `{data_dir}/events/index` | events `index.pack` + `index.hash` |
-| `txhash_raw` | `{data_dir}/txhash/raw` | transient `.bin` files |
+| `txhashes` | `{data_dir}/txhash/raw` | transient `.bin` files |
 | `txhash_index` | `{data_dir}/txhash/index` | per-window `.idx` |
 | `hot` | `{data_dir}/hot` | per-chunk hot RocksDB databases |
 

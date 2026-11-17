@@ -50,7 +50,7 @@ data_dir = "/var/lib/fullhistory"
 catalog = "/mnt/catalog"
 ledgers = "/mnt/ledgers"
 events = "/mnt/events"
-txhash_raw = "/mnt/txhash/raw"
+txhashes = "/mnt/txhash/raw"
 txhash_index = "/mnt/txhash/index"
 hot = "/mnt/hot"
 
@@ -110,7 +110,7 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	assert.Equal(t, "/mnt/catalog", cfg.Storage.Catalog)
 	assert.Equal(t, "/mnt/ledgers", cfg.Storage.Ledgers)
 	assert.Equal(t, "/mnt/events", cfg.Storage.Events)
-	assert.Equal(t, "/mnt/txhash/raw", cfg.Storage.TxhashRaw)
+	assert.Equal(t, "/mnt/txhash/raw", cfg.Storage.Txhashes)
 	assert.Equal(t, "/mnt/txhash/index", cfg.Storage.TxhashIndex)
 	assert.Equal(t, "/mnt/hot", cfg.Storage.Hot)
 	assert.Equal(t, 8, *cfg.Backfill.Workers)
@@ -509,7 +509,7 @@ func TestResolvePaths_DefaultsUnderDataDir(t *testing.T) {
 	assert.Equal(t, filepath.Join("/data", "ledgers"), p.Ledgers)
 	assert.Equal(t, filepath.Join("/data", "events", "data"), p.Events)
 	assert.Equal(t, filepath.Join("/data", "events", "index"), p.EventsIndex)
-	assert.Equal(t, filepath.Join("/data", "txhash", "raw"), p.TxhashRaw)
+	assert.Equal(t, filepath.Join("/data", "txhash", "raw"), p.Txhashes)
 	assert.Equal(t, filepath.Join("/data", "txhash", "index"), p.TxhashIndex)
 	assert.Equal(t, filepath.Join("/data", "hot"), p.HotStorage)
 }
@@ -522,7 +522,7 @@ func TestResolvePaths_OverridesWin(t *testing.T) {
 	assert.Equal(t, "/mnt/catalog", p.Catalog)
 	assert.Equal(t, "/mnt/ledgers", p.Ledgers)
 	assert.Equal(t, "/mnt/events", p.Events)
-	assert.Equal(t, "/mnt/txhash/raw", p.TxhashRaw)
+	assert.Equal(t, "/mnt/txhash/raw", p.Txhashes)
 	assert.Equal(t, "/mnt/txhash/index", p.TxhashIndex)
 	assert.Equal(t, "/mnt/hot", p.HotStorage)
 }
@@ -543,7 +543,7 @@ func TestValidateRoots(t *testing.T) {
 		Catalog:     "/data/catalog/rocksdb",
 		Ledgers:     "/data/ledgers",
 		Events:      "/data/events",
-		TxhashRaw:   "/data/txhash/raw",
+		Txhashes:    "/data/txhash/raw",
 		TxhashIndex: "/data/txhash/index",
 		HotStorage:  "/data/hot",
 	}

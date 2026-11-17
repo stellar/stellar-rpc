@@ -294,7 +294,7 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 			Ledgers:     ledgersOverride,
 			Events:      eventsOverride,
 			EventsIndex: eventsIndexOverride,
-			TxhashRaw:   txhashRawOverride,
+			Txhashes:    txhashRawOverride,
 			TxhashIndex: txhashIndexOverride,
 			Hot:         hotOverride,
 		},
