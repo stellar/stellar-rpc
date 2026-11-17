@@ -55,7 +55,7 @@ func TestBindFlags_LockstepWithTOMLSchema(t *testing.T) {
 		"service.methods.sendTransaction.queue_limit",
 		"service.methods.simulateTransaction.max_execution_duration",
 		"service.methods.getLedgerEntries.queue_limit",
-		"service.preflight.worker_count",
+		"service.preflight.workers",
 		"service.preflight.enable_debug",
 		"ingestion.core_http_port",
 		"ingestion.core_url",

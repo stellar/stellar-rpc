@@ -100,7 +100,7 @@ func validateForm(cfg config.Config) error {
 const (
 	keyCoreHTTPPort             = "core_http_port"
 	keyCoreHTTPQueryPort        = "core_http_query_port"
-	keyCoreQueryThreadPoolSize  = "core_http_query_thread_pool_size"
+	keyCoreQueryWorkers         = "core_http_query_workers"
 	keyCoreQuerySnapshotLedgers = "core_http_query_snapshot_ledgers"
 )
 
@@ -119,7 +119,7 @@ func validateIngestion(ing config.IngestionConfig) error {
 	}{
 		{keyCoreHTTPPort, *ing.CoreHTTPPort},
 		{keyCoreHTTPQueryPort, *ing.CoreHTTPQueryPort},
-		{keyCoreQueryThreadPoolSize, *ing.CoreHTTPQueryThreadPoolSize},
+		{keyCoreQueryWorkers, *ing.CoreHTTPQueryWorkers},
 		{keyCoreQuerySnapshotLedgers, *ing.CoreHTTPQuerySnapshotLedgers},
 	}
 	for _, p := range ports {
@@ -215,12 +215,12 @@ func validateBSB(bsb config.BSBConfig) error {
 		return fmt.Errorf("[backfill.bsb].buffer_bytes (%d) must be >= 1; "+
 			"delete the key to use the default", bytes)
 	}
-	if *bsb.NumWorkers < 1 {
-		return errors.New("[backfill.bsb].num_workers must be >= 1")
+	if *bsb.Workers < 1 {
+		return errors.New("[backfill.bsb].workers must be >= 1")
 	}
-	if *bsb.NumWorkers > *bsb.BufferSize {
-		return fmt.Errorf("[backfill.bsb].num_workers (%d) cannot exceed buffer_size (%d) — "+
-			"each worker needs a buffer slot to download into", *bsb.NumWorkers, *bsb.BufferSize)
+	if *bsb.Workers > *bsb.BufferSize {
+		return fmt.Errorf("[backfill.bsb].workers (%d) cannot exceed buffer_size (%d) — "+
+			"each worker needs a buffer slot to download into", *bsb.Workers, *bsb.BufferSize)
 	}
 	if *bsb.RetryWait < minConfiguredDuration {
 		return fmt.Errorf("[backfill.bsb].retry_wait is %v — durations below 1ms are rejected; "+
@@ -325,8 +325,8 @@ func validateService(svc config.ServiceConfig) error {
 // nothing picks requests up; a zero queue means the pool is full from the start.
 // Either rejects every simulateTransaction.
 func validatePreflight(p config.PreflightConfig) error {
-	if *p.WorkerCount < 1 {
-		return errors.New("[service.preflight].worker_count must be >= 1")
+	if *p.Workers < 1 {
+		return errors.New("[service.preflight].workers must be >= 1")
 	}
 	if *p.WorkerQueueSize < 1 {
 		return errors.New("[service.preflight].worker_queue_size must be >= 1")

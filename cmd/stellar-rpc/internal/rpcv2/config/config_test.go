@@ -66,7 +66,7 @@ destination_bucket_path = "my-bucket/ledgers"
 
 [backfill.bsb]
 buffer_size = 2000
-num_workers = 40
+workers = 40
 
 [ingestion]
 captive_core_config = "/etc/captive-core.toml"
@@ -118,7 +118,7 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	assert.Equal(t, "GCS", cfg.Backfill.DataStore.Type)
 	assert.Equal(t, "my-bucket/ledgers", cfg.Backfill.DataStore.Params["destination_bucket_path"])
 	assert.Equal(t, uint32(2000), *cfg.Backfill.BSB.BufferSize)
-	assert.Equal(t, uint32(40), *cfg.Backfill.BSB.NumWorkers)
+	assert.Equal(t, uint32(40), *cfg.Backfill.BSB.Workers)
 	assert.Equal(t, "/etc/captive-core.toml", cfg.Ingestion.CaptiveCoreConfig)
 	assert.Equal(t, "debug", cfg.Logging.Level)
 	assert.Equal(t, "json", cfg.Logging.Format)
@@ -137,7 +137,7 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	assert.Equal(t, runtime.GOMAXPROCS(0), *cfg.Backfill.Workers)
 	assert.Equal(t, DefaultMaxRetries, *cfg.Backfill.MaxRetries)
 	assert.Equal(t, uint32(backfill.DefaultBSBPrefetchObjects), *cfg.Backfill.BSB.BufferSize)
-	assert.Equal(t, uint32(backfill.DefaultBSBDownloads), *cfg.Backfill.BSB.NumWorkers)
+	assert.Equal(t, uint32(backfill.DefaultBSBDownloads), *cfg.Backfill.BSB.Workers)
 	assert.Equal(t, int64(backfill.DefaultBSBPrefetchBytes), *cfg.Backfill.BSB.BufferBytes)
 	assert.Equal(t, uint32(backfill.DefaultBSBMaxRetries), *cfg.Backfill.BSB.MaxRetries)
 	assert.Equal(t, backfill.DefaultBSBRetryWait, *cfg.Backfill.BSB.RetryWait)
@@ -248,7 +248,7 @@ func TestParseConfig_PreflightDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	p := cfg.Service.Preflight
-	assert.Equal(t, UsableCPUs(), *p.WorkerCount)
+	assert.Equal(t, UsableCPUs(), *p.Workers)
 	assert.Equal(t, max(UsableCPUs(), DefaultMaxRequestBatchSize), *p.WorkerQueueSize)
 	assert.True(t, *p.EnableDebug)
 }
@@ -273,22 +273,22 @@ max_request_batch_size = 1
 `))
 	require.NoError(t, err)
 
-	assert.Equal(t, uint(3), *cfg.Service.Preflight.WorkerCount)
+	assert.Equal(t, uint(3), *cfg.Service.Preflight.Workers)
 	assert.Equal(t, uint(3), *cfg.Service.Preflight.WorkerQueueSize)
-	assert.Equal(t, uint(3), *cfg.Ingestion.CoreHTTPQueryThreadPoolSize)
+	assert.Equal(t, uint(3), *cfg.Ingestion.CoreHTTPQueryWorkers)
 }
 
 func TestParseConfig_PreflightExplicitValues(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig + `
 [service.preflight]
-worker_count = 3
+workers = 3
 worker_queue_size = 7
 enable_debug = false
 `))
 	require.NoError(t, err)
 
 	p := cfg.Service.Preflight
-	assert.Equal(t, uint(3), *p.WorkerCount)
+	assert.Equal(t, uint(3), *p.Workers)
 	assert.Equal(t, uint(7), *p.WorkerQueueSize)
 	assert.False(t, *p.EnableDebug, "an explicit false must survive the true default")
 }
@@ -302,7 +302,7 @@ func TestParseConfig_CoreHTTPDefaults(t *testing.T) {
 	assert.Equal(t, "http://localhost:11626", ing.CoreURL)
 	assert.Equal(t, DefaultCoreRequestTimeout, *ing.CoreRequestTimeout)
 	assert.Equal(t, DefaultCoreHTTPQueryPort, *ing.CoreHTTPQueryPort)
-	assert.Equal(t, UsableCPUs(), *ing.CoreHTTPQueryThreadPoolSize)
+	assert.Equal(t, UsableCPUs(), *ing.CoreHTTPQueryWorkers)
 	assert.Equal(t, DefaultCoreHTTPQuerySnapshotLedgers, *ing.CoreHTTPQuerySnapshotLedgers)
 }
 

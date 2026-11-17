@@ -45,7 +45,7 @@ func TestSampleConfig_ShownValuesAreDefaults(t *testing.T) {
 	cfg.Ingestion.CaptiveCoreConfig = ""
 	cfg.Ingestion.HistoryArchiveURLs = nil
 	cfg.Ingestion.StellarCoreBinaryPath = ""
-	cfg.Ingestion.CoreHTTPQueryThreadPoolSize = nil
+	cfg.Ingestion.CoreHTTPQueryWorkers = nil
 
 	assert.Equal(t, config.Config{}.WithDefaults(), cfg.WithDefaults())
 }

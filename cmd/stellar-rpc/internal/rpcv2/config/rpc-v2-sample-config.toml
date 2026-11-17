@@ -175,7 +175,7 @@ soroban_inclusion_fee_window_ledgers = 50
 # requests are rejected. The worker count defaults to the number of CPUs the
 # process may use, and the queue to the larger of that and
 # max_request_batch_size, since the calls of one batch start at once.
-#worker_count = 8
+#workers = 8
 #worker_queue_size = 10
 # Diagnostic events in simulateTransaction responses. The default is true, but
 # they are expensive to produce, so this sample turns them off.
@@ -221,7 +221,7 @@ destination_bucket_path = "my-bucket/path/to/ledgers"
 # Prefetch budget in bytes. This is what bounds memory.
 #buffer_bytes = 33_554_432  # 32 MiB
 # Concurrent downloads. At most buffer_size.
-#num_workers = 25
+#workers = 25
 # Prefetch depth in lake files (not ledgers).
 #buffer_size = 5000
 # Retries for one file download (0 means none), and the wait between them.
@@ -258,7 +258,7 @@ core_http_query_port = 11628
 core_request_timeout = "2s"
 # Query server threads (default: the number of CPUs the process may use), and
 # how many recent ledgers it keeps snapshots of.
-#core_http_query_thread_pool_size = 8
+#core_http_query_workers = 8
 core_http_query_snapshot_ledgers = 4
 
 # -----------------------------------------------------------------------------

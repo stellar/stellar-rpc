@@ -271,7 +271,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	logger.WithFields(supportlog.F{
 		"core_url":             cfg.Ingestion.CoreURL,
 		keyCoreHTTPQueryPort:   deref(cfg.Ingestion.CoreHTTPQueryPort),
-		"preflight_workers":    deref(cfg.Service.Preflight.WorkerCount),
+		"preflight_workers":    deref(cfg.Service.Preflight.Workers),
 		"stellar_core_version": coreDaemon.CoreVersion(),
 	}).Info("wired the captive-core-backed endpoints")
 
@@ -424,7 +424,7 @@ func newPreflightPool(
 	p := cfg.Service.Preflight
 	return preflight.NewPreflightWorkerPool(preflight.WorkerPoolConfig{
 		Daemon:             coreDaemon,
-		WorkerCount:        deref(p.WorkerCount),
+		WorkerCount:        deref(p.Workers),
 		JobQueueCapacity:   deref(p.WorkerQueueSize),
 		EnableDebug:        deref(p.EnableDebug),
 		NetworkPassphrase:  networkPassphrase,
@@ -666,8 +666,8 @@ func (p coreFilePeek) warnHTTPSettingsOverridden(ing config.IngestionConfig, log
 		{"HTTP_PORT", keyCoreHTTPPort, p.HTTPPort, *ing.CoreHTTPPort},
 		{"HTTP_QUERY_PORT", keyCoreHTTPQueryPort, p.HTTPQueryPort, *ing.CoreHTTPQueryPort},
 		{
-			"QUERY_THREAD_POOL_SIZE", keyCoreQueryThreadPoolSize,
-			p.QueryThreadPoolSize, *ing.CoreHTTPQueryThreadPoolSize,
+			"QUERY_THREAD_POOL_SIZE", keyCoreQueryWorkers,
+			p.QueryThreadPoolSize, *ing.CoreHTTPQueryWorkers,
 		},
 		{
 			"QUERY_SNAPSHOT_LEDGERS", keyCoreQuerySnapshotLedgers,
@@ -695,7 +695,7 @@ func (p coreFilePeek) warnHTTPSettingsOverridden(ing config.IngestionConfig, log
 // Passing no HTTP params leaves those branches unreachable.
 func applyHTTPServers(coreToml *ledgerbackend.CaptiveCoreToml, ing config.IngestionConfig) {
 	queryPort := *ing.CoreHTTPQueryPort
-	threadPoolSize := *ing.CoreHTTPQueryThreadPoolSize
+	threadPoolSize := *ing.CoreHTTPQueryWorkers
 	snapshotLedgers := *ing.CoreHTTPQuerySnapshotLedgers
 
 	coreToml.HTTPPort = *ing.CoreHTTPPort

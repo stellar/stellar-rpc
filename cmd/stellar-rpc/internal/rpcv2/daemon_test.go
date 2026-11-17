@@ -502,7 +502,7 @@ func TestNewCaptiveCoreOpeners_PortsOnLiveCoreOnly(t *testing.T) {
 	ing := coreFileIngestion(t, writeCaptiveCoreFile(t, ""))
 	ing.CoreHTTPPort = uintPtr(21626)
 	ing.CoreHTTPQueryPort = uintPtr(21628)
-	ing.CoreHTTPQueryThreadPoolSize = uintPtr(7)
+	ing.CoreHTTPQueryWorkers = uintPtr(7)
 	ing.CoreHTTPQuerySnapshotLedgers = uintPtr(9)
 
 	core, err := newCaptiveCoreOpeners(ing, t.TempDir(), silentLogger())
@@ -541,7 +541,7 @@ func TestNewCaptiveCoreOpeners_BackfillPortlessEvenWhenCoreFileDeclaresPorts(t *
 	extra := "HTTP_PORT = 11626\nHTTP_QUERY_PORT = 11628\nQUERY_THREAD_POOL_SIZE = 2\n"
 	ing := coreFileIngestion(t, writeCaptiveCoreFile(t, extra))
 	poolSize := uint(2)
-	ing.CoreHTTPQueryThreadPoolSize = &poolSize
+	ing.CoreHTTPQueryWorkers = &poolSize
 
 	core, err := newCaptiveCoreOpeners(ing, t.TempDir(), silentLogger())
 	require.NoError(t, err)
@@ -621,7 +621,7 @@ func TestNewCaptiveCoreOpeners_OverridesCoreFileThreadPoolSize(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, live.config.Toml.QueryThreadPoolSize)
 	assert.Equal(t, config.UsableCPUs(), *live.config.Toml.QueryThreadPoolSize)
-	assert.Contains(t, logs.String(), keyCoreQueryThreadPoolSize)
+	assert.Contains(t, logs.String(), keyCoreQueryWorkers)
 }
 
 func TestNewCaptiveCoreOpeners_SilentWhenCoreFileAgrees(t *testing.T) {

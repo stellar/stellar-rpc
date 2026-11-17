@@ -95,9 +95,9 @@ type ServiceConfig struct {
 // simulateTransaction method table because the pool is sized once at startup,
 // not per request (the same reason [service.fee_stats] lives where it does).
 type PreflightConfig struct {
-	// WorkerCount is how many worker processes run preflights concurrently; >= 1.
+	// Workers is how many worker processes run preflights concurrently; >= 1.
 	// Default GOMAXPROCS.
-	WorkerCount *uint `toml:"worker_count"`
+	Workers *uint `toml:"workers"`
 	// WorkerQueueSize is how many preflight requests may wait for a free worker
 	// before the pool starts rejecting them; >= 1. Default the larger of
 	// GOMAXPROCS and MaxRequestBatchSize, since the calls of one batch start at
@@ -333,9 +333,9 @@ type BSBConfig struct {
 	// while a count does not. >= 1; unset takes the default.
 	BufferBytes *int64 `toml:"buffer_bytes"`
 
-	// NumWorkers is how many object downloads run concurrently for one chunk
+	// Workers is how many object downloads run concurrently for one chunk
 	// task; >= 1 and <= buffer_size.
-	NumWorkers *uint32 `toml:"num_workers"`
+	Workers *uint32 `toml:"workers"`
 	// MaxRetries caps how many times ONE object download (a single ledger file
 	// fetched from the datastore) is retried after a transient error, waiting
 	// RetryWait between attempts; when the budget is exhausted the whole stream
@@ -355,7 +355,7 @@ func (b BSBConfig) SDKConfig() ledgerbackend.BufferedStorageBackendConfig {
 	return ledgerbackend.BufferedStorageBackendConfig{
 		BufferSize:  *b.BufferSize,
 		BufferBytes: *b.BufferBytes,
-		NumWorkers:  *b.NumWorkers,
+		NumWorkers:  *b.Workers,
 		RetryLimit:  *b.MaxRetries,
 		RetryWait:   *b.RetryWait,
 	}
@@ -406,9 +406,9 @@ type IngestionConfig struct {
 	// stellar-captive-core-http-query-port). Default 11628, and must differ from
 	// CoreHTTPPort.
 	CoreHTTPQueryPort *uint `toml:"core_http_query_port"`
-	// CoreHTTPQueryThreadPoolSize is how many threads core's query server uses.
+	// CoreHTTPQueryWorkers is how many threads core's query server uses.
 	// Default GOMAXPROCS.
-	CoreHTTPQueryThreadPoolSize *uint `toml:"core_http_query_thread_pool_size"`
+	CoreHTTPQueryWorkers *uint `toml:"core_http_query_workers"`
 	// CoreHTTPQuerySnapshotLedgers is how many recent ledgers core's query server
 	// keeps snapshots for. Default 4; leave it alone unless you know what core
 	// does with it.
@@ -607,7 +607,7 @@ func (cfg Config) WithDefaults() Config {
 	resolved := backfill.FillBSBDefaults(ledgerbackend.BufferedStorageBackendConfig{})
 	fillUint32(&cfg.Backfill.BSB.BufferSize, resolved.BufferSize)
 	fillInt64(&cfg.Backfill.BSB.BufferBytes, backfill.DefaultBSBPrefetchBytes)
-	fillUint32(&cfg.Backfill.BSB.NumWorkers,
+	fillUint32(&cfg.Backfill.BSB.Workers,
 		min(resolved.NumWorkers, *cfg.Backfill.BSB.BufferSize))
 	fillUint32(&cfg.Backfill.BSB.MaxRetries, backfill.DefaultBSBMaxRetries)
 	fillDuration(&cfg.Backfill.BSB.RetryWait, backfill.DefaultBSBRetryWait)
@@ -638,7 +638,7 @@ func (cfg Config) WithDefaults() Config {
 	fillUint(&svc.MaxTotalResponseBytes, DefaultMaxTotalResponseBytes)
 	fillUint32(&svc.FeeStats.ClassicFeeWindowLedgers, DefaultClassicFeeWindowLedgers)
 	fillUint32(&svc.FeeStats.SorobanInclusionFeeWindowLedgers, DefaultSorobanInclusionFeeWindowLedgers)
-	fillUint(&svc.Preflight.WorkerCount, UsableCPUs())
+	fillUint(&svc.Preflight.Workers, UsableCPUs())
 	fillUint(&svc.Preflight.WorkerQueueSize, max(UsableCPUs(), *svc.MaxRequestBatchSize))
 	fillBool(&svc.Preflight.EnableDebug, DefaultPreflightEnableDebug)
 	fillUint(&svc.Preflight.SimulationMemoryLimit, 0)
@@ -651,7 +651,7 @@ func (cfg Config) WithDefaults() Config {
 	}
 	fillDuration(&ing.CoreRequestTimeout, DefaultCoreRequestTimeout)
 	fillUint(&ing.CoreHTTPQueryPort, DefaultCoreHTTPQueryPort)
-	fillUint(&ing.CoreHTTPQueryThreadPoolSize, UsableCPUs())
+	fillUint(&ing.CoreHTTPQueryWorkers, UsableCPUs())
 	fillUint(&ing.CoreHTTPQuerySnapshotLedgers, DefaultCoreHTTPQuerySnapshotLedgers)
 
 	// The methods cascade. queue/dur fill one per-method field: an explicit

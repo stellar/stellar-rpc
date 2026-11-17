@@ -263,9 +263,9 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"cannot exceed 1000",
 		},
 		{
-			"zero preflight worker_count",
-			func(c *config.Config) { c.Service.Preflight.WorkerCount = uintPtr(0) },
-			"[service.preflight].worker_count",
+			"zero preflight workers",
+			func(c *config.Config) { c.Service.Preflight.Workers = uintPtr(0) },
+			"[service.preflight].workers",
 		},
 		{
 			"zero preflight worker_queue_size",
@@ -308,9 +308,9 @@ func TestValidateConfig_RejectsMalformedBSB(t *testing.T) {
 			"[backfill.bsb].buffer_size",
 		},
 		{
-			"zero num_workers",
-			func(c *config.Config) { c.Backfill.BSB.NumWorkers = uint32Ptr(0) },
-			"[backfill.bsb].num_workers",
+			"zero workers",
+			func(c *config.Config) { c.Backfill.BSB.Workers = uint32Ptr(0) },
+			"[backfill.bsb].workers",
 		},
 		{
 			// The nanosecond trap again: retry_wait = 10 decodes as 10ns.
@@ -319,12 +319,12 @@ func TestValidateConfig_RejectsMalformedBSB(t *testing.T) {
 			wantNanosecondHint,
 		},
 		{
-			"num_workers above buffer_size",
+			"workers above buffer_size",
 			func(c *config.Config) {
 				c.Backfill.BSB.BufferSize = uint32Ptr(10)
-				c.Backfill.BSB.NumWorkers = uint32Ptr(50)
+				c.Backfill.BSB.Workers = uint32Ptr(50)
 			},
-			"num_workers",
+			"workers",
 		},
 		{
 			"negative buffer_bytes",
@@ -374,8 +374,8 @@ func TestValidateConfig_RejectsMalformedCoreHTTP(t *testing.T) {
 		},
 		{
 			"thread pool above 65535",
-			func(c *config.Config) { c.Ingestion.CoreHTTPQueryThreadPoolSize = uintPtr(65536) },
-			keyCoreQueryThreadPoolSize,
+			func(c *config.Config) { c.Ingestion.CoreHTTPQueryWorkers = uintPtr(65536) },
+			keyCoreQueryWorkers,
 		},
 		{
 			"zero snapshot ledgers",
