@@ -346,15 +346,15 @@ func validatePaginatedMethods(m config.MethodsConfig) error {
 		{"queryEvents", m.QueryEvents.PaginatedMethodConfig},
 	}
 	for _, pp := range paginated {
-		if *pp.p.MaxItemsPerResponse < 1 {
-			return fmt.Errorf("[service.methods.%s].max_items_per_response must be >= 1", pp.name)
+		if *pp.p.MaxPageLimit < 1 {
+			return fmt.Errorf("[service.methods.%s].max_page_limit must be >= 1", pp.name)
 		}
-		if *pp.p.DefaultItemsPerResponse < 1 {
-			return fmt.Errorf("[service.methods.%s].default_items_per_response must be >= 1", pp.name)
+		if *pp.p.DefaultPageLimit < 1 {
+			return fmt.Errorf("[service.methods.%s].default_page_limit must be >= 1", pp.name)
 		}
-		if *pp.p.DefaultItemsPerResponse > *pp.p.MaxItemsPerResponse {
-			return fmt.Errorf("[service.methods.%s].default_items_per_response (%d) cannot exceed max_items_per_response (%d)",
-				pp.name, *pp.p.DefaultItemsPerResponse, *pp.p.MaxItemsPerResponse)
+		if *pp.p.DefaultPageLimit > *pp.p.MaxPageLimit {
+			return fmt.Errorf("[service.methods.%s].default_page_limit (%d) cannot exceed max_page_limit (%d)",
+				pp.name, *pp.p.DefaultPageLimit, *pp.p.MaxPageLimit)
 		}
 	}
 	return nil
@@ -362,15 +362,15 @@ func validatePaginatedMethods(m config.MethodsConfig) error {
 
 // validateQueryEvents form-validates the queryEvents knobs. The spec fixes
 // the largest limit a client may ask for, so an operator can lower it but
-// not raise it. That bound also holds default_items_per_response down,
+// not raise it. That bound also holds default_page_limit down,
 // which validation otherwise only requires to be <= max.
 func validateQueryEvents(e config.QueryEventsMethodConfig) error {
 	if *e.TermBudget < 1 {
 		return errors.New("[service.methods.queryEvents].term_budget must be >= 1")
 	}
-	if *e.MaxItemsPerResponse > protocol.QueryEventsMaxLimit {
-		return fmt.Errorf("[service.methods.queryEvents].max_items_per_response (%d) cannot exceed %d",
-			*e.MaxItemsPerResponse, protocol.QueryEventsMaxLimit)
+	if *e.MaxPageLimit > protocol.QueryEventsMaxLimit {
+		return fmt.Errorf("[service.methods.queryEvents].max_page_limit (%d) cannot exceed %d",
+			*e.MaxPageLimit, protocol.QueryEventsMaxLimit)
 	}
 	return nil
 }

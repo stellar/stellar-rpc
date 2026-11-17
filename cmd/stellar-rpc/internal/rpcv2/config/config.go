@@ -169,16 +169,16 @@ type MethodConfig struct {
 }
 
 // PaginatedMethodConfig extends MethodConfig for the cursor-paginated methods
-// (getTransactions, getLedgers, getEvents): max_items_per_response caps the
-// client's pagination limit, default_items_per_response applies when the
+// (getTransactions, getLedgers, getEvents): max_page_limit caps the
+// client's pagination limit, default_page_limit applies when the
 // request omits it. These two have NO methods-wide default tier — they exist
 // on only three methods, so a wide default would mostly be a trap.
 type PaginatedMethodConfig struct {
 	QueueLimit           *uint          `toml:"queue_limit"`
 	MaxExecutionDuration *time.Duration `toml:"max_execution_duration"`
 
-	MaxItemsPerResponse     *uint `toml:"max_items_per_response"`
-	DefaultItemsPerResponse *uint `toml:"default_items_per_response"`
+	MaxPageLimit     *uint `toml:"max_page_limit"`
+	DefaultPageLimit *uint `toml:"default_page_limit"`
 }
 
 // NetworkMethodConfig extends MethodConfig for getNetwork with the friendbot
@@ -481,32 +481,32 @@ const (
 
 	DefaultMaxHealthyLedgerLatency time.Duration = 30 * time.Second
 
-	// DefaultQueryEventsMaxItemsPerResponse is the page cap the finalized
+	// DefaultQueryEventsMaxPageLimit is the page cap the finalized
 	// getEvents v2 API fixes as a spec constant
 	// (github.com/orgs/stellar/discussions/1872). The v1 method keeps v1's
-	// own cap; see DefaultGetEventsV1MaxItemsPerResponse.
-	DefaultQueryEventsMaxItemsPerResponse   uint = 1000
-	DefaultGetEventsDefaultItemsPerResponse uint = 100
+	// own cap; see DefaultGetEventsV1MaxPageLimit.
+	DefaultQueryEventsMaxPageLimit   uint = 1000
+	DefaultGetEventsDefaultPageLimit uint = 100
 
 	// DefaultQueryEventsTermBudget is the getEvents v2 proposal's default
 	// (github.com/orgs/stellar/discussions/1872).
 	DefaultQueryEventsTermBudget uint = 15
 
-	// DefaultGetEventsV1MaxItemsPerResponse is v1's own page cap, matching
+	// DefaultGetEventsV1MaxPageLimit is v1's own page cap, matching
 	// the existing service's max-events-limit. The 1,000 above is the v2
 	// spec's constant; applying it to v1 would reject pages v1 serves.
-	DefaultGetEventsV1MaxItemsPerResponse uint = 10_000
+	DefaultGetEventsV1MaxPageLimit uint = 10_000
 
-	DefaultGetTransactionsMaxItemsPerResponse     uint = 200
-	DefaultGetTransactionsDefaultItemsPerResponse uint = 50
+	DefaultGetTransactionsMaxPageLimit     uint = 200
+	DefaultGetTransactionsDefaultPageLimit uint = 50
 
-	// DefaultGetLedgersMaxItemsPerResponse and the default below it are 20
+	// DefaultGetLedgersMaxPageLimit and the default below it are 20
 	// and 5, where v1 serves 200 and 50 (TODO: revisit under the v2
 	// benchmarking epic). A getLedgers item is a whole LedgerCloseMeta,
 	// megabytes each on a busy pubnet ledger, so a 200-item page could
 	// exceed a hundred megabytes of XDR in one response.
-	DefaultGetLedgersMaxItemsPerResponse     uint = 20
-	DefaultGetLedgersDefaultItemsPerResponse uint = 5
+	DefaultGetLedgersMaxPageLimit     uint = 20
+	DefaultGetLedgersDefaultPageLimit uint = 5
 
 	DefaultClassicFeeWindowLedgers          uint32 = 10
 	DefaultSorobanInclusionFeeWindowLedgers uint32 = 50
@@ -700,23 +700,23 @@ func (cfg Config) WithDefaults() Config {
 
 	queue(&m.GetTransactions.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.GetTransactions.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)
-	fillUint(&m.GetTransactions.MaxItemsPerResponse, DefaultGetTransactionsMaxItemsPerResponse)
-	fillUint(&m.GetTransactions.DefaultItemsPerResponse, DefaultGetTransactionsDefaultItemsPerResponse)
+	fillUint(&m.GetTransactions.MaxPageLimit, DefaultGetTransactionsMaxPageLimit)
+	fillUint(&m.GetTransactions.DefaultPageLimit, DefaultGetTransactionsDefaultPageLimit)
 
 	queue(&m.GetLedgers.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.GetLedgers.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
-	fillUint(&m.GetLedgers.MaxItemsPerResponse, DefaultGetLedgersMaxItemsPerResponse)
-	fillUint(&m.GetLedgers.DefaultItemsPerResponse, DefaultGetLedgersDefaultItemsPerResponse)
+	fillUint(&m.GetLedgers.MaxPageLimit, DefaultGetLedgersMaxPageLimit)
+	fillUint(&m.GetLedgers.DefaultPageLimit, DefaultGetLedgersDefaultPageLimit)
 
 	queue(&m.GetEvents.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.GetEvents.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
-	fillUint(&m.GetEvents.MaxItemsPerResponse, DefaultGetEventsV1MaxItemsPerResponse)
-	fillUint(&m.GetEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
+	fillUint(&m.GetEvents.MaxPageLimit, DefaultGetEventsV1MaxPageLimit)
+	fillUint(&m.GetEvents.DefaultPageLimit, DefaultGetEventsDefaultPageLimit)
 
 	queue(&m.QueryEvents.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.QueryEvents.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
-	fillUint(&m.QueryEvents.MaxItemsPerResponse, DefaultQueryEventsMaxItemsPerResponse)
-	fillUint(&m.QueryEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
+	fillUint(&m.QueryEvents.MaxPageLimit, DefaultQueryEventsMaxPageLimit)
+	fillUint(&m.QueryEvents.DefaultPageLimit, DefaultGetEventsDefaultPageLimit)
 	fillUint(&m.QueryEvents.TermBudget, DefaultQueryEventsTermBudget)
 
 	queue(&m.GetFeeStats.QueueLimit, DefaultGetFeeStatsQueueLimit)

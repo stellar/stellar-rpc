@@ -35,8 +35,8 @@ max_execution_duration = "8s"
 
 [service.methods.getLedgers]
 queue_limit = 500
-max_items_per_response = 400
-default_items_per_response = 40
+max_page_limit = 400
+default_page_limit = 40
 
 [service.methods.getFeeStats]
 max_execution_duration = "2s"
@@ -230,10 +230,10 @@ func TestParseConfig_ServiceDefaults(t *testing.T) {
 	assert.Equal(t, DefaultScanMethodMaxExecutionDuration, *m.GetEvents.MaxExecutionDuration)
 	assert.Equal(t, DefaultMethodMaxExecutionDuration, *m.GetTransactions.MaxExecutionDuration)
 
-	assert.Equal(t, DefaultGetEventsV1MaxItemsPerResponse, *m.GetEvents.MaxItemsPerResponse)
-	assert.Equal(t, DefaultGetEventsDefaultItemsPerResponse, *m.GetEvents.DefaultItemsPerResponse)
-	assert.Equal(t, DefaultGetTransactionsMaxItemsPerResponse, *m.GetTransactions.MaxItemsPerResponse)
-	assert.Equal(t, DefaultGetLedgersMaxItemsPerResponse, *m.GetLedgers.MaxItemsPerResponse)
+	assert.Equal(t, DefaultGetEventsV1MaxPageLimit, *m.GetEvents.MaxPageLimit)
+	assert.Equal(t, DefaultGetEventsDefaultPageLimit, *m.GetEvents.DefaultPageLimit)
+	assert.Equal(t, DefaultGetTransactionsMaxPageLimit, *m.GetTransactions.MaxPageLimit)
+	assert.Equal(t, DefaultGetLedgersMaxPageLimit, *m.GetLedgers.MaxPageLimit)
 
 	assert.Equal(t, DefaultSendTransactionQueueLimit, *m.SendTransaction.QueueLimit)
 	assert.Equal(t, DefaultCoreMethodMaxExecutionDuration, *m.SendTransaction.MaxExecutionDuration)
@@ -366,10 +366,10 @@ func TestParseConfig_MethodsCascade(t *testing.T) {
 
 		// getLedgers overrode its caps; getEvents keeps its own compiled defaults
 		// (10000/100), untouched by getLedgers' 400/40 or any wide value.
-		assert.Equal(t, uint(400), *m.GetLedgers.MaxItemsPerResponse)
-		assert.Equal(t, uint(40), *m.GetLedgers.DefaultItemsPerResponse)
-		assert.Equal(t, DefaultGetEventsV1MaxItemsPerResponse, *m.GetEvents.MaxItemsPerResponse)
-		assert.Equal(t, DefaultGetEventsDefaultItemsPerResponse, *m.GetEvents.DefaultItemsPerResponse)
+		assert.Equal(t, uint(400), *m.GetLedgers.MaxPageLimit)
+		assert.Equal(t, uint(40), *m.GetLedgers.DefaultPageLimit)
+		assert.Equal(t, DefaultGetEventsV1MaxPageLimit, *m.GetEvents.MaxPageLimit)
+		assert.Equal(t, DefaultGetEventsDefaultPageLimit, *m.GetEvents.DefaultPageLimit)
 	})
 }
 

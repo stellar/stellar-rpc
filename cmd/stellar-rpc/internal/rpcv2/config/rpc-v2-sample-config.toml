@@ -120,36 +120,36 @@ soroban_inclusion_fee_window_ledgers = 50
 #max_execution_duration = "5s"
 
 # The four paginated methods also have:
-#   max_items_per_response      Largest page a client may request.
-#   default_items_per_response  Page size when the request sets no limit.
+#   max_page_limit      Largest page a client may request.
+#   default_page_limit  Page size when the request sets no limit.
 [service.methods.getTransactions]
 #queue_limit = 1000
 #max_execution_duration = "5s"
-#max_items_per_response = 200
-#default_items_per_response = 50
+#max_page_limit = 200
+#default_page_limit = 50
 
 # Lower than v1's 200 and 50 because each item is a whole ledger's metadata.
 [service.methods.getLedgers]
 #queue_limit = 1000
 #max_execution_duration = "10s"
-#max_items_per_response = 20
-#default_items_per_response = 5
+#max_page_limit = 20
+#default_page_limit = 5
 
 [service.methods.getEvents]
 #queue_limit = 1000
 #max_execution_duration = "10s"
-#max_items_per_response = 10000
-#default_items_per_response = 100
+#max_page_limit = 10000
+#default_page_limit = 100
 
-# queryEvents is new in v2, and its max_items_per_response cannot exceed 1000.
+# queryEvents is new in v2, and its max_page_limit cannot exceed 1000.
 # term_budget caps the index terms one request may use: each distinct contract
 # ID, event type, or topic value in a given position counts once. Requests
 # over it fail with invalid_params.
 [service.methods.queryEvents]
 #queue_limit = 1000
 #max_execution_duration = "10s"
-#max_items_per_response = 1000
-#default_items_per_response = 100
+#max_page_limit = 1000
+#default_page_limit = 100
 #term_budget = 15
 
 [service.methods.getFeeStats]

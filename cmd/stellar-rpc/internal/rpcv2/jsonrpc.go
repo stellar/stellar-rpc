@@ -95,8 +95,8 @@ func buildHandlerSpecs(cfg config.Config, p handlerParams) []jsonrpc.HandlerSpec
 			FeeStats:          p.feeWindows,
 
 			GetEventsHandler: eventsapi.NewV1Handler(eventsapi.Limits{
-				MaxLimit:         deref(m.GetEvents.MaxItemsPerResponse),
-				DefaultLimit:     deref(m.GetEvents.DefaultItemsPerResponse),
+				MaxLimit:         deref(m.GetEvents.MaxPageLimit),
+				DefaultLimit:     deref(m.GetEvents.DefaultPageLimit),
 				MaxResponseBytes: deref(cfg.Service.MaxResponseBytes),
 			}, p.logger),
 
@@ -109,18 +109,18 @@ func buildHandlerSpecs(cfg config.Config, p handlerParams) []jsonrpc.HandlerSpec
 			RetentionWindow:         p.retentionWindow,
 			MaxHealthyLedgerLatency: deref(m.GetHealth.MaxHealthyLedgerLatency),
 
-			MaxLedgersLimit:          deref(m.GetLedgers.MaxItemsPerResponse),
-			DefaultLedgersLimit:      deref(m.GetLedgers.DefaultItemsPerResponse),
-			MaxTransactionsLimit:     deref(m.GetTransactions.MaxItemsPerResponse),
-			DefaultTransactionsLimit: deref(m.GetTransactions.DefaultItemsPerResponse),
+			MaxLedgersLimit:          deref(m.GetLedgers.MaxPageLimit),
+			DefaultLedgersLimit:      deref(m.GetLedgers.DefaultPageLimit),
+			MaxTransactionsLimit:     deref(m.GetTransactions.MaxPageLimit),
+			DefaultTransactionsLimit: deref(m.GetTransactions.DefaultPageLimit),
 			MaxResponseBytes:         deref(cfg.Service.MaxResponseBytes),
 		})
 	specs = append(specs, jsonrpc.HandlerSpec{
 		MethodName: protocol.QueryEventsMethodName,
 		Handler: eventsapi.NewQueryEventsHandler(eventsapi.QueryEventsLimits{
 			Limits: eventsapi.Limits{
-				MaxLimit:         deref(m.QueryEvents.MaxItemsPerResponse),
-				DefaultLimit:     deref(m.QueryEvents.DefaultItemsPerResponse),
+				MaxLimit:         deref(m.QueryEvents.MaxPageLimit),
+				DefaultLimit:     deref(m.QueryEvents.DefaultPageLimit),
 				MaxResponseBytes: deref(cfg.Service.MaxResponseBytes),
 			},
 			TermBudget: uint32(min(deref(m.QueryEvents.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it

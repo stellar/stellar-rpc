@@ -31,17 +31,17 @@ func servingConfig() config.Config { return config.Config{}.WithDefaults() }
 
 // maxLedgersLimit is the daemon's default getLedgers cap.
 func maxLedgersLimit() uint {
-	return *servingConfig().Service.Methods.GetLedgers.MaxItemsPerResponse
+	return *servingConfig().Service.Methods.GetLedgers.MaxPageLimit
 }
 
 // maxTxPageLimit is the daemon's default getTransactions cap.
 func maxTxPageLimit() uint {
-	return *servingConfig().Service.Methods.GetTransactions.MaxItemsPerResponse
+	return *servingConfig().Service.Methods.GetTransactions.MaxPageLimit
 }
 
 // maxEventsLimit is the daemon's default queryEvents cap.
 func maxEventsLimit() uint {
-	return *servingConfig().Service.Methods.QueryEvents.MaxItemsPerResponse
+	return *servingConfig().Service.Methods.QueryEvents.MaxPageLimit
 }
 
 // readServer serves the daemon's read methods through the daemon's JSON-RPC

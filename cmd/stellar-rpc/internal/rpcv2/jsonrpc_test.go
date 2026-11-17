@@ -386,7 +386,7 @@ func TestReadMethods(t *testing.T) {
 	err := client.CallResult(context.Background(), protocol.GetLedgersMethodName,
 		protocol.GetLedgersRequest{
 			StartLedger: chunk.FirstLedgerSeq,
-			Pagination:  &protocol.LedgerPaginationOptions{Limit: config.DefaultGetLedgersMaxItemsPerResponse + 1},
+			Pagination:  &protocol.LedgerPaginationOptions{Limit: config.DefaultGetLedgersMaxPageLimit + 1},
 		}, &ledgers)
 	require.ErrorContains(t, err, "limit must not exceed")
 }

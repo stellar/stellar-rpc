@@ -77,7 +77,7 @@ Every TOML leaf is also settable from the command line:
 **[service.methods.\<methodName\>]** — one table per served method (getHealth, getNetwork, getVersionInfo, getLatestLedger, getTransaction, getTransactions, getLedgers, getEvents, getFeeStats, sendTransaction, simulateTransaction, getLedgerEntries):
 
 - Every method: `queue_limit` and `max_execution_duration`. v1's defaults: 1000 / 5s, except getFeeStats's queue is 100, getLedgers/getEvents get 10s, and sendTransaction (500) / simulateTransaction (100) get 15s.
-- The three paginated methods (getTransactions, getLedgers, getEvents) add `max_items_per_response` / `default_items_per_response`. Two deliberate breaks from v1's page sizes (TODO: revisit under the v2 benchmarking epic): getEvents max is 1000 (the v2 API's spec constant, not v1's 10000), and getLedgers is 20/5 (one item is a full ledger's meta — megabytes each — so v1's 200/50 could produce >100MB responses).
+- The three paginated methods (getTransactions, getLedgers, getEvents) add `max_page_limit` / `default_page_limit`. Two deliberate breaks from v1's page sizes (TODO: revisit under the v2 benchmarking epic): getEvents max is 1000 (the v2 API's spec constant, not v1's 10000), and getLedgers is 20/5 (one item is a full ledger's meta — megabytes each — so v1's 200/50 could produce >100MB responses).
 - getHealth adds `max_healthy_ledger_latency` (default `"30s"`).
 - Bare `queue_limit` / `max_execution_duration` keys directly on `[service.methods]` form an optional methods-wide default tier: per-method value → wide default → compiled default.
 - Not here: `friendbot_url`, which arrives with the getNetwork handler.

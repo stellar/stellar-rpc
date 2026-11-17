@@ -203,15 +203,15 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 		{
 			"default items above max",
 			func(c *config.Config) {
-				c.Service.Methods.GetLedgers.MaxItemsPerResponse = uintPtr(10)
-				c.Service.Methods.GetLedgers.DefaultItemsPerResponse = uintPtr(11)
+				c.Service.Methods.GetLedgers.MaxPageLimit = uintPtr(10)
+				c.Service.Methods.GetLedgers.DefaultPageLimit = uintPtr(11)
 			},
-			"default_items_per_response",
+			"default_page_limit",
 		},
 		{
 			"zero default items",
-			func(c *config.Config) { c.Service.Methods.GetEvents.DefaultItemsPerResponse = uintPtr(0) },
-			"default_items_per_response",
+			func(c *config.Config) { c.Service.Methods.GetEvents.DefaultPageLimit = uintPtr(0) },
+			"default_page_limit",
 		},
 		{
 			"zero term_budget",
@@ -249,16 +249,16 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"[service.methods.queryEvents].queue_limit",
 		},
 		{
-			"zero queryEvents max_items_per_response",
-			func(c *config.Config) { c.Service.Methods.QueryEvents.MaxItemsPerResponse = uintPtr(0) },
-			"[service.methods.queryEvents].max_items_per_response",
+			"zero queryEvents max_page_limit",
+			func(c *config.Config) { c.Service.Methods.QueryEvents.MaxPageLimit = uintPtr(0) },
+			"[service.methods.queryEvents].max_page_limit",
 		},
 		{
 			// The spec fixes the largest limit a client may ask for, so an
 			// operator can only lower this cap.
-			"queryEvents max_items_per_response above the spec's cap",
+			"queryEvents max_page_limit above the spec's cap",
 			func(c *config.Config) {
-				c.Service.Methods.QueryEvents.MaxItemsPerResponse = uintPtr(protocol.QueryEventsMaxLimit + 1)
+				c.Service.Methods.QueryEvents.MaxPageLimit = uintPtr(protocol.QueryEventsMaxLimit + 1)
 			},
 			"cannot exceed 1000",
 		},
@@ -651,7 +651,7 @@ func TestValidateConfig_AllowsGetEventsV1CapAboveTheV2Ceiling(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := validCfg(4, 3, "genesis")
 	above := uint(protocol.QueryEventsMaxLimit + 1)
-	cfg.Service.Methods.GetEvents.MaxItemsPerResponse = &above
+	cfg.Service.Methods.GetEvents.MaxPageLimit = &above
 
 	_, err := callValidate(t, cfg, cat, readyTip(chunk.ID(10).FirstLedger()))
 	require.NoError(t, err)

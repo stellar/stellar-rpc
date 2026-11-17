@@ -49,7 +49,7 @@ func TestBindFlags_LockstepWithTOMLSchema(t *testing.T) {
 		"service.fee_stats.classic_fee_window_ledgers",
 		"service.methods.queue_limit",
 		"service.methods.getLedgers.queue_limit",
-		"service.methods.getLedgers.max_items_per_response",
+		"service.methods.getLedgers.max_page_limit",
 		"service.methods.getHealth.max_healthy_ledger_latency",
 		"service.methods.getFeeStats.max_execution_duration",
 		"service.methods.sendTransaction.queue_limit",
