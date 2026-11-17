@@ -83,8 +83,6 @@ bootstrap_box() {
   log "installing build deps"
   apt-get install -y -qq --no-install-recommends git build-essential
 
-  GO_VERSION=1.26.5
-  curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C /usr/local
   export HOME="${HOME:-/root}"
   export GOPATH="${GOPATH:-$HOME/go}"
   export GOMODCACHE="${GOMODCACHE:-$GOPATH/pkg/mod}"
@@ -117,6 +115,11 @@ bootstrap_box() {
     git fetch origin "+refs/pull/*:refs/remotes/origin/pr/*" 2>/dev/null || true
     git checkout "$TARGET_SHA"
   fi
+
+  # The checkout's go.mod names the Go version, as it does for every build.
+  GO_VERSION=$(sed -n 's/^toolchain go//p' go.mod)
+  [ -n "$GO_VERSION" ] || bail "go.mod at $TARGET_SHA has no toolchain line"
+  curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C /usr/local
   log "checked out $TARGET_SHA; handing off to the Go runner"
 }
 
