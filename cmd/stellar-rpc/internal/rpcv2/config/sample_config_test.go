@@ -24,7 +24,7 @@ func TestSampleConfig_ParsesStrict(t *testing.T) {
 	assert.Equal(t, config.DefaultEndpoint, cfg.Service.Endpoint)
 	assert.Equal(t, "GCS", cfg.Backfill.DataStore.Type)
 	assert.Equal(t, "/etc/stellar/captive-core.toml", cfg.Ingestion.CaptiveCoreConfig)
-	assert.False(t, *cfg.Service.Preflight.EnableDebug,
+	assert.False(t, *cfg.Service.Simulation.EnableDebug,
 		"the sample deliberately departs from the true default: it is a production starting point")
 }
 
@@ -39,7 +39,7 @@ func TestSampleConfig_ShownValuesAreDefaults(t *testing.T) {
 	cfg.Service.Methods.QueueLimit = nil
 	cfg.Service.Methods.MaxExecutionDuration = nil
 	cfg.Service.Methods.GetNetwork.FriendbotURL = ""
-	cfg.Service.Preflight = config.PreflightConfig{}
+	cfg.Service.Simulation = config.SimulationConfig{}
 	cfg.Backfill.Workers = nil
 	cfg.Backfill.DataStore = config.DataStoreConfig{}
 	cfg.Ingestion.CaptiveCoreConfig = ""

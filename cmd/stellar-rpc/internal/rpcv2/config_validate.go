@@ -315,24 +315,24 @@ func validateService(svc config.ServiceConfig) error {
 	if err := validateQueryEvents(m.QueryEvents); err != nil {
 		return err
 	}
-	if err := validatePreflight(svc.Preflight); err != nil {
+	if err := validateSimulation(svc.Simulation); err != nil {
 		return err
 	}
 	return validateFeeWindows(svc.FeeStats)
 }
 
-// validatePreflight form-validates [service.preflight]. Zero workers means
+// validateSimulation form-validates [service.simulation]. Zero workers means
 // nothing picks requests up; a zero queue means the pool is full from the start.
 // Either rejects every simulateTransaction.
-func validatePreflight(p config.PreflightConfig) error {
+func validateSimulation(p config.SimulationConfig) error {
 	if *p.Workers < 1 {
-		return errors.New("[service.preflight].workers must be >= 1")
+		return errors.New("[service.simulation].workers must be >= 1")
 	}
 	if *p.WorkerQueueSize < 1 {
-		return errors.New("[service.preflight].worker_queue_size must be >= 1")
+		return errors.New("[service.simulation].worker_queue_size must be >= 1")
 	}
 	return limits.ValidateSimulationMemoryLimit(
-		"[service.preflight].simulation_memory_limit", uint64(*p.SimulationMemoryLimit))
+		"[service.simulation].memory_limit", uint64(*p.MemoryLimit))
 }
 
 func validatePaginatedMethods(m config.MethodsConfig) error {

@@ -271,7 +271,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	logger.WithFields(supportlog.F{
 		"core_url":             cfg.Ingestion.CoreURL,
 		keyCoreHTTPQueryPort:   deref(cfg.Ingestion.CoreHTTPQueryPort),
-		"preflight_workers":    deref(cfg.Service.Preflight.Workers),
+		"simulation_workers":   deref(cfg.Service.Simulation.Workers),
 		"stellar_core_version": coreDaemon.CoreVersion(),
 	}).Info("wired the captive-core-backed endpoints")
 
@@ -416,12 +416,12 @@ func startConfig(
 }
 
 // newPreflightPool starts simulateTransaction's worker pool, sized by
-// [service.preflight]. The caller owns Close. networkPassphrase is empty only
+// [service.simulation]. The caller owns Close. networkPassphrase is empty only
 // for an injected (test) opener, where nothing reaches the pool anyway.
 func newPreflightPool(
 	cfg config.Config, coreDaemon *corestate.Daemon, networkPassphrase string, logger *supportlog.Entry,
 ) *preflight.WorkerPool {
-	p := cfg.Service.Preflight
+	p := cfg.Service.Simulation
 	return preflight.NewPreflightWorkerPool(preflight.WorkerPoolConfig{
 		Daemon:             coreDaemon,
 		WorkerCount:        deref(p.Workers),
@@ -431,7 +431,7 @@ func newPreflightPool(
 		Logger:             logger,
 		CoreURL:            coreDaemon.QueryURL(),
 		CoreRequestTimeout: deref(cfg.Ingestion.CoreRequestTimeout),
-		MemoryLimit:        uint64(deref(p.SimulationMemoryLimit)),
+		MemoryLimit:        uint64(deref(p.MemoryLimit)),
 	})
 }
 

@@ -110,7 +110,7 @@ func TestValidateConfig_AcceptsTheMinimumSimulationMemoryLimit(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := validCfg(4, 3, "genesis")
 	minimum := uint(limits.MinSimulationMemoryLimit)
-	cfg.Service.Preflight.SimulationMemoryLimit = &minimum
+	cfg.Service.Simulation.MemoryLimit = &minimum
 	_, err := callValidate(t, cfg, cat, downTip())
 	require.NoError(t, err)
 }
@@ -263,21 +263,21 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"cannot exceed 1000",
 		},
 		{
-			"zero preflight workers",
-			func(c *config.Config) { c.Service.Preflight.Workers = uintPtr(0) },
-			"[service.preflight].workers",
+			"zero simulation workers",
+			func(c *config.Config) { c.Service.Simulation.Workers = uintPtr(0) },
+			"[service.simulation].workers",
 		},
 		{
-			"zero preflight worker_queue_size",
-			func(c *config.Config) { c.Service.Preflight.WorkerQueueSize = uintPtr(0) },
-			"[service.preflight].worker_queue_size",
+			"zero simulation worker_queue_size",
+			func(c *config.Config) { c.Service.Simulation.WorkerQueueSize = uintPtr(0) },
+			"[service.simulation].worker_queue_size",
 		},
 		{
-			"preflight simulation_memory_limit below the minimum",
+			"simulation memory_limit below the minimum",
 			func(c *config.Config) {
-				c.Service.Preflight.SimulationMemoryLimit = uintPtr(limits.MinSimulationMemoryLimit - 1)
+				c.Service.Simulation.MemoryLimit = uintPtr(limits.MinSimulationMemoryLimit - 1)
 			},
-			"[service.preflight].simulation_memory_limit must be 0 or at least 16000000 bytes",
+			"[service.simulation].memory_limit must be 0 or at least 16000000 bytes",
 		},
 	}
 	for _, tc := range tests {

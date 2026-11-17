@@ -47,7 +47,7 @@ type Config struct {
 // Everything here is live: the read server listens on endpoint, the admin
 // server on admin_endpoint, the method table enforces the per-method limits,
 // ingestion feeds the fee windows sized by [service.fee_stats] (#881), and the
-// daemon sizes its preflight pool from [service.preflight] at startup. The
+// daemon sizes its simulation worker pool from [service.simulation] at startup. The
 // whole section is optional: absent keys get v1's defaults in WithDefaults.
 //
 // Key naming rule: camelCase table keys ONLY where the key is a wire identifier
@@ -85,20 +85,20 @@ type ServiceConfig struct {
 	// means no limit.
 	MaxTotalResponseBytes *uint `toml:"max_total_response_bytes"`
 
-	FeeStats  FeeStatsConfig  `toml:"fee_stats"`
-	Preflight PreflightConfig `toml:"preflight"`
-	Methods   MethodsConfig   `toml:"methods"`
+	FeeStats   FeeStatsConfig   `toml:"fee_stats"`
+	Simulation SimulationConfig `toml:"simulation"`
+	Methods    MethodsConfig    `toml:"methods"`
 }
 
-// PreflightConfig is [service.preflight] — the pool of worker processes that
-// runs simulateTransaction's preflights. It sits under [service] rather than under the
+// SimulationConfig is [service.simulation] — the pool of worker processes that
+// runs simulateTransaction's simulations. It sits under [service] rather than under the
 // simulateTransaction method table because the pool is sized once at startup,
 // not per request (the same reason [service.fee_stats] lives where it does).
-type PreflightConfig struct {
-	// Workers is how many worker processes run preflights concurrently; >= 1.
+type SimulationConfig struct {
+	// Workers is how many worker processes run simulations concurrently; >= 1.
 	// Default GOMAXPROCS.
 	Workers *uint `toml:"workers"`
-	// WorkerQueueSize is how many preflight requests may wait for a free worker
+	// WorkerQueueSize is how many simulation requests may wait for a free worker
 	// before the pool starts rejecting them; >= 1. Default the larger of
 	// GOMAXPROCS and MaxRequestBatchSize, since the calls of one batch start at
 	// once.
@@ -106,11 +106,11 @@ type PreflightConfig struct {
 	// EnableDebug includes diagnostic events in simulateTransaction responses.
 	// Default true.
 	EnableDebug *bool `toml:"enable_debug"`
-	// SimulationMemoryLimit is the most heap memory, in bytes, the simulation
+	// MemoryLimit is the most heap memory, in bytes, the simulation
 	// library may hold in a worker process. 0 (the default) means 8 times the
 	// network's per-transaction memory limit, and any other value must be at
 	// least 16000000. Plan for about this limit + 128 MiB per worker.
-	SimulationMemoryLimit *uint `toml:"simulation_memory_limit"`
+	MemoryLimit *uint `toml:"memory_limit"`
 }
 
 // FeeStatsConfig is [service.fee_stats] — the sizes, in ledgers, of the two
@@ -511,7 +511,7 @@ const (
 	DefaultClassicFeeWindowLedgers          uint32 = 10
 	DefaultSorobanInclusionFeeWindowLedgers uint32 = 50
 
-	DefaultPreflightEnableDebug = true
+	DefaultSimulationEnableDebug = true
 )
 
 // [ingestion] captive-core HTTP defaults — v1's values.
@@ -528,7 +528,7 @@ const (
 )
 
 // UsableCPUs is the default for the three keys v1 sizes by CPU count: the
-// preflight worker count and queue size, and core's query-server thread pool.
+// simulation worker count and queue size, and core's query-server workers.
 // It is GOMAXPROCS, the number of CPUs the process may use, which follows a
 // container's CPU limit.
 func UsableCPUs() uint {
@@ -640,10 +640,10 @@ func (cfg Config) WithDefaults() Config {
 	fillUint(&svc.MaxTotalResponseBytes, DefaultMaxTotalResponseBytes)
 	fillUint32(&svc.FeeStats.ClassicFeeWindowLedgers, DefaultClassicFeeWindowLedgers)
 	fillUint32(&svc.FeeStats.SorobanInclusionFeeWindowLedgers, DefaultSorobanInclusionFeeWindowLedgers)
-	fillUint(&svc.Preflight.Workers, UsableCPUs())
-	fillUint(&svc.Preflight.WorkerQueueSize, max(UsableCPUs(), *svc.MaxRequestBatchSize))
-	fillBool(&svc.Preflight.EnableDebug, DefaultPreflightEnableDebug)
-	fillUint(&svc.Preflight.SimulationMemoryLimit, 0)
+	fillUint(&svc.Simulation.Workers, UsableCPUs())
+	fillUint(&svc.Simulation.WorkerQueueSize, max(UsableCPUs(), *svc.MaxRequestBatchSize))
+	fillBool(&svc.Simulation.EnableDebug, DefaultSimulationEnableDebug)
+	fillUint(&svc.Simulation.MemoryLimit, 0)
 
 	// The port fills FIRST, so setting only core_http_port moves core_url with it.
 	ing := &cfg.Ingestion

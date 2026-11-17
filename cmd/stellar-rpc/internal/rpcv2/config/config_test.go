@@ -243,24 +243,24 @@ func TestParseConfig_ServiceDefaults(t *testing.T) {
 	assert.Equal(t, DefaultMethodMaxExecutionDuration, *m.GetLedgerEntries.MaxExecutionDuration)
 }
 
-func TestParseConfig_PreflightDefaults(t *testing.T) {
+func TestParseConfig_SimulationDefaults(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig))
 	require.NoError(t, err)
 
-	p := cfg.Service.Preflight
+	p := cfg.Service.Simulation
 	assert.Equal(t, UsableCPUs(), *p.Workers)
 	assert.Equal(t, max(UsableCPUs(), DefaultMaxRequestBatchSize), *p.WorkerQueueSize)
 	assert.True(t, *p.EnableDebug)
 }
 
 // The preflight queue holds a whole batch of simulations by default.
-func TestParseConfig_PreflightQueueHoldsABatch(t *testing.T) {
+func TestParseConfig_SimulationQueueHoldsABatch(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig + `
 [service]
 max_request_batch_size = 500
 `))
 	require.NoError(t, err)
-	assert.Equal(t, uint(500), *cfg.Service.Preflight.WorkerQueueSize)
+	assert.Equal(t, uint(500), *cfg.Service.Simulation.WorkerQueueSize)
 }
 
 // The concurrency defaults follow GOMAXPROCS, the CPUs the process may use,
@@ -273,21 +273,21 @@ max_request_batch_size = 1
 `))
 	require.NoError(t, err)
 
-	assert.Equal(t, uint(3), *cfg.Service.Preflight.Workers)
-	assert.Equal(t, uint(3), *cfg.Service.Preflight.WorkerQueueSize)
+	assert.Equal(t, uint(3), *cfg.Service.Simulation.Workers)
+	assert.Equal(t, uint(3), *cfg.Service.Simulation.WorkerQueueSize)
 	assert.Equal(t, uint(3), *cfg.Ingestion.CoreHTTPQueryWorkers)
 }
 
-func TestParseConfig_PreflightExplicitValues(t *testing.T) {
+func TestParseConfig_SimulationExplicitValues(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig + `
-[service.preflight]
+[service.simulation]
 workers = 3
 worker_queue_size = 7
 enable_debug = false
 `))
 	require.NoError(t, err)
 
-	p := cfg.Service.Preflight
+	p := cfg.Service.Simulation
 	assert.Equal(t, uint(3), *p.Workers)
 	assert.Equal(t, uint(7), *p.WorkerQueueSize)
 	assert.False(t, *p.EnableDebug, "an explicit false must survive the true default")

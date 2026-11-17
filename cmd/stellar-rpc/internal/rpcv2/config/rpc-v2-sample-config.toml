@@ -170,8 +170,8 @@ soroban_inclusion_fee_window_ledgers = 50
 #max_execution_duration = "5s"
 
 # The simulateTransaction worker pool.
-[service.preflight]
-# Concurrent preflights, and how many more may wait for a worker before new
+[service.simulation]
+# Concurrent simulations, and how many more may wait for a worker before new
 # requests are rejected. The worker count defaults to the number of CPUs the
 # process may use, and the queue to the larger of that and
 # max_request_batch_size, since the calls of one batch start at once.
@@ -184,7 +184,7 @@ enable_debug = false
 # process. 0 means 8 times the network's per-transaction memory limit, and any
 # other value must be at least 16000000. Plan for about this limit + 128 MiB
 # per worker.
-#simulation_memory_limit = 0
+#memory_limit = 0
 
 # -----------------------------------------------------------------------------
 # [backfill]: downloading history into local storage

@@ -55,8 +55,8 @@ func TestBindFlags_LockstepWithTOMLSchema(t *testing.T) {
 		"service.methods.sendTransaction.queue_limit",
 		"service.methods.simulateTransaction.max_execution_duration",
 		"service.methods.getLedgerEntries.queue_limit",
-		"service.preflight.workers",
-		"service.preflight.enable_debug",
+		"service.simulation.workers",
+		"service.simulation.enable_debug",
 		"ingestion.core_http_port",
 		"ingestion.core_url",
 		"ingestion.core_request_timeout",
@@ -131,15 +131,15 @@ func TestApplyFlags_BoolOverride(t *testing.T) {
 	// one that turns it off — and it has to be spelled --flag=false, since a bare
 	// --flag sets a bool to true.
 	fs := newBoundFlagSet(t)
-	require.NoError(t, fs.Parse([]string{"--service.preflight.enable_debug=false"}))
+	require.NoError(t, fs.Parse([]string{"--service.simulation.enable_debug=false"}))
 
 	cfg, err := DecodeConfig([]byte(minimalValidConfig))
 	require.NoError(t, err)
-	require.Nil(t, cfg.Service.Preflight.EnableDebug)
+	require.Nil(t, cfg.Service.Simulation.EnableDebug)
 	require.NoError(t, ApplyFlags(&cfg, fs))
 	cfg = cfg.WithDefaults()
 
-	assert.False(t, *cfg.Service.Preflight.EnableDebug)
+	assert.False(t, *cfg.Service.Simulation.EnableDebug)
 }
 
 func TestApplyFlags_BoolLeftAloneKeepsTheDefault(t *testing.T) {
@@ -151,7 +151,7 @@ func TestApplyFlags_BoolLeftAloneKeepsTheDefault(t *testing.T) {
 	require.NoError(t, ApplyFlags(&cfg, fs))
 	cfg = cfg.WithDefaults()
 
-	assert.True(t, *cfg.Service.Preflight.EnableDebug,
+	assert.True(t, *cfg.Service.Simulation.EnableDebug,
 		"the flag's own false default must not leak in when the user never set it")
 }
 

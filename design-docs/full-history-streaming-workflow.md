@@ -82,13 +82,13 @@ Every TOML leaf is also settable from the command line:
 - Bare `queue_limit` / `max_execution_duration` keys directly on `[service.methods]` form an optional methods-wide default tier: per-method value → wide default → compiled default.
 - Not here: `friendbot_url`, which arrives with the getNetwork handler.
 
-**[service.preflight]** — simulateTransaction's preflight worker pool. It sits under `[service]` rather than under the method table because it is sized once at startup, not per request:
+**[service.simulation]** — simulateTransaction's simulation worker pool. It sits under `[service]` rather than under the method table because it is sized once at startup, not per request:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `workers` | uint | `GOMAXPROCS` | Concurrent preflights; >= 1. |
+| `workers` | uint | `GOMAXPROCS` | Concurrent simulations; >= 1. |
 | `worker_queue_size` | uint | `GOMAXPROCS` | Requests that may wait for a free worker; >= 1. |
-| `simulation_memory_limit` | uint | `0` | Most heap memory, in bytes, the simulation library may hold in a worker; 0 means 8 times the network's per-transaction memory limit, and any other value must be at least 16000000. Plan for about this limit + 128 MiB per worker. |
+| `memory_limit` | uint | `0` | Most heap memory, in bytes, the simulation library may hold in a worker; 0 means 8 times the network's per-transaction memory limit, and any other value must be at least 16000000. Plan for about this limit + 128 MiB per worker. |
 | `enable_debug` | bool | `true` | Diagnostic events in simulateTransaction responses. |
 
 **[retention]** — the two inputs to the retention floor; the effective floor is the higher of the two:

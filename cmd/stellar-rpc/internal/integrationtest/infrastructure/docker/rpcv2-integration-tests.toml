@@ -23,7 +23,7 @@ max_request_batch_size = 10
 classic_fee_window_ledgers = 10
 soroban_inclusion_fee_window_ledgers = 50
 
-[service.preflight]
+[service.simulation]
 enable_debug = true
 
 [backfill]
