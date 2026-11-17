@@ -87,11 +87,11 @@ func TestBinaryHelp(t *testing.T) {
 	assert.Equal(t, 0, code, out)
 	assert.Contains(t, out, "--stellar-core-url")
 	assert.Contains(t, out, "--enable-rpcv2")
-	assert.NotContains(t, out, "--storage.default_data_dir")
+	assert.NotContains(t, out, "--storage.data_dir")
 
 	code, out = runBinary(t, nil, "--enable-rpcv2", "--help")
 	assert.Equal(t, 0, code, out)
-	assert.Contains(t, out, "--storage.default_data_dir")
+	assert.Contains(t, out, "--storage.data_dir")
 	assert.Contains(t, out, "--config-path")
 	assert.NotContains(t, out, "--stellar-core-url")
 }

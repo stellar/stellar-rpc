@@ -26,10 +26,10 @@ const wantNanosecondHint = "nanoseconds"
 // post-WithDefaults config — every [service] pointer non-nil).
 func validCfg(workers, maxRetries int, earliest string) config.Config {
 	return config.Config{
-		Storage:   config.StorageConfig{DefaultDataDir: "/data"},
+		Storage:   config.StorageConfig{DataDir: "/data"},
 		Retention: config.RetentionConfig{EarliestLedger: earliest},
 		Backfill:  config.BackfillConfig{Workers: &workers, MaxRetries: &maxRetries},
-		Ingestion: config.IngestionConfig{CaptiveCoreConfig: "/cc"},
+		Ingestion: config.IngestionConfig{CoreConfig: "/cc"},
 	}.WithDefaults()
 }
 
@@ -110,7 +110,7 @@ func TestValidateConfig_AcceptsTheMinimumSimulationMemoryLimit(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := validCfg(4, 3, "genesis")
 	minimum := uint(limits.MinSimulationMemoryLimit)
-	cfg.Service.Preflight.SimulationMemoryLimit = &minimum
+	cfg.Service.Simulation.MaxMemoryBytes = &minimum
 	_, err := callValidate(t, cfg, cat, downTip())
 	require.NoError(t, err)
 }
@@ -203,15 +203,15 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 		{
 			"default items above max",
 			func(c *config.Config) {
-				c.Service.Methods.GetLedgers.MaxItemsPerResponse = uintPtr(10)
-				c.Service.Methods.GetLedgers.DefaultItemsPerResponse = uintPtr(11)
+				c.Service.Methods.GetLedgers.MaxPageLimit = uintPtr(10)
+				c.Service.Methods.GetLedgers.DefaultPageLimit = uintPtr(11)
 			},
-			"default_items_per_response",
+			"default_page_limit",
 		},
 		{
 			"zero default items",
-			func(c *config.Config) { c.Service.Methods.GetEvents.DefaultItemsPerResponse = uintPtr(0) },
-			"default_items_per_response",
+			func(c *config.Config) { c.Service.Methods.GetEvents.DefaultPageLimit = uintPtr(0) },
+			"default_page_limit",
 		},
 		{
 			"zero term_budget",
@@ -249,35 +249,35 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"[service.methods.queryEvents].queue_limit",
 		},
 		{
-			"zero queryEvents max_items_per_response",
-			func(c *config.Config) { c.Service.Methods.QueryEvents.MaxItemsPerResponse = uintPtr(0) },
-			"[service.methods.queryEvents].max_items_per_response",
+			"zero queryEvents max_page_limit",
+			func(c *config.Config) { c.Service.Methods.QueryEvents.MaxPageLimit = uintPtr(0) },
+			"[service.methods.queryEvents].max_page_limit",
 		},
 		{
 			// The spec fixes the largest limit a client may ask for, so an
 			// operator can only lower this cap.
-			"queryEvents max_items_per_response above the spec's cap",
+			"queryEvents max_page_limit above the spec's cap",
 			func(c *config.Config) {
-				c.Service.Methods.QueryEvents.MaxItemsPerResponse = uintPtr(protocol.QueryEventsMaxLimit + 1)
+				c.Service.Methods.QueryEvents.MaxPageLimit = uintPtr(protocol.QueryEventsMaxLimit + 1)
 			},
 			"cannot exceed 1000",
 		},
 		{
-			"zero preflight worker_count",
-			func(c *config.Config) { c.Service.Preflight.WorkerCount = uintPtr(0) },
-			"[service.preflight].worker_count",
+			"zero simulation workers",
+			func(c *config.Config) { c.Service.Simulation.Workers = uintPtr(0) },
+			"[service.simulation].workers",
 		},
 		{
-			"zero preflight worker_queue_size",
-			func(c *config.Config) { c.Service.Preflight.WorkerQueueSize = uintPtr(0) },
-			"[service.preflight].worker_queue_size",
+			"zero simulation queue_size",
+			func(c *config.Config) { c.Service.Simulation.QueueSize = uintPtr(0) },
+			"[service.simulation].queue_size",
 		},
 		{
-			"preflight simulation_memory_limit below the minimum",
+			"simulation max_memory_bytes below the minimum",
 			func(c *config.Config) {
-				c.Service.Preflight.SimulationMemoryLimit = uintPtr(limits.MinSimulationMemoryLimit - 1)
+				c.Service.Simulation.MaxMemoryBytes = uintPtr(limits.MinSimulationMemoryLimit - 1)
 			},
-			"[service.preflight].simulation_memory_limit must be 0 or at least 16000000 bytes",
+			"[service.simulation].max_memory_bytes must be 0 or at least 16000000 bytes",
 		},
 	}
 	for _, tc := range tests {
@@ -292,7 +292,7 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 	}
 }
 
-func TestValidateConfig_RejectsMalformedBSB(t *testing.T) {
+func TestValidateConfig_RejectsMalformedDownload(t *testing.T) {
 	uint32Ptr := func(v uint32) *uint32 { return &v }
 	int64Ptr := func(v int64) *int64 { return &v }
 	durPtr := func(v time.Duration) *time.Duration { return &v }
@@ -303,40 +303,40 @@ func TestValidateConfig_RejectsMalformedBSB(t *testing.T) {
 		want   string
 	}{
 		{
-			"zero buffer_size",
-			func(c *config.Config) { c.Backfill.BSB.BufferSize = uint32Ptr(0) },
-			"[backfill.bsb].buffer_size",
+			"zero prefetch_files",
+			func(c *config.Config) { c.Backfill.Download.PrefetchFiles = uint32Ptr(0) },
+			"[backfill.download].prefetch_files",
 		},
 		{
-			"zero num_workers",
-			func(c *config.Config) { c.Backfill.BSB.NumWorkers = uint32Ptr(0) },
-			"[backfill.bsb].num_workers",
+			"zero workers",
+			func(c *config.Config) { c.Backfill.Download.Workers = uint32Ptr(0) },
+			"[backfill.download].workers",
 		},
 		{
 			// The nanosecond trap again: retry_wait = 10 decodes as 10ns.
 			"sub-millisecond retry_wait",
-			func(c *config.Config) { c.Backfill.BSB.RetryWait = durPtr(10) },
+			func(c *config.Config) { c.Backfill.Download.RetryWait = durPtr(10) },
 			wantNanosecondHint,
 		},
 		{
-			"num_workers above buffer_size",
+			"workers above prefetch_files",
 			func(c *config.Config) {
-				c.Backfill.BSB.BufferSize = uint32Ptr(10)
-				c.Backfill.BSB.NumWorkers = uint32Ptr(50)
+				c.Backfill.Download.PrefetchFiles = uint32Ptr(10)
+				c.Backfill.Download.Workers = uint32Ptr(50)
 			},
-			"num_workers",
+			"workers",
 		},
 		{
-			"negative buffer_bytes",
-			func(c *config.Config) { c.Backfill.BSB.BufferBytes = int64Ptr(-1) },
-			"[backfill.bsb].buffer_bytes",
+			"negative prefetch_bytes",
+			func(c *config.Config) { c.Backfill.Download.PrefetchBytes = int64Ptr(-1) },
+			"[backfill.download].prefetch_bytes",
 		},
 		{
 			// There is no off switch; zero would silently mean "cap off" at the
 			// SDK, which is the configuration that caused #895.
-			"zero buffer_bytes",
-			func(c *config.Config) { c.Backfill.BSB.BufferBytes = int64Ptr(0) },
-			"[backfill.bsb].buffer_bytes",
+			"zero prefetch_bytes",
+			func(c *config.Config) { c.Backfill.Download.PrefetchBytes = int64Ptr(0) },
+			"[backfill.download].prefetch_bytes",
 		},
 	}
 	for _, tc := range tests {
@@ -374,8 +374,8 @@ func TestValidateConfig_RejectsMalformedCoreHTTP(t *testing.T) {
 		},
 		{
 			"thread pool above 65535",
-			func(c *config.Config) { c.Ingestion.CoreHTTPQueryThreadPoolSize = uintPtr(65536) },
-			keyCoreQueryThreadPoolSize,
+			func(c *config.Config) { c.Ingestion.CoreHTTPQueryWorkers = uintPtr(65536) },
+			keyCoreQueryWorkers,
 		},
 		{
 			"zero snapshot ledgers",
@@ -502,11 +502,11 @@ func TestValidateConfig_AcceptsCoreURLsThatCannotMisroute(t *testing.T) {
 	}
 }
 
-func TestValidateConfig_AcceptsZeroBSBMaxRetries(t *testing.T) {
+func TestValidateConfig_AcceptsZeroDownloadMaxRetries(t *testing.T) {
 	uint32Ptr := func(v uint32) *uint32 { return &v }
 	cat, _ := testCatalog(t)
 	cfg := validCfg(4, 3, "genesis")
-	cfg.Backfill.BSB.MaxRetries = uint32Ptr(0)
+	cfg.Backfill.Download.MaxRetries = uint32Ptr(0)
 	_, err := callValidate(t, cfg, cat, downTip())
 	require.NoError(t, err)
 }
@@ -651,7 +651,7 @@ func TestValidateConfig_AllowsGetEventsV1CapAboveTheV2Ceiling(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := validCfg(4, 3, "genesis")
 	above := uint(protocol.QueryEventsMaxLimit + 1)
-	cfg.Service.Methods.GetEvents.MaxItemsPerResponse = &above
+	cfg.Service.Methods.GetEvents.MaxPageLimit = &above
 
 	_, err := callValidate(t, cfg, cat, readyTip(chunk.ID(10).FirstLedger()))
 	require.NoError(t, err)

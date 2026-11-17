@@ -61,7 +61,7 @@ func TestQueryPlanPoolAndEventsFlags(t *testing.T) {
 		require.NoError(t, err)
 		assert.InDelta(t, fraction, p.NotFoundFraction, 0)
 	}
-	assert.Equal(t, config.DefaultQueryEventsMaxItemsPerResponse, maxEventsLimit())
+	assert.Equal(t, config.DefaultQueryEventsMaxPageLimit, maxEventsLimit())
 	for limit, want := range map[uint32]string{
 		0: "--events-limit must be in [1, 1000], got 0", 1000: "", 1001: "--events-limit must be in [1, 1000], got 1001",
 	} {
@@ -107,8 +107,8 @@ func TestParseRejectsRepeats(t *testing.T) {
 // --ledgers-limit and --txpage-limit accept the caps of the daemon's default
 // config, and both formats pass.
 func TestPlanAcceptsLimitCaps(t *testing.T) {
-	assert.Equal(t, config.DefaultGetLedgersMaxItemsPerResponse, maxLedgersLimit())
-	assert.Equal(t, config.DefaultGetTransactionsMaxItemsPerResponse, maxTxPageLimit())
+	assert.Equal(t, config.DefaultGetLedgersMaxPageLimit, maxLedgersLimit())
+	assert.Equal(t, config.DefaultGetTransactionsMaxPageLimit, maxTxPageLimit())
 	for _, format := range queryFormats {
 		f := validQueryFlags()
 		f.ledgersLimit = uint32(maxLedgersLimit())

@@ -35,8 +35,8 @@ max_execution_duration = "8s"
 
 [service.methods.getLedgers]
 queue_limit = 500
-max_items_per_response = 400
-default_items_per_response = 40
+max_page_limit = 400
+default_page_limit = 40
 
 [service.methods.getFeeStats]
 max_execution_duration = "2s"
@@ -46,11 +46,11 @@ earliest_ledger = "now"
 retention_chunks = 100
 
 [storage]
-default_data_dir = "/var/lib/fullhistory"
+data_dir = "/var/lib/fullhistory"
 catalog = "/mnt/catalog"
 ledgers = "/mnt/ledgers"
 events = "/mnt/events"
-txhash_raw = "/mnt/txhash/raw"
+txhashes = "/mnt/txhash/raw"
 txhash_index = "/mnt/txhash/index"
 hot = "/mnt/hot"
 
@@ -64,12 +64,12 @@ type = "GCS"
 [backfill.datastore.params]
 destination_bucket_path = "my-bucket/ledgers"
 
-[backfill.bsb]
-buffer_size = 2000
-num_workers = 40
+[backfill.download]
+prefetch_files = 2000
+workers = 40
 
 [ingestion]
-captive_core_config = "/etc/captive-core.toml"
+core_config = "/etc/captive-core.toml"
 
 [logging]
 level = "debug"
@@ -79,7 +79,7 @@ format = "json"
 // A minimal config: only the required keys, everything else defaulted.
 const minimalValidConfig = `
 [storage]
-default_data_dir = "/data"
+data_dir = "/data"
 
 [backfill.datastore]
 type = "GCS"
@@ -88,7 +88,7 @@ type = "GCS"
 destination_bucket_path = "bucket/path"
 
 [ingestion]
-captive_core_config = "/etc/cc.toml"
+core_config = "/etc/cc.toml"
 `
 
 func TestParseConfig_FullDocument(t *testing.T) {
@@ -106,20 +106,20 @@ func TestParseConfig_FullDocument(t *testing.T) {
 
 	assert.Equal(t, "now", cfg.Retention.EarliestLedger)
 	assert.Equal(t, uint32(100), *cfg.Retention.RetentionChunks)
-	assert.Equal(t, "/var/lib/fullhistory", cfg.Storage.DefaultDataDir)
+	assert.Equal(t, "/var/lib/fullhistory", cfg.Storage.DataDir)
 	assert.Equal(t, "/mnt/catalog", cfg.Storage.Catalog)
 	assert.Equal(t, "/mnt/ledgers", cfg.Storage.Ledgers)
 	assert.Equal(t, "/mnt/events", cfg.Storage.Events)
-	assert.Equal(t, "/mnt/txhash/raw", cfg.Storage.TxhashRaw)
+	assert.Equal(t, "/mnt/txhash/raw", cfg.Storage.Txhashes)
 	assert.Equal(t, "/mnt/txhash/index", cfg.Storage.TxhashIndex)
 	assert.Equal(t, "/mnt/hot", cfg.Storage.Hot)
 	assert.Equal(t, 8, *cfg.Backfill.Workers)
 	assert.Equal(t, 5, *cfg.Backfill.MaxRetries)
 	assert.Equal(t, "GCS", cfg.Backfill.DataStore.Type)
 	assert.Equal(t, "my-bucket/ledgers", cfg.Backfill.DataStore.Params["destination_bucket_path"])
-	assert.Equal(t, uint32(2000), *cfg.Backfill.BSB.BufferSize)
-	assert.Equal(t, uint32(40), *cfg.Backfill.BSB.NumWorkers)
-	assert.Equal(t, "/etc/captive-core.toml", cfg.Ingestion.CaptiveCoreConfig)
+	assert.Equal(t, uint32(2000), *cfg.Backfill.Download.PrefetchFiles)
+	assert.Equal(t, uint32(40), *cfg.Backfill.Download.Workers)
+	assert.Equal(t, "/etc/captive-core.toml", cfg.Ingestion.CoreConfig)
 	assert.Equal(t, "debug", cfg.Logging.Level)
 	assert.Equal(t, "json", cfg.Logging.Format)
 }
@@ -129,18 +129,18 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	// Required keys preserved.
-	assert.Equal(t, "/data", cfg.Storage.DefaultDataDir)
+	assert.Equal(t, "/data", cfg.Storage.DataDir)
 	assert.Equal(t, "bucket/path", cfg.Backfill.DataStore.Params["destination_bucket_path"])
-	assert.Equal(t, "/etc/cc.toml", cfg.Ingestion.CaptiveCoreConfig)
+	assert.Equal(t, "/etc/cc.toml", cfg.Ingestion.CoreConfig)
 
 	// Documented defaults filled.
 	assert.Equal(t, runtime.GOMAXPROCS(0), *cfg.Backfill.Workers)
 	assert.Equal(t, DefaultMaxRetries, *cfg.Backfill.MaxRetries)
-	assert.Equal(t, uint32(backfill.DefaultBSBPrefetchObjects), *cfg.Backfill.BSB.BufferSize)
-	assert.Equal(t, uint32(backfill.DefaultBSBDownloads), *cfg.Backfill.BSB.NumWorkers)
-	assert.Equal(t, int64(backfill.DefaultBSBPrefetchBytes), *cfg.Backfill.BSB.BufferBytes)
-	assert.Equal(t, uint32(backfill.DefaultBSBMaxRetries), *cfg.Backfill.BSB.MaxRetries)
-	assert.Equal(t, backfill.DefaultBSBRetryWait, *cfg.Backfill.BSB.RetryWait)
+	assert.Equal(t, uint32(backfill.DefaultBSBPrefetchObjects), *cfg.Backfill.Download.PrefetchFiles)
+	assert.Equal(t, uint32(backfill.DefaultBSBDownloads), *cfg.Backfill.Download.Workers)
+	assert.Equal(t, int64(backfill.DefaultBSBPrefetchBytes), *cfg.Backfill.Download.PrefetchBytes)
+	assert.Equal(t, uint32(backfill.DefaultBSBMaxRetries), *cfg.Backfill.Download.MaxRetries)
+	assert.Equal(t, backfill.DefaultBSBRetryWait, *cfg.Backfill.Download.RetryWait)
 	assert.Equal(t, uint32(0), *cfg.Retention.RetentionChunks)
 	assert.Equal(t, DefaultEarliestLedger, cfg.Retention.EarliestLedger)
 	assert.Equal(t, DefaultLogLevel, cfg.Logging.Level)
@@ -192,12 +192,12 @@ func TestDataStoreConfig_SDKConfigCarriesPassphrase(t *testing.T) {
 	assert.Equal(t, "Public Global Stellar Network ; September 2015", sdk.NetworkPassphrase)
 }
 
-func TestParseConfig_ExplicitZeroBSBMaxRetriesSurvives(t *testing.T) {
-	cfg, err := ParseConfig([]byte(minimalValidConfig + "\n[backfill.bsb]\nmax_retries = 0\n"))
+func TestParseConfig_ExplicitZeroDownloadMaxRetriesSurvives(t *testing.T) {
+	cfg, err := ParseConfig([]byte(minimalValidConfig + "\n[backfill.download]\nmax_retries = 0\n"))
 	require.NoError(t, err)
 
-	assert.Zero(t, *cfg.Backfill.BSB.MaxRetries)
-	assert.Zero(t, cfg.Backfill.BSB.SDKConfig().RetryLimit)
+	assert.Zero(t, *cfg.Backfill.Download.MaxRetries)
+	assert.Zero(t, cfg.Backfill.Download.SDKConfig().RetryLimit)
 }
 
 func TestParseConfig_ServiceDefaults(t *testing.T) {
@@ -230,10 +230,10 @@ func TestParseConfig_ServiceDefaults(t *testing.T) {
 	assert.Equal(t, DefaultScanMethodMaxExecutionDuration, *m.GetEvents.MaxExecutionDuration)
 	assert.Equal(t, DefaultMethodMaxExecutionDuration, *m.GetTransactions.MaxExecutionDuration)
 
-	assert.Equal(t, DefaultGetEventsV1MaxItemsPerResponse, *m.GetEvents.MaxItemsPerResponse)
-	assert.Equal(t, DefaultGetEventsDefaultItemsPerResponse, *m.GetEvents.DefaultItemsPerResponse)
-	assert.Equal(t, DefaultGetTransactionsMaxItemsPerResponse, *m.GetTransactions.MaxItemsPerResponse)
-	assert.Equal(t, DefaultGetLedgersMaxItemsPerResponse, *m.GetLedgers.MaxItemsPerResponse)
+	assert.Equal(t, DefaultGetEventsV1MaxPageLimit, *m.GetEvents.MaxPageLimit)
+	assert.Equal(t, DefaultGetEventsDefaultPageLimit, *m.GetEvents.DefaultPageLimit)
+	assert.Equal(t, DefaultGetTransactionsMaxPageLimit, *m.GetTransactions.MaxPageLimit)
+	assert.Equal(t, DefaultGetLedgersMaxPageLimit, *m.GetLedgers.MaxPageLimit)
 
 	assert.Equal(t, DefaultSendTransactionQueueLimit, *m.SendTransaction.QueueLimit)
 	assert.Equal(t, DefaultCoreMethodMaxExecutionDuration, *m.SendTransaction.MaxExecutionDuration)
@@ -243,24 +243,24 @@ func TestParseConfig_ServiceDefaults(t *testing.T) {
 	assert.Equal(t, DefaultMethodMaxExecutionDuration, *m.GetLedgerEntries.MaxExecutionDuration)
 }
 
-func TestParseConfig_PreflightDefaults(t *testing.T) {
+func TestParseConfig_SimulationDefaults(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig))
 	require.NoError(t, err)
 
-	p := cfg.Service.Preflight
-	assert.Equal(t, UsableCPUs(), *p.WorkerCount)
-	assert.Equal(t, max(UsableCPUs(), DefaultMaxRequestBatchSize), *p.WorkerQueueSize)
+	p := cfg.Service.Simulation
+	assert.Equal(t, UsableCPUs(), *p.Workers)
+	assert.Equal(t, max(UsableCPUs(), DefaultMaxRequestBatchSize), *p.QueueSize)
 	assert.True(t, *p.EnableDebug)
 }
 
 // The preflight queue holds a whole batch of simulations by default.
-func TestParseConfig_PreflightQueueHoldsABatch(t *testing.T) {
+func TestParseConfig_SimulationQueueHoldsABatch(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig + `
 [service]
 max_request_batch_size = 500
 `))
 	require.NoError(t, err)
-	assert.Equal(t, uint(500), *cfg.Service.Preflight.WorkerQueueSize)
+	assert.Equal(t, uint(500), *cfg.Service.Simulation.QueueSize)
 }
 
 // The concurrency defaults follow GOMAXPROCS, the CPUs the process may use,
@@ -273,23 +273,23 @@ max_request_batch_size = 1
 `))
 	require.NoError(t, err)
 
-	assert.Equal(t, uint(3), *cfg.Service.Preflight.WorkerCount)
-	assert.Equal(t, uint(3), *cfg.Service.Preflight.WorkerQueueSize)
-	assert.Equal(t, uint(3), *cfg.Ingestion.CoreHTTPQueryThreadPoolSize)
+	assert.Equal(t, uint(3), *cfg.Service.Simulation.Workers)
+	assert.Equal(t, uint(3), *cfg.Service.Simulation.QueueSize)
+	assert.Equal(t, uint(3), *cfg.Ingestion.CoreHTTPQueryWorkers)
 }
 
-func TestParseConfig_PreflightExplicitValues(t *testing.T) {
+func TestParseConfig_SimulationExplicitValues(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig + `
-[service.preflight]
-worker_count = 3
-worker_queue_size = 7
+[service.simulation]
+workers = 3
+queue_size = 7
 enable_debug = false
 `))
 	require.NoError(t, err)
 
-	p := cfg.Service.Preflight
-	assert.Equal(t, uint(3), *p.WorkerCount)
-	assert.Equal(t, uint(7), *p.WorkerQueueSize)
+	p := cfg.Service.Simulation
+	assert.Equal(t, uint(3), *p.Workers)
+	assert.Equal(t, uint(7), *p.QueueSize)
 	assert.False(t, *p.EnableDebug, "an explicit false must survive the true default")
 }
 
@@ -302,7 +302,7 @@ func TestParseConfig_CoreHTTPDefaults(t *testing.T) {
 	assert.Equal(t, "http://localhost:11626", ing.CoreURL)
 	assert.Equal(t, DefaultCoreRequestTimeout, *ing.CoreRequestTimeout)
 	assert.Equal(t, DefaultCoreHTTPQueryPort, *ing.CoreHTTPQueryPort)
-	assert.Equal(t, UsableCPUs(), *ing.CoreHTTPQueryThreadPoolSize)
+	assert.Equal(t, UsableCPUs(), *ing.CoreHTTPQueryWorkers)
 	assert.Equal(t, DefaultCoreHTTPQuerySnapshotLedgers, *ing.CoreHTTPQuerySnapshotLedgers)
 }
 
@@ -366,10 +366,10 @@ func TestParseConfig_MethodsCascade(t *testing.T) {
 
 		// getLedgers overrode its caps; getEvents keeps its own compiled defaults
 		// (10000/100), untouched by getLedgers' 400/40 or any wide value.
-		assert.Equal(t, uint(400), *m.GetLedgers.MaxItemsPerResponse)
-		assert.Equal(t, uint(40), *m.GetLedgers.DefaultItemsPerResponse)
-		assert.Equal(t, DefaultGetEventsV1MaxItemsPerResponse, *m.GetEvents.MaxItemsPerResponse)
-		assert.Equal(t, DefaultGetEventsDefaultItemsPerResponse, *m.GetEvents.DefaultItemsPerResponse)
+		assert.Equal(t, uint(400), *m.GetLedgers.MaxPageLimit)
+		assert.Equal(t, uint(40), *m.GetLedgers.DefaultPageLimit)
+		assert.Equal(t, DefaultGetEventsV1MaxPageLimit, *m.GetEvents.MaxPageLimit)
+		assert.Equal(t, DefaultGetEventsDefaultPageLimit, *m.GetEvents.DefaultPageLimit)
 	})
 }
 
@@ -379,14 +379,14 @@ func TestParseConfig_ExplicitZeroPreserved(t *testing.T) {
 	// must preserve it for that rejection to fire.
 	const cfgText = `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [backfill]
 workers = 0
 max_retries = 0
 [service.methods.getLedgers]
 queue_limit = 0
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `
 	cfg, err := ParseConfig([]byte(cfgText))
 	require.NoError(t, err)
@@ -416,77 +416,77 @@ func TestParseConfig_RejectsUnknownKeys(t *testing.T) {
 			name: "removed chunks_per_txhash_index key",
 			text: `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [layout]
 chunks_per_txhash_index = 1000
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 		{
 			name: "typo'd earliest_ledger",
 			text: `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [retention]
 earliest_ledgr = "now"
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 		{
 			name: "unknown top-level key",
 			text: `
-default_data_dirr = "/d"
+data_dirr = "/d"
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 		{
 			name: "unknown section",
 			text: `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [bogus_section]
 foo = "bar"
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 		{
 			name: "unknown nested key under known section",
 			text: `
 [storage]
-default_data_dir = "/d"
-[backfill.bsb]
+data_dir = "/d"
+[backfill.download]
 bucket_path = "b/p"
 bufer_size = 10
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 		{
-			// default_data_dir moved to [storage] in #882 — its old home must fail
+			// data_dir moved to [storage] in #882 — its old home must fail
 			// loudly, not be silently accepted.
-			name: "default_data_dir under its pre-#882 [service] home",
+			name: "data_dir under its pre-#882 [service] home",
 			text: `
 [service]
-default_data_dir = "/d"
+data_dir = "/d"
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 		{
 			name: "typo'd method table",
 			text: `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [service.methods.getLegders]
 queue_limit = 5
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 	}
@@ -509,7 +509,7 @@ func TestResolvePaths_DefaultsUnderDataDir(t *testing.T) {
 	assert.Equal(t, filepath.Join("/data", "ledgers"), p.Ledgers)
 	assert.Equal(t, filepath.Join("/data", "events", "data"), p.Events)
 	assert.Equal(t, filepath.Join("/data", "events", "index"), p.EventsIndex)
-	assert.Equal(t, filepath.Join("/data", "txhash", "raw"), p.TxhashRaw)
+	assert.Equal(t, filepath.Join("/data", "txhash", "raw"), p.Txhashes)
 	assert.Equal(t, filepath.Join("/data", "txhash", "index"), p.TxhashIndex)
 	assert.Equal(t, filepath.Join("/data", "hot"), p.HotStorage)
 }
@@ -522,7 +522,7 @@ func TestResolvePaths_OverridesWin(t *testing.T) {
 	assert.Equal(t, "/mnt/catalog", p.Catalog)
 	assert.Equal(t, "/mnt/ledgers", p.Ledgers)
 	assert.Equal(t, "/mnt/events", p.Events)
-	assert.Equal(t, "/mnt/txhash/raw", p.TxhashRaw)
+	assert.Equal(t, "/mnt/txhash/raw", p.Txhashes)
 	assert.Equal(t, "/mnt/txhash/index", p.TxhashIndex)
 	assert.Equal(t, "/mnt/hot", p.HotStorage)
 }
@@ -543,7 +543,7 @@ func TestValidateRoots(t *testing.T) {
 		Catalog:     "/data/catalog/rocksdb",
 		Ledgers:     "/data/ledgers",
 		Events:      "/data/events",
-		TxhashRaw:   "/data/txhash/raw",
+		Txhashes:    "/data/txhash/raw",
 		TxhashIndex: "/data/txhash/index",
 		HotStorage:  "/data/hot",
 	}

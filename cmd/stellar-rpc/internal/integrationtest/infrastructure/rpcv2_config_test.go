@@ -20,7 +20,7 @@ func TestRPCv2ConfigParsesStrict(t *testing.T) {
 
 	sampleCfg.Backfill.DataStore = config.DataStoreConfig{}
 	enableDebug := true
-	sampleCfg.Service.Preflight.EnableDebug = &enableDebug
+	sampleCfg.Service.Simulation.EnableDebug = &enableDebug
 	sampleCfg.Logging.Level = daemonLogLevel
 
 	assert.Equal(t, sampleCfg.WithDefaults(), testCfg.WithDefaults())

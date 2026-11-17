@@ -179,7 +179,7 @@ func (m *e2eMetrics) prunedCount() int {
 }
 
 // e2eConfigPath writes a daemon TOML for an in-process E2E: genesis floor (no
-// tip needed to validate/start) and the given retention width. captive_core_config
+// tip needed to validate/start) and the given retention width. core_config
 // is a stub path the test's injected CoreOpener replaces, never opening a real core.
 // The one-chunk index window is set via the chunksPerTxhashIndex test seam, not config.
 func e2eConfigPath(t *testing.T, dataDir string, retentionChunks uint32) string {
@@ -187,14 +187,14 @@ func e2eConfigPath(t *testing.T, dataDir string, retentionChunks uint32) string 
 	cfgPath := filepath.Join(t.TempDir(), "daemon.toml")
 	body := fmt.Sprintf(`
 [storage]
-default_data_dir = %q
+data_dir = %q
 
 [retention]
 earliest_ledger = "genesis"
 retention_chunks = %d
 
 [ingestion]
-captive_core_config = "/dev/null"
+core_config = "/dev/null"
 
 [logging]
 level = "error"
@@ -355,7 +355,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	// ran — BEFORE shutting the daemon down, as the prune step does with the
 	// index file.
 	hotLayout := config.NewLayoutFromPaths(
-		config.Config{Storage: config.StorageConfig{DefaultDataDir: dataDir}}.WithDefaults().ResolvePaths())
+		config.Config{Storage: config.StorageConfig{DataDir: dataDir}}.WithDefaults().ResolvePaths())
 	require.Eventually(t, func() bool {
 		for _, c := range []chunk.ID{c0, c1} {
 			if _, statErr := os.Stat(hotLayout.HotChunkPath(c)); !os.IsNotExist(statErr) {
@@ -525,7 +525,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 // MUST be closed via the returned close func before the next daemon run).
 func e2eReadCatalog(t *testing.T, dataDir string) (*catalog.Catalog, func()) {
 	t.Helper()
-	paths := config.Config{Storage: config.StorageConfig{DefaultDataDir: dataDir}}.WithDefaults().ResolvePaths()
+	paths := config.Config{Storage: config.StorageConfig{DataDir: dataDir}}.WithDefaults().ResolvePaths()
 	windows, err := geometry.NewTxHashIndexLayout(1) // matches chunksPerTxhashIndex = 1
 	require.NoError(t, err)
 	cat, err := catalog.Open(paths.Catalog, config.NewLayoutFromPaths(paths), windows, silentLogger())

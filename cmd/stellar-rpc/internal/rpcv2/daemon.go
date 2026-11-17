@@ -136,8 +136,8 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	if err != nil {
 		return err
 	}
-	if cfg.Storage.DefaultDataDir == "" {
-		return errors.New("[storage].default_data_dir is required")
+	if cfg.Storage.DataDir == "" {
+		return errors.New("[storage].data_dir is required")
 	}
 	// Reject a malformed config before anything is opened (catalog, core,
 	// datastore). validateConfig re-runs these pure checks as part of its gate.
@@ -271,7 +271,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	logger.WithFields(supportlog.F{
 		"core_url":             cfg.Ingestion.CoreURL,
 		keyCoreHTTPQueryPort:   deref(cfg.Ingestion.CoreHTTPQueryPort),
-		"preflight_workers":    deref(cfg.Service.Preflight.WorkerCount),
+		"simulation_workers":   deref(cfg.Service.Simulation.Workers),
 		"stellar_core_version": coreDaemon.CoreVersion(),
 	}).Info("wired the captive-core-backed endpoints")
 
@@ -383,7 +383,7 @@ func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry
 	if opts.Core != nil {
 		return resolvedCore{live: opts.Core, backfill: opts.Core}, nil
 	}
-	return newCaptiveCoreOpeners(cfg.Ingestion, cfg.Storage.DefaultDataDir, logger)
+	return newCaptiveCoreOpeners(cfg.Ingestion, cfg.Storage.DataDir, logger)
 }
 
 // startConfig assembles the StartConfig run consumes. run() builds the
@@ -416,22 +416,22 @@ func startConfig(
 }
 
 // newPreflightPool starts simulateTransaction's worker pool, sized by
-// [service.preflight]. The caller owns Close. networkPassphrase is empty only
+// [service.simulation]. The caller owns Close. networkPassphrase is empty only
 // for an injected (test) opener, where nothing reaches the pool anyway.
 func newPreflightPool(
 	cfg config.Config, coreDaemon *corestate.Daemon, networkPassphrase string, logger *supportlog.Entry,
 ) *preflight.WorkerPool {
-	p := cfg.Service.Preflight
+	p := cfg.Service.Simulation
 	return preflight.NewPreflightWorkerPool(preflight.WorkerPoolConfig{
 		Daemon:             coreDaemon,
-		WorkerCount:        deref(p.WorkerCount),
-		JobQueueCapacity:   deref(p.WorkerQueueSize),
+		WorkerCount:        deref(p.Workers),
+		JobQueueCapacity:   deref(p.QueueSize),
 		EnableDebug:        deref(p.EnableDebug),
 		NetworkPassphrase:  networkPassphrase,
 		Logger:             logger,
 		CoreURL:            coreDaemon.QueryURL(),
 		CoreRequestTimeout: deref(cfg.Ingestion.CoreRequestTimeout),
-		MemoryLimit:        uint64(deref(p.SimulationMemoryLimit)),
+		MemoryLimit:        uint64(deref(p.MaxMemoryBytes)),
 	})
 }
 
@@ -473,7 +473,7 @@ func buildBackfillBackend(
 ) (backfill.Backend, func(), error) {
 	if cfg.Backfill.DataStore.Type != "" {
 		dsCfg := cfg.Backfill.DataStore.SDKConfig(networkPassphrase)
-		backend, cleanup, err := backfill.NewBSBBackendFromConfig(ctx, dsCfg, cfg.Backfill.BSB.SDKConfig())
+		backend, cleanup, err := backfill.NewBSBBackendFromConfig(ctx, dsCfg, cfg.Backfill.Download.SDKConfig())
 		if err != nil {
 			return nil, nil, err
 		}
@@ -543,7 +543,7 @@ type captiveCoreOpener struct {
 }
 
 // newCaptiveCoreOpeners resolves the captive-core config. The
-// captive_core_config file is the source of truth for core-side settings:
+// core_config file is the source of truth for core-side settings:
 // NETWORK_PASSPHRASE is read back from it, and the binary defaults to the one on
 // PATH. Only the history-archive URLs come from [ingestion], since the file's
 // [HISTORY.*] entries are shell commands, not URLs. The toml params mirror the
@@ -556,8 +556,8 @@ type captiveCoreOpener struct {
 func newCaptiveCoreOpeners(
 	ing config.IngestionConfig, dataDir string, logger *supportlog.Entry,
 ) (resolvedCore, error) {
-	if ing.CaptiveCoreConfig == "" {
-		return resolvedCore{}, errors.New("[ingestion].captive_core_config is required for live ingestion")
+	if ing.CoreConfig == "" {
+		return resolvedCore{}, errors.New("[ingestion].core_config is required for live ingestion")
 	}
 	if len(ing.HistoryArchiveURLs) == 0 {
 		return resolvedCore{}, errors.New("[ingestion].history_archive_urls is required for live ingestion")
@@ -565,31 +565,31 @@ func newCaptiveCoreOpeners(
 
 	// Read the file ONCE: both openers are built from these bytes, so they cannot
 	// describe two different networks if the file changes underneath us.
-	data, err := os.ReadFile(ing.CaptiveCoreConfig)
+	data, err := os.ReadFile(ing.CoreConfig)
 	if err != nil {
-		return resolvedCore{}, fmt.Errorf("read captive_core_config %q: %w", ing.CaptiveCoreConfig, err)
+		return resolvedCore{}, fmt.Errorf("read core_config %q: %w", ing.CoreConfig, err)
 	}
 	var peek coreFilePeek
 	if perr := toml.Unmarshal(data, &peek); perr != nil {
-		return resolvedCore{}, fmt.Errorf("parse captive_core_config %q: %w", ing.CaptiveCoreConfig, perr)
+		return resolvedCore{}, fmt.Errorf("parse core_config %q: %w", ing.CoreConfig, perr)
 	}
 	if peek.NetworkPassphrase == "" {
-		return resolvedCore{}, fmt.Errorf("captive_core_config %q must define NETWORK_PASSPHRASE", ing.CaptiveCoreConfig)
+		return resolvedCore{}, fmt.Errorf("core_config %q must define NETWORK_PASSPHRASE", ing.CoreConfig)
 	}
 	peek.warnHTTPSettingsOverridden(ing, logger)
 
 	// stellar-core binary: explicit path, else the one on PATH (RPC daemon default).
-	binaryPath := ing.StellarCoreBinaryPath
+	binaryPath := ing.CoreBinaryPath
 	if binaryPath == "" {
 		found, lerr := exec.LookPath("stellar-core")
 		if lerr != nil {
 			return resolvedCore{}, fmt.Errorf(
-				"[ingestion].stellar_core_binary_path unset and stellar-core not found on PATH: %w", lerr)
+				"[ingestion].core_binary_path unset and stellar-core not found on PATH: %w", lerr)
 		}
 		binaryPath = found
 	}
 
-	storagePath := ing.CaptiveCoreStoragePath
+	storagePath := ing.CoreStoragePath
 	if storagePath == "" {
 		storagePath = filepath.Join(dataDir, "captive-core")
 	}
@@ -666,8 +666,8 @@ func (p coreFilePeek) warnHTTPSettingsOverridden(ing config.IngestionConfig, log
 		{"HTTP_PORT", keyCoreHTTPPort, p.HTTPPort, *ing.CoreHTTPPort},
 		{"HTTP_QUERY_PORT", keyCoreHTTPQueryPort, p.HTTPQueryPort, *ing.CoreHTTPQueryPort},
 		{
-			"QUERY_THREAD_POOL_SIZE", keyCoreQueryThreadPoolSize,
-			p.QueryThreadPoolSize, *ing.CoreHTTPQueryThreadPoolSize,
+			"QUERY_THREAD_POOL_SIZE", keyCoreQueryWorkers,
+			p.QueryThreadPoolSize, *ing.CoreHTTPQueryWorkers,
 		},
 		{
 			"QUERY_SNAPSHOT_LEDGERS", keyCoreQuerySnapshotLedgers,
@@ -678,7 +678,7 @@ func (p coreFilePeek) warnHTTPSettingsOverridden(ing config.IngestionConfig, log
 		if s.inFile == nil || *s.inFile == s.used {
 			continue
 		}
-		logger.Warnf("captive_core_config sets %s = %d, but [ingestion].%s owns core's HTTP "+
+		logger.Warnf("core_config sets %s = %d, but [ingestion].%s owns core's HTTP "+
 			"settings — running core with %d. Remove %s from the captive-core file to silence this.",
 			s.fileKey, *s.inFile, s.configKey, s.used, s.fileKey)
 	}
@@ -695,7 +695,7 @@ func (p coreFilePeek) warnHTTPSettingsOverridden(ing config.IngestionConfig, log
 // Passing no HTTP params leaves those branches unreachable.
 func applyHTTPServers(coreToml *ledgerbackend.CaptiveCoreToml, ing config.IngestionConfig) {
 	queryPort := *ing.CoreHTTPQueryPort
-	threadPoolSize := *ing.CoreHTTPQueryThreadPoolSize
+	threadPoolSize := *ing.CoreHTTPQueryWorkers
 	snapshotLedgers := *ing.CoreHTTPQuerySnapshotLedgers
 
 	coreToml.HTTPPort = *ing.CoreHTTPPort
@@ -716,7 +716,7 @@ func newCaptiveCoreOpener(
 ) (*captiveCoreOpener, error) {
 	coreToml, err := ledgerbackend.NewCaptiveCoreTomlFromData(data, params)
 	if err != nil {
-		return nil, fmt.Errorf("invalid captive-core toml %q: %w", ing.CaptiveCoreConfig, err)
+		return nil, fmt.Errorf("invalid captive-core toml %q: %w", ing.CoreConfig, err)
 	}
 	return &captiveCoreOpener{
 		config: ledgerbackend.CaptiveCoreConfig{

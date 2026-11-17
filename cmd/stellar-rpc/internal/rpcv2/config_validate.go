@@ -73,7 +73,7 @@ func validateForm(cfg config.Config) error {
 	if maxRetries := deref(cfg.Backfill.MaxRetries); maxRetries < 0 {
 		return fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
 	}
-	if err := validateBSB(cfg.Backfill.BSB); err != nil {
+	if err := validateDownload(cfg.Backfill.Download); err != nil {
 		return err
 	}
 	// logging.format silently means text unless it is exactly "json", so reject any
@@ -100,7 +100,7 @@ func validateForm(cfg config.Config) error {
 const (
 	keyCoreHTTPPort             = "core_http_port"
 	keyCoreHTTPQueryPort        = "core_http_query_port"
-	keyCoreQueryThreadPoolSize  = "core_http_query_thread_pool_size"
+	keyCoreQueryWorkers         = "core_http_query_workers"
 	keyCoreQuerySnapshotLedgers = "core_http_query_snapshot_ledgers"
 )
 
@@ -119,7 +119,7 @@ func validateIngestion(ing config.IngestionConfig) error {
 	}{
 		{keyCoreHTTPPort, *ing.CoreHTTPPort},
 		{keyCoreHTTPQueryPort, *ing.CoreHTTPQueryPort},
-		{keyCoreQueryThreadPoolSize, *ing.CoreHTTPQueryThreadPoolSize},
+		{keyCoreQueryWorkers, *ing.CoreHTTPQueryWorkers},
 		{keyCoreQuerySnapshotLedgers, *ing.CoreHTTPQuerySnapshotLedgers},
 	}
 	for _, p := range ports {
@@ -201,29 +201,29 @@ func isLoopbackHost(host string) bool {
 // warning threshold is never intended.
 const minConfiguredDuration = time.Millisecond
 
-// validateBSB form-validates [backfill.bsb]. It runs AFTER WithDefaults, so
+// validateDownload form-validates [backfill.download]. It runs AFTER WithDefaults, so
 // every pointer is non-nil. max_retries needs no check — any uint32 is valid,
 // including 0 (no retries).
-func validateBSB(bsb config.BSBConfig) error {
-	if *bsb.BufferSize < 1 {
-		return errors.New("[backfill.bsb].buffer_size must be >= 1")
+func validateDownload(bsb config.DownloadConfig) error {
+	if *bsb.PrefetchFiles < 1 {
+		return errors.New("[backfill.download].prefetch_files must be >= 1")
 	}
 	// There is no off switch: unset (nil, filled with the default by
 	// WithDefaults) or a positive budget. An operator wanting it effectively
 	// unbounded sets a huge value — visibly, in bytes.
-	if bytes := deref(bsb.BufferBytes); bytes < 1 {
-		return fmt.Errorf("[backfill.bsb].buffer_bytes (%d) must be >= 1; "+
+	if bytes := deref(bsb.PrefetchBytes); bytes < 1 {
+		return fmt.Errorf("[backfill.download].prefetch_bytes (%d) must be >= 1; "+
 			"delete the key to use the default", bytes)
 	}
-	if *bsb.NumWorkers < 1 {
-		return errors.New("[backfill.bsb].num_workers must be >= 1")
+	if *bsb.Workers < 1 {
+		return errors.New("[backfill.download].workers must be >= 1")
 	}
-	if *bsb.NumWorkers > *bsb.BufferSize {
-		return fmt.Errorf("[backfill.bsb].num_workers (%d) cannot exceed buffer_size (%d) — "+
-			"each worker needs a buffer slot to download into", *bsb.NumWorkers, *bsb.BufferSize)
+	if *bsb.Workers > *bsb.PrefetchFiles {
+		return fmt.Errorf("[backfill.download].workers (%d) cannot exceed prefetch_files (%d) — "+
+			"each worker needs a buffer slot to download into", *bsb.Workers, *bsb.PrefetchFiles)
 	}
 	if *bsb.RetryWait < minConfiguredDuration {
-		return fmt.Errorf("[backfill.bsb].retry_wait is %v — durations below 1ms are rejected; "+
+		return fmt.Errorf("[backfill.download].retry_wait is %v — durations below 1ms are rejected; "+
 			"a bare TOML integer parses as nanoseconds, write a string like \"5s\"", *bsb.RetryWait)
 	}
 	return nil
@@ -315,24 +315,24 @@ func validateService(svc config.ServiceConfig) error {
 	if err := validateQueryEvents(m.QueryEvents); err != nil {
 		return err
 	}
-	if err := validatePreflight(svc.Preflight); err != nil {
+	if err := validateSimulation(svc.Simulation); err != nil {
 		return err
 	}
 	return validateFeeWindows(svc.FeeStats)
 }
 
-// validatePreflight form-validates [service.preflight]. Zero workers means
+// validateSimulation form-validates [service.simulation]. Zero workers means
 // nothing picks requests up; a zero queue means the pool is full from the start.
 // Either rejects every simulateTransaction.
-func validatePreflight(p config.PreflightConfig) error {
-	if *p.WorkerCount < 1 {
-		return errors.New("[service.preflight].worker_count must be >= 1")
+func validateSimulation(p config.SimulationConfig) error {
+	if *p.Workers < 1 {
+		return errors.New("[service.simulation].workers must be >= 1")
 	}
-	if *p.WorkerQueueSize < 1 {
-		return errors.New("[service.preflight].worker_queue_size must be >= 1")
+	if *p.QueueSize < 1 {
+		return errors.New("[service.simulation].queue_size must be >= 1")
 	}
 	return limits.ValidateSimulationMemoryLimit(
-		"[service.preflight].simulation_memory_limit", uint64(*p.SimulationMemoryLimit))
+		"[service.simulation].max_memory_bytes", uint64(*p.MaxMemoryBytes))
 }
 
 func validatePaginatedMethods(m config.MethodsConfig) error {
@@ -346,15 +346,15 @@ func validatePaginatedMethods(m config.MethodsConfig) error {
 		{"queryEvents", m.QueryEvents.PaginatedMethodConfig},
 	}
 	for _, pp := range paginated {
-		if *pp.p.MaxItemsPerResponse < 1 {
-			return fmt.Errorf("[service.methods.%s].max_items_per_response must be >= 1", pp.name)
+		if *pp.p.MaxPageLimit < 1 {
+			return fmt.Errorf("[service.methods.%s].max_page_limit must be >= 1", pp.name)
 		}
-		if *pp.p.DefaultItemsPerResponse < 1 {
-			return fmt.Errorf("[service.methods.%s].default_items_per_response must be >= 1", pp.name)
+		if *pp.p.DefaultPageLimit < 1 {
+			return fmt.Errorf("[service.methods.%s].default_page_limit must be >= 1", pp.name)
 		}
-		if *pp.p.DefaultItemsPerResponse > *pp.p.MaxItemsPerResponse {
-			return fmt.Errorf("[service.methods.%s].default_items_per_response (%d) cannot exceed max_items_per_response (%d)",
-				pp.name, *pp.p.DefaultItemsPerResponse, *pp.p.MaxItemsPerResponse)
+		if *pp.p.DefaultPageLimit > *pp.p.MaxPageLimit {
+			return fmt.Errorf("[service.methods.%s].default_page_limit (%d) cannot exceed max_page_limit (%d)",
+				pp.name, *pp.p.DefaultPageLimit, *pp.p.MaxPageLimit)
 		}
 	}
 	return nil
@@ -362,15 +362,15 @@ func validatePaginatedMethods(m config.MethodsConfig) error {
 
 // validateQueryEvents form-validates the queryEvents knobs. The spec fixes
 // the largest limit a client may ask for, so an operator can lower it but
-// not raise it. That bound also holds default_items_per_response down,
+// not raise it. That bound also holds default_page_limit down,
 // which validation otherwise only requires to be <= max.
 func validateQueryEvents(e config.QueryEventsMethodConfig) error {
 	if *e.TermBudget < 1 {
 		return errors.New("[service.methods.queryEvents].term_budget must be >= 1")
 	}
-	if *e.MaxItemsPerResponse > protocol.QueryEventsMaxLimit {
-		return fmt.Errorf("[service.methods.queryEvents].max_items_per_response (%d) cannot exceed %d",
-			*e.MaxItemsPerResponse, protocol.QueryEventsMaxLimit)
+	if *e.MaxPageLimit > protocol.QueryEventsMaxLimit {
+		return fmt.Errorf("[service.methods.queryEvents].max_page_limit (%d) cannot exceed %d",
+			*e.MaxPageLimit, protocol.QueryEventsMaxLimit)
 	}
 	return nil
 }

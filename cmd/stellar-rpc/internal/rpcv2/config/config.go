@@ -31,7 +31,7 @@ import (
 // geometry.ChunksPerTxhashIndex constant.)
 //
 // Every leaf key is also settable from the command line as a flag named by its
-// dotted TOML path (--storage.default_data_dir, --service.methods.getLedgers.queue_limit);
+// dotted TOML path (--storage.data_dir, --service.methods.getLedgers.queue_limit);
 // see BindFlags/ApplyFlags in flags.go. Flags override the file; the file stays
 // the single source of truth and --config-path stays required.
 type Config struct {
@@ -47,7 +47,7 @@ type Config struct {
 // Everything here is live: the read server listens on endpoint, the admin
 // server on admin_endpoint, the method table enforces the per-method limits,
 // ingestion feeds the fee windows sized by [service.fee_stats] (#881), and the
-// daemon sizes its preflight pool from [service.preflight] at startup. The
+// daemon sizes its simulation worker pool from [service.simulation] at startup. The
 // whole section is optional: absent keys get v1's defaults in WithDefaults.
 //
 // Key naming rule: camelCase table keys ONLY where the key is a wire identifier
@@ -85,32 +85,32 @@ type ServiceConfig struct {
 	// means no limit.
 	MaxTotalResponseBytes *uint `toml:"max_total_response_bytes"`
 
-	FeeStats  FeeStatsConfig  `toml:"fee_stats"`
-	Preflight PreflightConfig `toml:"preflight"`
-	Methods   MethodsConfig   `toml:"methods"`
+	FeeStats   FeeStatsConfig   `toml:"fee_stats"`
+	Simulation SimulationConfig `toml:"simulation"`
+	Methods    MethodsConfig    `toml:"methods"`
 }
 
-// PreflightConfig is [service.preflight] — the pool of worker processes that
-// runs simulateTransaction's preflights. It sits under [service] rather than under the
+// SimulationConfig is [service.simulation] — the pool of worker processes that
+// runs simulateTransaction's simulations. It sits under [service] rather than under the
 // simulateTransaction method table because the pool is sized once at startup,
 // not per request (the same reason [service.fee_stats] lives where it does).
-type PreflightConfig struct {
-	// WorkerCount is how many worker processes run preflights concurrently; >= 1.
+type SimulationConfig struct {
+	// Workers is how many worker processes run simulations concurrently; >= 1.
 	// Default GOMAXPROCS.
-	WorkerCount *uint `toml:"worker_count"`
-	// WorkerQueueSize is how many preflight requests may wait for a free worker
+	Workers *uint `toml:"workers"`
+	// QueueSize is how many simulation requests may wait for a free worker
 	// before the pool starts rejecting them; >= 1. Default the larger of
 	// GOMAXPROCS and MaxRequestBatchSize, since the calls of one batch start at
 	// once.
-	WorkerQueueSize *uint `toml:"worker_queue_size"`
+	QueueSize *uint `toml:"queue_size"`
 	// EnableDebug includes diagnostic events in simulateTransaction responses.
 	// Default true.
 	EnableDebug *bool `toml:"enable_debug"`
-	// SimulationMemoryLimit is the most heap memory, in bytes, the simulation
+	// MaxMemoryBytes is the most heap memory, in bytes, the simulation
 	// library may hold in a worker process. 0 (the default) means 8 times the
 	// network's per-transaction memory limit, and any other value must be at
 	// least 16000000. Plan for about this limit + 128 MiB per worker.
-	SimulationMemoryLimit *uint `toml:"simulation_memory_limit"`
+	MaxMemoryBytes *uint `toml:"max_memory_bytes"`
 }
 
 // FeeStatsConfig is [service.fee_stats] — the sizes, in ledgers, of the two
@@ -169,16 +169,16 @@ type MethodConfig struct {
 }
 
 // PaginatedMethodConfig extends MethodConfig for the cursor-paginated methods
-// (getTransactions, getLedgers, getEvents): max_items_per_response caps the
-// client's pagination limit, default_items_per_response applies when the
+// (getTransactions, getLedgers, getEvents): max_page_limit caps the
+// client's pagination limit, default_page_limit applies when the
 // request omits it. These two have NO methods-wide default tier — they exist
 // on only three methods, so a wide default would mostly be a trap.
 type PaginatedMethodConfig struct {
 	QueueLimit           *uint          `toml:"queue_limit"`
 	MaxExecutionDuration *time.Duration `toml:"max_execution_duration"`
 
-	MaxItemsPerResponse     *uint `toml:"max_items_per_response"`
-	DefaultItemsPerResponse *uint `toml:"default_items_per_response"`
+	MaxPageLimit     *uint `toml:"max_page_limit"`
+	DefaultPageLimit *uint `toml:"default_page_limit"`
 }
 
 // NetworkMethodConfig extends MethodConfig for getNetwork with the friendbot
@@ -239,22 +239,22 @@ type RetentionConfig struct {
 // StorageConfig is [storage]: the data root plus one optional path per on-disk
 // tree (consolidating what were the separate [catalog] / [immutable_storage.*] /
 // [streaming.hot_storage] sections). An empty per-store value defaults under
-// default_data_dir.
+// data_dir.
 type StorageConfig struct {
 	// Base dir for the catalog and default storage paths. Required.
 	// (Moved here from [service] in #882 — it governs storage placement.)
-	DefaultDataDir string `toml:"default_data_dir"`
+	DataDir string `toml:"data_dir"`
 
 	Catalog     string `toml:"catalog"`      // catalog RocksDB dir
 	Ledgers     string `toml:"ledgers"`      // immutable ledger packs root
 	Events      string `toml:"events"`       // immutable events packs root (the pack only; see events_index)
 	EventsIndex string `toml:"events_index"` // immutable events index root
-	TxhashRaw   string `toml:"txhash_raw"`   // transient txhash .bin root
+	Txhashes    string `toml:"txhashes"`     // transient txhash .bin root
 	TxhashIndex string `toml:"txhash_index"` // frozen txhash .idx root
 	Hot         string `toml:"hot"`          // per-chunk hot RocksDB root
 }
 
-// BackfillConfig is [backfill] plus the nested [backfill.datastore] and [backfill.bsb].
+// BackfillConfig is [backfill] plus the nested [backfill.datastore] and [backfill.download].
 type BackfillConfig struct {
 	// Concurrent task-slot count for bulk backfill; >= 1. Default GOMAXPROCS.
 	Workers *int `toml:"workers"`
@@ -268,8 +268,8 @@ type BackfillConfig struct {
 	// SDK datastore type is accepted.
 	DataStore DataStoreConfig `toml:"datastore"`
 
-	// BSB tunes the buffered-storage stream over DataStore.
-	BSB BSBConfig `toml:"bsb"`
+	// Download tunes the buffered-storage stream that downloads from DataStore.
+	Download DownloadConfig `toml:"download"`
 }
 
 // DataStoreConfig is [backfill.datastore] — the bulk ledger source. The key
@@ -316,26 +316,28 @@ func (d DataStoreConfig) SDKConfig(networkPassphrase string) datastore.DataStore
 	}
 }
 
-// BSBConfig is [backfill.bsb] — tuning for the buffered-storage stream that
+// DownloadConfig is [backfill.download] — tuning for the buffered-storage stream that
 // downloads ledger objects from [backfill.datastore] during backfill. It mirrors
 // the SDK's ledgerbackend.BufferedStorageBackendConfig rather than embedding it,
 // for two reasons: the fields are pointers so an absent key is distinguishable
 // from an explicit zero (max_retries = 0 genuinely disables retries), and the
-// key is named max_retries to match [backfill].max_retries instead of the SDK's
-// retry_limit. SDKConfig converts to the SDK type at the daemon boundary.
-type BSBConfig struct {
-	// BufferSize is the prefetch depth of one chunk task, in datastore OBJECTS
+// keys are named for what they bound rather than after the SDK fields:
+// prefetch_files is the SDK's buffer_size, prefetch_bytes its buffer_bytes,
+// workers its num_workers, and max_retries its retry_limit. SDKConfig converts
+// to the SDK type at the daemon boundary.
+type DownloadConfig struct {
+	// PrefetchFiles is the prefetch depth of one chunk task, in datastore OBJECTS
 	// (an object holds ledgersPerFile ledgers). >= 1. It bounds per-object
 	// overhead, not memory.
-	BufferSize *uint32 `toml:"buffer_size"`
-	// BufferBytes is one chunk task's prefetch budget in bytes — the bound
+	PrefetchFiles *uint32 `toml:"prefetch_files"`
+	// PrefetchBytes is one chunk task's prefetch budget in bytes — the bound
 	// that tracks memory, since object size varies ~700x across pubnet history
 	// while a count does not. >= 1; unset takes the default.
-	BufferBytes *int64 `toml:"buffer_bytes"`
+	PrefetchBytes *int64 `toml:"prefetch_bytes"`
 
-	// NumWorkers is how many object downloads run concurrently for one chunk
-	// task; >= 1 and <= buffer_size.
-	NumWorkers *uint32 `toml:"num_workers"`
+	// Workers is how many object downloads run concurrently for one chunk
+	// task; >= 1 and <= prefetch_files.
+	Workers *uint32 `toml:"workers"`
 	// MaxRetries caps how many times ONE object download (a single ledger file
 	// fetched from the datastore) is retried after a transient error, waiting
 	// RetryWait between attempts; when the budget is exhausted the whole stream
@@ -349,13 +351,13 @@ type BSBConfig struct {
 	RetryWait *time.Duration `toml:"retry_wait"`
 }
 
-// SDKConfig converts the resolved [backfill.bsb] section into the SDK's config
+// SDKConfig converts the resolved [backfill.download] section into the SDK's config
 // type. Call it only after WithDefaults, when every field is non-nil.
-func (b BSBConfig) SDKConfig() ledgerbackend.BufferedStorageBackendConfig {
+func (b DownloadConfig) SDKConfig() ledgerbackend.BufferedStorageBackendConfig {
 	return ledgerbackend.BufferedStorageBackendConfig{
-		BufferSize:  *b.BufferSize,
-		BufferBytes: *b.BufferBytes,
-		NumWorkers:  *b.NumWorkers,
+		BufferSize:  *b.PrefetchFiles,
+		BufferBytes: *b.PrefetchBytes,
+		NumWorkers:  *b.Workers,
 		RetryLimit:  *b.MaxRetries,
 		RetryWait:   *b.RetryWait,
 	}
@@ -369,19 +371,19 @@ func (b BSBConfig) SDKConfig() ledgerbackend.BufferedStorageBackendConfig {
 // archive client needs), and, optionally, the stellar-core binary path and the
 // captive-core storage directory.
 type IngestionConfig struct {
-	// CaptiveCoreConfig is the path to the CaptiveStellarCore (stellar-core) config
+	// CoreConfig is the path to the CaptiveStellarCore (stellar-core) config
 	// file. Required for live ingestion. Must define NETWORK_PASSPHRASE.
-	CaptiveCoreConfig string `toml:"captive_core_config"`
+	CoreConfig string `toml:"core_config"`
 	// HistoryArchiveURLs are the plain history-archive URLs the SDK reads
 	// checkpoints from. Required for live ingestion (not derivable from the
 	// captive-core file's [HISTORY.*] get-commands).
 	HistoryArchiveURLs []string `toml:"history_archive_urls"`
-	// StellarCoreBinaryPath is the path to the stellar-core binary. Optional —
+	// CoreBinaryPath is the path to the stellar-core binary. Optional —
 	// defaults to the "stellar-core" found on PATH.
-	StellarCoreBinaryPath string `toml:"stellar_core_binary_path"`
-	// CaptiveCoreStoragePath is captive core's BUCKET_DIR_PATH base; optional,
-	// defaults to {default_data_dir}/captive-core.
-	CaptiveCoreStoragePath string `toml:"captive_core_storage_path"`
+	CoreBinaryPath string `toml:"core_binary_path"`
+	// CoreStoragePath is captive core's BUCKET_DIR_PATH base; optional,
+	// defaults to {data_dir}/captive-core.
+	CoreStoragePath string `toml:"core_storage_path"`
 
 	// The six keys below configure the two HTTP servers of the same captive-core
 	// process the keys above describe, which is why they live here even though
@@ -406,9 +408,9 @@ type IngestionConfig struct {
 	// stellar-captive-core-http-query-port). Default 11628, and must differ from
 	// CoreHTTPPort.
 	CoreHTTPQueryPort *uint `toml:"core_http_query_port"`
-	// CoreHTTPQueryThreadPoolSize is how many threads core's query server uses.
+	// CoreHTTPQueryWorkers is how many threads core's query server uses.
 	// Default GOMAXPROCS.
-	CoreHTTPQueryThreadPoolSize *uint `toml:"core_http_query_thread_pool_size"`
+	CoreHTTPQueryWorkers *uint `toml:"core_http_query_workers"`
 	// CoreHTTPQuerySnapshotLedgers is how many recent ledgers core's query server
 	// keeps snapshots for. Default 4; leave it alone unless you know what core
 	// does with it.
@@ -479,37 +481,37 @@ const (
 
 	DefaultMaxHealthyLedgerLatency time.Duration = 30 * time.Second
 
-	// DefaultQueryEventsMaxItemsPerResponse is the page cap the finalized
+	// DefaultQueryEventsMaxPageLimit is the page cap the finalized
 	// getEvents v2 API fixes as a spec constant
 	// (github.com/orgs/stellar/discussions/1872). The v1 method keeps v1's
-	// own cap; see DefaultGetEventsV1MaxItemsPerResponse.
-	DefaultQueryEventsMaxItemsPerResponse   uint = 1000
-	DefaultGetEventsDefaultItemsPerResponse uint = 100
+	// own cap; see DefaultGetEventsV1MaxPageLimit.
+	DefaultQueryEventsMaxPageLimit   uint = 1000
+	DefaultGetEventsDefaultPageLimit uint = 100
 
 	// DefaultQueryEventsTermBudget is the getEvents v2 proposal's default
 	// (github.com/orgs/stellar/discussions/1872).
 	DefaultQueryEventsTermBudget uint = 15
 
-	// DefaultGetEventsV1MaxItemsPerResponse is v1's own page cap, matching
+	// DefaultGetEventsV1MaxPageLimit is v1's own page cap, matching
 	// the existing service's max-events-limit. The 1,000 above is the v2
 	// spec's constant; applying it to v1 would reject pages v1 serves.
-	DefaultGetEventsV1MaxItemsPerResponse uint = 10_000
+	DefaultGetEventsV1MaxPageLimit uint = 10_000
 
-	DefaultGetTransactionsMaxItemsPerResponse     uint = 200
-	DefaultGetTransactionsDefaultItemsPerResponse uint = 50
+	DefaultGetTransactionsMaxPageLimit     uint = 200
+	DefaultGetTransactionsDefaultPageLimit uint = 50
 
-	// DefaultGetLedgersMaxItemsPerResponse and the default below it are 20
+	// DefaultGetLedgersMaxPageLimit and the default below it are 20
 	// and 5, where v1 serves 200 and 50 (TODO: revisit under the v2
 	// benchmarking epic). A getLedgers item is a whole LedgerCloseMeta,
 	// megabytes each on a busy pubnet ledger, so a 200-item page could
 	// exceed a hundred megabytes of XDR in one response.
-	DefaultGetLedgersMaxItemsPerResponse     uint = 20
-	DefaultGetLedgersDefaultItemsPerResponse uint = 5
+	DefaultGetLedgersMaxPageLimit     uint = 20
+	DefaultGetLedgersDefaultPageLimit uint = 5
 
 	DefaultClassicFeeWindowLedgers          uint32 = 10
 	DefaultSorobanInclusionFeeWindowLedgers uint32 = 50
 
-	DefaultPreflightEnableDebug = true
+	DefaultSimulationEnableDebug = true
 )
 
 // [ingestion] captive-core HTTP defaults — v1's values.
@@ -526,7 +528,7 @@ const (
 )
 
 // UsableCPUs is the default for the three keys v1 sizes by CPU count: the
-// preflight worker count and queue size, and core's query-server thread pool.
+// simulation worker count and queue size, and core's query-server workers.
 // It is GOMAXPROCS, the number of CPUs the process may use, which follows a
 // container's CPU limit.
 func UsableCPUs() uint {
@@ -605,12 +607,12 @@ func (cfg Config) WithDefaults() Config {
 	// Resolve through backfill.FillBSBDefaults so this path and the bench
 	// cannot drift apart.
 	resolved := backfill.FillBSBDefaults(ledgerbackend.BufferedStorageBackendConfig{})
-	fillUint32(&cfg.Backfill.BSB.BufferSize, resolved.BufferSize)
-	fillInt64(&cfg.Backfill.BSB.BufferBytes, backfill.DefaultBSBPrefetchBytes)
-	fillUint32(&cfg.Backfill.BSB.NumWorkers,
-		min(resolved.NumWorkers, *cfg.Backfill.BSB.BufferSize))
-	fillUint32(&cfg.Backfill.BSB.MaxRetries, backfill.DefaultBSBMaxRetries)
-	fillDuration(&cfg.Backfill.BSB.RetryWait, backfill.DefaultBSBRetryWait)
+	fillUint32(&cfg.Backfill.Download.PrefetchFiles, resolved.BufferSize)
+	fillInt64(&cfg.Backfill.Download.PrefetchBytes, backfill.DefaultBSBPrefetchBytes)
+	fillUint32(&cfg.Backfill.Download.Workers,
+		min(resolved.NumWorkers, *cfg.Backfill.Download.PrefetchFiles))
+	fillUint32(&cfg.Backfill.Download.MaxRetries, backfill.DefaultBSBMaxRetries)
+	fillDuration(&cfg.Backfill.Download.RetryWait, backfill.DefaultBSBRetryWait)
 	if cfg.Retention.RetentionChunks == nil {
 		v := uint32(0)
 		cfg.Retention.RetentionChunks = &v
@@ -638,10 +640,10 @@ func (cfg Config) WithDefaults() Config {
 	fillUint(&svc.MaxTotalResponseBytes, DefaultMaxTotalResponseBytes)
 	fillUint32(&svc.FeeStats.ClassicFeeWindowLedgers, DefaultClassicFeeWindowLedgers)
 	fillUint32(&svc.FeeStats.SorobanInclusionFeeWindowLedgers, DefaultSorobanInclusionFeeWindowLedgers)
-	fillUint(&svc.Preflight.WorkerCount, UsableCPUs())
-	fillUint(&svc.Preflight.WorkerQueueSize, max(UsableCPUs(), *svc.MaxRequestBatchSize))
-	fillBool(&svc.Preflight.EnableDebug, DefaultPreflightEnableDebug)
-	fillUint(&svc.Preflight.SimulationMemoryLimit, 0)
+	fillUint(&svc.Simulation.Workers, UsableCPUs())
+	fillUint(&svc.Simulation.QueueSize, max(UsableCPUs(), *svc.MaxRequestBatchSize))
+	fillBool(&svc.Simulation.EnableDebug, DefaultSimulationEnableDebug)
+	fillUint(&svc.Simulation.MaxMemoryBytes, 0)
 
 	// The port fills FIRST, so setting only core_http_port moves core_url with it.
 	ing := &cfg.Ingestion
@@ -651,7 +653,7 @@ func (cfg Config) WithDefaults() Config {
 	}
 	fillDuration(&ing.CoreRequestTimeout, DefaultCoreRequestTimeout)
 	fillUint(&ing.CoreHTTPQueryPort, DefaultCoreHTTPQueryPort)
-	fillUint(&ing.CoreHTTPQueryThreadPoolSize, UsableCPUs())
+	fillUint(&ing.CoreHTTPQueryWorkers, UsableCPUs())
 	fillUint(&ing.CoreHTTPQuerySnapshotLedgers, DefaultCoreHTTPQuerySnapshotLedgers)
 
 	// The methods cascade. queue/dur fill one per-method field: an explicit
@@ -698,23 +700,23 @@ func (cfg Config) WithDefaults() Config {
 
 	queue(&m.GetTransactions.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.GetTransactions.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)
-	fillUint(&m.GetTransactions.MaxItemsPerResponse, DefaultGetTransactionsMaxItemsPerResponse)
-	fillUint(&m.GetTransactions.DefaultItemsPerResponse, DefaultGetTransactionsDefaultItemsPerResponse)
+	fillUint(&m.GetTransactions.MaxPageLimit, DefaultGetTransactionsMaxPageLimit)
+	fillUint(&m.GetTransactions.DefaultPageLimit, DefaultGetTransactionsDefaultPageLimit)
 
 	queue(&m.GetLedgers.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.GetLedgers.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
-	fillUint(&m.GetLedgers.MaxItemsPerResponse, DefaultGetLedgersMaxItemsPerResponse)
-	fillUint(&m.GetLedgers.DefaultItemsPerResponse, DefaultGetLedgersDefaultItemsPerResponse)
+	fillUint(&m.GetLedgers.MaxPageLimit, DefaultGetLedgersMaxPageLimit)
+	fillUint(&m.GetLedgers.DefaultPageLimit, DefaultGetLedgersDefaultPageLimit)
 
 	queue(&m.GetEvents.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.GetEvents.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
-	fillUint(&m.GetEvents.MaxItemsPerResponse, DefaultGetEventsV1MaxItemsPerResponse)
-	fillUint(&m.GetEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
+	fillUint(&m.GetEvents.MaxPageLimit, DefaultGetEventsV1MaxPageLimit)
+	fillUint(&m.GetEvents.DefaultPageLimit, DefaultGetEventsDefaultPageLimit)
 
 	queue(&m.QueryEvents.QueueLimit, DefaultMethodQueueLimit)
 	dur(&m.QueryEvents.MaxExecutionDuration, DefaultScanMethodMaxExecutionDuration)
-	fillUint(&m.QueryEvents.MaxItemsPerResponse, DefaultQueryEventsMaxItemsPerResponse)
-	fillUint(&m.QueryEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
+	fillUint(&m.QueryEvents.MaxPageLimit, DefaultQueryEventsMaxPageLimit)
+	fillUint(&m.QueryEvents.DefaultPageLimit, DefaultGetEventsDefaultPageLimit)
 	fillUint(&m.QueryEvents.TermBudget, DefaultQueryEventsTermBudget)
 
 	queue(&m.GetFeeStats.QueueLimit, DefaultGetFeeStatsQueueLimit)
@@ -763,7 +765,7 @@ func fillDuration(p **time.Duration, v time.Duration) {
 }
 
 // Paths is the resolved set of on-disk paths the daemon uses — the single place
-// the {default_data_dir}/... layout lives, so locking and store-opening agree
+// the {data_dir}/... layout lives, so locking and store-opening agree
 // on every root.
 type Paths struct {
 	DataDir     string // the data root
@@ -771,19 +773,19 @@ type Paths struct {
 	Ledgers     string // immutable ledger packs root
 	Events      string // immutable events packs root
 	EventsIndex string // immutable events index root
-	TxhashRaw   string // transient txhash .bin root
+	Txhashes    string // transient txhash .bin root
 	TxhashIndex string // frozen txhash .idx root
 	HotStorage  string // per-chunk hot RocksDB root
 }
 
-// ResolvePaths fills every storage path, defaulting under default_data_dir.
+// ResolvePaths fills every storage path, defaulting under data_dir.
 // Relative overrides are kept relative (resolved against the caller's working
 // dir); only the defaults are joined to the data dir. The default tree is spelled
 // ONCE, by geometry.NewLayout — production flows through here and every package's
 // test helpers through NewLayout, so a rename to the tree can't leave the two
 // disagreeing.
 func (cfg Config) ResolvePaths() Paths {
-	dataDir := cfg.Storage.DefaultDataDir
+	dataDir := cfg.Storage.DataDir
 	def := geometry.NewLayout(dataDir)
 	pick := func(override, defPath string) string {
 		if override != "" {
@@ -797,7 +799,7 @@ func (cfg Config) ResolvePaths() Paths {
 		Ledgers:     pick(cfg.Storage.Ledgers, def.LedgersRoot()),
 		Events:      pick(cfg.Storage.Events, def.EventsRoot()),
 		EventsIndex: pick(cfg.Storage.EventsIndex, def.EventsIndexRoot()),
-		TxhashRaw:   pick(cfg.Storage.TxhashRaw, def.TxHashRawRoot()),
+		Txhashes:    pick(cfg.Storage.Txhashes, def.TxHashRawRoot()),
 		TxhashIndex: pick(cfg.Storage.TxhashIndex, def.TxHashIndexRoot()),
 		HotStorage:  pick(cfg.Storage.Hot, def.HotRoot()),
 	}
@@ -813,7 +815,7 @@ func (p Paths) Roots() []string {
 		p.Ledgers,
 		p.Events,
 		p.EventsIndex,
-		p.TxhashRaw,
+		p.Txhashes,
 		p.TxhashIndex,
 		p.HotStorage,
 	}
@@ -844,5 +846,5 @@ func (p Paths) ValidateRoots() error {
 // plain strings to keep geometry free of any config dependency.
 func NewLayoutFromPaths(p Paths) geometry.Layout {
 	return geometry.NewLayoutFromRoots(
-		p.Catalog, p.HotStorage, p.Ledgers, p.Events, p.EventsIndex, p.TxhashRaw, p.TxhashIndex)
+		p.Catalog, p.HotStorage, p.Ledgers, p.Events, p.EventsIndex, p.Txhashes, p.TxhashIndex)
 }

@@ -11,7 +11,7 @@ import (
 // Every TOML leaf of Config is settable from the command line as a flag named
 // by its dotted TOML path:
 //
-//	--storage.default_data_dir=/var/stellar
+//	--storage.data_dir=/var/stellar
 //	--service.methods.getLedgers.queue_limit=500
 //	--service.methods.queue_limit=30          (the methods-wide default tier)
 //

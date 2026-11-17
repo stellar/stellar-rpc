@@ -51,13 +51,13 @@ func writeTempConfig(t *testing.T, extra string) (string, string) {
 	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	body := fmt.Sprintf(`
 [storage]
-default_data_dir = %q
+data_dir = %q
 
 [retention]
 earliest_ledger = "genesis"
 
 [ingestion]
-captive_core_config = "/dev/null"
+core_config = "/dev/null"
 
 [logging]
 level = "debug"
@@ -289,14 +289,14 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 
 	cfg := config.Config{
 		Storage: config.StorageConfig{
-			DefaultDataDir: dataDir,
-			Catalog:        catalogOverride,
-			Ledgers:        ledgersOverride,
-			Events:         eventsOverride,
-			EventsIndex:    eventsIndexOverride,
-			TxhashRaw:      txhashRawOverride,
-			TxhashIndex:    txhashIndexOverride,
-			Hot:            hotOverride,
+			DataDir:     dataDir,
+			Catalog:     catalogOverride,
+			Ledgers:     ledgersOverride,
+			Events:      eventsOverride,
+			EventsIndex: eventsIndexOverride,
+			Txhashes:    txhashRawOverride,
+			TxhashIndex: txhashIndexOverride,
+			Hot:         hotOverride,
 		},
 	}.WithDefaults()
 
@@ -370,7 +370,7 @@ func TestRunDaemon_NowFloorRequiresTip(t *testing.T) {
 	err := runDaemonWith(context.Background(), configPath, daemonOptions{
 		// A never-ready bulk source (sub-genesis tip ⇒ fast permanent failure) means
 		// the network tip can't resolve "now". Core injected: the opener now resolves
-		// up front and the stub captive_core_config would otherwise error first.
+		// up front and the stub core_config would otherwise error first.
 		Backend: &fakeBackend{tip: 0},
 		Core:    &fakeCore{},
 		Logger:  silentLogger(),
@@ -385,28 +385,28 @@ func writeTempConfigNow(t *testing.T) (string, string) {
 	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	body := fmt.Sprintf(`
 [storage]
-default_data_dir = %q
+data_dir = %q
 [retention]
 earliest_ledger = "now"
 [ingestion]
-captive_core_config = "/dev/null"
+core_config = "/dev/null"
 `, dataDir)
 	require.NoError(t, os.WriteFile(configPath, []byte(body), 0o644))
 	return configPath, dataDir
 }
 
-// A missing default_data_dir is rejected before any store opens.
+// A missing data_dir is rejected before any store opens.
 func TestRunDaemon_RequiresDataDir(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	require.NoError(t, os.WriteFile(configPath, []byte(`
 [retention]
 earliest_ledger = "genesis"
 [ingestion]
-captive_core_config = "/dev/null"
+core_config = "/dev/null"
 `), 0o644))
 	err := runDaemonWith(context.Background(), configPath, daemonOptions{Logger: silentLogger()})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "default_data_dir")
+	assert.Contains(t, err.Error(), "data_dir")
 }
 
 // A nonexistent config path errors at load.
@@ -491,9 +491,9 @@ ADDRESS = "core-testnet1.stellar.org"
 func coreFileIngestion(t *testing.T, corePath string) config.IngestionConfig {
 	t.Helper()
 	return config.Config{Ingestion: config.IngestionConfig{
-		CaptiveCoreConfig:     corePath,
-		HistoryArchiveURLs:    []string{"https://archive.example"},
-		StellarCoreBinaryPath: filepath.Join(t.TempDir(), "stellar-core"),
+		CoreConfig:         corePath,
+		HistoryArchiveURLs: []string{"https://archive.example"},
+		CoreBinaryPath:     filepath.Join(t.TempDir(), "stellar-core"),
 	}}.WithDefaults().Ingestion
 }
 
@@ -502,7 +502,7 @@ func TestNewCaptiveCoreOpeners_PortsOnLiveCoreOnly(t *testing.T) {
 	ing := coreFileIngestion(t, writeCaptiveCoreFile(t, ""))
 	ing.CoreHTTPPort = uintPtr(21626)
 	ing.CoreHTTPQueryPort = uintPtr(21628)
-	ing.CoreHTTPQueryThreadPoolSize = uintPtr(7)
+	ing.CoreHTTPQueryWorkers = uintPtr(7)
 	ing.CoreHTTPQuerySnapshotLedgers = uintPtr(9)
 
 	core, err := newCaptiveCoreOpeners(ing, t.TempDir(), silentLogger())
@@ -532,7 +532,7 @@ func TestNewCaptiveCoreOpeners_PortsOnLiveCoreOnly(t *testing.T) {
 
 	// Both openers describe the same core.
 	assert.Equal(t, network.TestNetworkPassphrase, core.networkPassphrase)
-	assert.Equal(t, ing.StellarCoreBinaryPath, core.binaryPath)
+	assert.Equal(t, ing.CoreBinaryPath, core.binaryPath)
 	assert.Equal(t, live.config.NetworkPassphrase, backfill.config.NetworkPassphrase)
 	assert.Equal(t, live.config.StoragePath, backfill.config.StoragePath)
 }
@@ -541,7 +541,7 @@ func TestNewCaptiveCoreOpeners_BackfillPortlessEvenWhenCoreFileDeclaresPorts(t *
 	extra := "HTTP_PORT = 11626\nHTTP_QUERY_PORT = 11628\nQUERY_THREAD_POOL_SIZE = 2\n"
 	ing := coreFileIngestion(t, writeCaptiveCoreFile(t, extra))
 	poolSize := uint(2)
-	ing.CoreHTTPQueryThreadPoolSize = &poolSize
+	ing.CoreHTTPQueryWorkers = &poolSize
 
 	core, err := newCaptiveCoreOpeners(ing, t.TempDir(), silentLogger())
 	require.NoError(t, err)
@@ -621,7 +621,7 @@ func TestNewCaptiveCoreOpeners_OverridesCoreFileThreadPoolSize(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, live.config.Toml.QueryThreadPoolSize)
 	assert.Equal(t, config.UsableCPUs(), *live.config.Toml.QueryThreadPoolSize)
-	assert.Contains(t, logs.String(), keyCoreQueryThreadPoolSize)
+	assert.Contains(t, logs.String(), keyCoreQueryWorkers)
 }
 
 func TestNewCaptiveCoreOpeners_SilentWhenCoreFileAgrees(t *testing.T) {
@@ -781,7 +781,7 @@ func TestRunDaemon_NoLakeBackfillsThroughCaptiveCore(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	body := fmt.Sprintf(`
 [storage]
-default_data_dir = %q
+data_dir = %q
 
 [retention]
 earliest_ledger = "genesis"
@@ -790,7 +790,7 @@ earliest_ledger = "genesis"
 workers = 1
 
 [ingestion]
-captive_core_config = "/dev/null"
+core_config = "/dev/null"
 history_archive_urls = [%q]
 `, dataDir, archiveURL)
 	require.NoError(t, os.WriteFile(configPath, []byte(body), 0o644))

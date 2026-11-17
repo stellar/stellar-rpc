@@ -20,11 +20,11 @@ func TestSampleConfig_ParsesStrict(t *testing.T) {
 	cfg, err := config.ParseConfig(data)
 	require.NoError(t, err)
 
-	assert.Equal(t, "/var/stellar/rpc-v2", cfg.Storage.DefaultDataDir)
+	assert.Equal(t, "/var/stellar/rpc-v2", cfg.Storage.DataDir)
 	assert.Equal(t, config.DefaultEndpoint, cfg.Service.Endpoint)
 	assert.Equal(t, "GCS", cfg.Backfill.DataStore.Type)
-	assert.Equal(t, "/etc/stellar/captive-core.toml", cfg.Ingestion.CaptiveCoreConfig)
-	assert.False(t, *cfg.Service.Preflight.EnableDebug,
+	assert.Equal(t, "/etc/stellar/captive-core.toml", cfg.Ingestion.CoreConfig)
+	assert.False(t, *cfg.Service.Simulation.EnableDebug,
 		"the sample deliberately departs from the true default: it is a production starting point")
 }
 
@@ -35,17 +35,17 @@ func TestSampleConfig_ShownValuesAreDefaults(t *testing.T) {
 	cfg, err := config.ParseConfig(uncommentedSample(t))
 	require.NoError(t, err)
 
-	cfg.Storage.DefaultDataDir = ""
+	cfg.Storage.DataDir = ""
 	cfg.Service.Methods.QueueLimit = nil
 	cfg.Service.Methods.MaxExecutionDuration = nil
 	cfg.Service.Methods.GetNetwork.FriendbotURL = ""
-	cfg.Service.Preflight = config.PreflightConfig{}
+	cfg.Service.Simulation = config.SimulationConfig{}
 	cfg.Backfill.Workers = nil
 	cfg.Backfill.DataStore = config.DataStoreConfig{}
-	cfg.Ingestion.CaptiveCoreConfig = ""
+	cfg.Ingestion.CoreConfig = ""
 	cfg.Ingestion.HistoryArchiveURLs = nil
-	cfg.Ingestion.StellarCoreBinaryPath = ""
-	cfg.Ingestion.CoreHTTPQueryThreadPoolSize = nil
+	cfg.Ingestion.CoreBinaryPath = ""
+	cfg.Ingestion.CoreHTTPQueryWorkers = nil
 
 	assert.Equal(t, config.Config{}.WithDefaults(), cfg.WithDefaults())
 }

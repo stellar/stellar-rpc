@@ -35,7 +35,7 @@ func (e *Entry) rpcv2Command(runErr *error) *cobra.Command {
 		"resolve the config (file, then any override flags, then compiled defaults) "+
 			"and print it as TOML instead of running the daemon")
 	// Every TOML key is also a flag named by its dotted path
-	// (--storage.default_data_dir, --service.methods.getLedgers.queue_limit);
+	// (--storage.data_dir, --service.methods.getLedgers.queue_limit);
 	// set flags override the file.
 	v2config.BindFlags(root.Flags())
 

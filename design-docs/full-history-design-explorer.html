@@ -471,7 +471,7 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   </p>
 
   <h3>On disk</h3>
-  <div class="dirtree">{default_data_dir}/<br>
+  <div class="dirtree">{data_dir}/<br>
 ├── catalog/rocksdb/ <span class="c">                              ← catalog (WAL always on)</span><br>
 ├── <span class="hl">hot/{chunk:08d}/</span> <span class="c">                              ← per-chunk hot RocksDB (transient)</span><br>
 ├── <span class="cold">ledgers/{bucket:05d}/{chunk:08d}.pack</span><br>

@@ -50,7 +50,7 @@ type Config struct {
 	RequestTimeout time.Duration
 
 	// StellarCoreBinaryPath is the resolved stellar-core binary — an explicit
-	// [ingestion].stellar_core_binary_path, or the one found on PATH. New runs
+	// [ingestion].core_binary_path, or the one found on PATH. New runs
 	// `stellar-core version` against it once. Empty ⇒ CoreVersion reports "".
 	StellarCoreBinaryPath string
 

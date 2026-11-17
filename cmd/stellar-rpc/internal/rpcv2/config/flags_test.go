@@ -32,7 +32,7 @@ func TestBindFlags_LockstepWithTOMLSchema(t *testing.T) {
 
 	// Spot-check names across every section and nesting depth.
 	for _, name := range []string{
-		"storage.default_data_dir",
+		"storage.data_dir",
 		"storage.hot",
 		"retention.earliest_ledger",
 		"retention.retention_chunks",
@@ -40,8 +40,8 @@ func TestBindFlags_LockstepWithTOMLSchema(t *testing.T) {
 		"backfill.datastore.type",
 		"backfill.datastore.params",
 		"backfill.datastore.schema.ledgers_per_file",
-		"backfill.bsb.retry_wait",
-		"ingestion.captive_core_config",
+		"backfill.download.retry_wait",
+		"ingestion.core_config",
 		"ingestion.history_archive_urls",
 		"logging.level",
 		"service.endpoint",
@@ -49,14 +49,14 @@ func TestBindFlags_LockstepWithTOMLSchema(t *testing.T) {
 		"service.fee_stats.classic_fee_window_ledgers",
 		"service.methods.queue_limit",
 		"service.methods.getLedgers.queue_limit",
-		"service.methods.getLedgers.max_items_per_response",
+		"service.methods.getLedgers.max_page_limit",
 		"service.methods.getHealth.max_healthy_ledger_latency",
 		"service.methods.getFeeStats.max_execution_duration",
 		"service.methods.sendTransaction.queue_limit",
 		"service.methods.simulateTransaction.max_execution_duration",
 		"service.methods.getLedgerEntries.queue_limit",
-		"service.preflight.worker_count",
-		"service.preflight.enable_debug",
+		"service.simulation.workers",
+		"service.simulation.enable_debug",
 		"ingestion.core_http_port",
 		"ingestion.core_url",
 		"ingestion.core_request_timeout",
@@ -102,13 +102,13 @@ func TestApplyFlags_NoFlagsSetIsANoOp(t *testing.T) {
 func TestApplyFlags_OverridesFileValues(t *testing.T) {
 	fs := newBoundFlagSet(t)
 	require.NoError(t, fs.Parse([]string{
-		"--storage.default_data_dir=/flag/data",
+		"--storage.data_dir=/flag/data",
 		"--service.endpoint=0.0.0.0:7777",
 		"--service.fee_stats.classic_fee_window_ledgers=33",
 		"--backfill.workers=3",
 		"--ingestion.history_archive_urls=https://a.example,https://b.example",
-		"--backfill.bsb.retry_wait=7s",
-		"--backfill.bsb.buffer_bytes=1024",
+		"--backfill.download.retry_wait=7s",
+		"--backfill.download.prefetch_bytes=1024",
 	}))
 
 	cfg, err := DecodeConfig([]byte(minimalValidConfig))
@@ -116,13 +116,13 @@ func TestApplyFlags_OverridesFileValues(t *testing.T) {
 	require.NoError(t, ApplyFlags(&cfg, fs))
 	cfg = cfg.WithDefaults()
 
-	assert.Equal(t, "/flag/data", cfg.Storage.DefaultDataDir)
+	assert.Equal(t, "/flag/data", cfg.Storage.DataDir)
 	assert.Equal(t, "0.0.0.0:7777", cfg.Service.Endpoint)
 	assert.Equal(t, uint32(33), *cfg.Service.FeeStats.ClassicFeeWindowLedgers)
 	assert.Equal(t, 3, *cfg.Backfill.Workers)
 	assert.Equal(t, []string{"https://a.example", "https://b.example"}, cfg.Ingestion.HistoryArchiveURLs)
-	assert.Equal(t, 7*time.Second, *cfg.Backfill.BSB.RetryWait)
-	assert.EqualValues(t, 1024, *cfg.Backfill.BSB.BufferBytes,
+	assert.Equal(t, 7*time.Second, *cfg.Backfill.Download.RetryWait)
+	assert.EqualValues(t, 1024, *cfg.Backfill.Download.PrefetchBytes,
 		"an explicit budget must survive WithDefaults, not be replaced by the default")
 }
 
@@ -131,15 +131,15 @@ func TestApplyFlags_BoolOverride(t *testing.T) {
 	// one that turns it off — and it has to be spelled --flag=false, since a bare
 	// --flag sets a bool to true.
 	fs := newBoundFlagSet(t)
-	require.NoError(t, fs.Parse([]string{"--service.preflight.enable_debug=false"}))
+	require.NoError(t, fs.Parse([]string{"--service.simulation.enable_debug=false"}))
 
 	cfg, err := DecodeConfig([]byte(minimalValidConfig))
 	require.NoError(t, err)
-	require.Nil(t, cfg.Service.Preflight.EnableDebug)
+	require.Nil(t, cfg.Service.Simulation.EnableDebug)
 	require.NoError(t, ApplyFlags(&cfg, fs))
 	cfg = cfg.WithDefaults()
 
-	assert.False(t, *cfg.Service.Preflight.EnableDebug)
+	assert.False(t, *cfg.Service.Simulation.EnableDebug)
 }
 
 func TestApplyFlags_BoolLeftAloneKeepsTheDefault(t *testing.T) {
@@ -151,7 +151,7 @@ func TestApplyFlags_BoolLeftAloneKeepsTheDefault(t *testing.T) {
 	require.NoError(t, ApplyFlags(&cfg, fs))
 	cfg = cfg.WithDefaults()
 
-	assert.True(t, *cfg.Service.Preflight.EnableDebug,
+	assert.True(t, *cfg.Service.Simulation.EnableDebug,
 		"the flag's own false default must not leak in when the user never set it")
 }
 
@@ -200,10 +200,10 @@ func TestApplyFlags_MapFlagAllocatesAbsentMap(t *testing.T) {
 
 	cfg, err := DecodeConfig([]byte(`
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `))
 	require.NoError(t, err)
 	require.Nil(t, cfg.Backfill.DataStore.Params)
@@ -218,10 +218,10 @@ func TestApplyFlags_SliceFlagReplacesWholesale(t *testing.T) {
 
 	cfg, err := DecodeConfig([]byte(`
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 history_archive_urls = ["https://a.example", "https://b.example"]
 `))
 	require.NoError(t, err)
@@ -234,13 +234,13 @@ history_archive_urls = ["https://a.example", "https://b.example"]
 func TestApplyFlags_Precedence(t *testing.T) {
 	const fileWithTiers = `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [service.methods]
 queue_limit = 10
 [service.methods.getLedgers]
 queue_limit = 5
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `
 
 	load := func(t *testing.T, text string, args ...string) Config {
@@ -265,11 +265,11 @@ captive_core_config = "/cc"
 	t.Run("example B: CLI overrides one method only", func(t *testing.T) {
 		cfg := load(t, `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [service.methods.getLedgers]
 queue_limit = 5
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `, "--service.methods.getLedgers.queue_limit=50")
 		m := cfg.Service.Methods
 
@@ -281,11 +281,11 @@ captive_core_config = "/cc"
 	t.Run("term_budget is flag-settable and file-settable", func(t *testing.T) {
 		cfg := load(t, `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [service.methods.queryEvents]
 term_budget = 20
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `, "--service.methods.queryEvents.term_budget=30")
 		assert.Equal(t, uint(30), *cfg.Service.Methods.QueryEvents.TermBudget, "CLI beats file")
 	})
@@ -293,11 +293,11 @@ captive_core_config = "/cc"
 	t.Run("example D: durations cascade the same way", func(t *testing.T) {
 		cfg := load(t, `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [service.methods]
 max_execution_duration = "8s"
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `, "--service.methods.getEvents.max_execution_duration=20s")
 		m := cfg.Service.Methods
 

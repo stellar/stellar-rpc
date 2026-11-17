@@ -46,7 +46,7 @@ One TOML file configures the daemon, passed as `--config-path` to the binary in 
 
 Every TOML leaf is also settable from the command line:
 
-- One flag per leaf, named by its dotted TOML path: `--storage.default_data_dir`, `--service.methods.getLedgers.queue_limit`.
+- One flag per leaf, named by its dotted TOML path: `--storage.data_dir`, `--service.methods.getLedgers.queue_limit`.
 - The flag set is derived from the config structs by reflection, so it can never drift from the file schema.
 - Precedence: specificity beats source; within a tier, a set flag beats the file; compiled defaults are the last tier.
 - Map-valued keys merge per entry (`--backfill.datastore.params=region=x` sets one param and keeps the file's others); list-valued keys are replaced wholesale.
@@ -77,18 +77,18 @@ Every TOML leaf is also settable from the command line:
 **[service.methods.\<methodName\>]** — one table per served method (getHealth, getNetwork, getVersionInfo, getLatestLedger, getTransaction, getTransactions, getLedgers, getEvents, getFeeStats, sendTransaction, simulateTransaction, getLedgerEntries):
 
 - Every method: `queue_limit` and `max_execution_duration`. v1's defaults: 1000 / 5s, except getFeeStats's queue is 100, getLedgers/getEvents get 10s, and sendTransaction (500) / simulateTransaction (100) get 15s.
-- The three paginated methods (getTransactions, getLedgers, getEvents) add `max_items_per_response` / `default_items_per_response`. Two deliberate breaks from v1's page sizes (TODO: revisit under the v2 benchmarking epic): getEvents max is 1000 (the v2 API's spec constant, not v1's 10000), and getLedgers is 20/5 (one item is a full ledger's meta — megabytes each — so v1's 200/50 could produce >100MB responses).
+- The three paginated methods (getTransactions, getLedgers, getEvents) add `max_page_limit` / `default_page_limit`. Two deliberate breaks from v1's page sizes (TODO: revisit under the v2 benchmarking epic): getEvents max is 1000 (the v2 API's spec constant, not v1's 10000), and getLedgers is 20/5 (one item is a full ledger's meta — megabytes each — so v1's 200/50 could produce >100MB responses).
 - getHealth adds `max_healthy_ledger_latency` (default `"30s"`).
 - Bare `queue_limit` / `max_execution_duration` keys directly on `[service.methods]` form an optional methods-wide default tier: per-method value → wide default → compiled default.
 - Not here: `friendbot_url`, which arrives with the getNetwork handler.
 
-**[service.preflight]** — simulateTransaction's preflight worker pool. It sits under `[service]` rather than under the method table because it is sized once at startup, not per request:
+**[service.simulation]** — simulateTransaction's simulation worker pool. It sits under `[service]` rather than under the method table because it is sized once at startup, not per request:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `worker_count` | uint | `GOMAXPROCS` | Concurrent preflights; >= 1. |
-| `worker_queue_size` | uint | `GOMAXPROCS` | Requests that may wait for a free worker; >= 1. |
-| `simulation_memory_limit` | uint | `0` | Most heap memory, in bytes, the simulation library may hold in a worker; 0 means 8 times the network's per-transaction memory limit, and any other value must be at least 16000000. Plan for about this limit + 128 MiB per worker. |
+| `workers` | uint | `GOMAXPROCS` | Concurrent simulations; >= 1. |
+| `queue_size` | uint | `GOMAXPROCS` | Requests that may wait for a free worker; >= 1. |
+| `max_memory_bytes` | uint | `0` | Most heap memory, in bytes, the simulation library may hold in a worker; 0 means 8 times the network's per-transaction memory limit, and any other value must be at least 16000000. Plan for about this limit + 128 MiB per worker. |
 | `enable_debug` | bool | `true` | Diagnostic events in simulateTransaction responses. |
 
 **[retention]** — the two inputs to the retention floor; the effective floor is the higher of the two:
@@ -98,18 +98,18 @@ Every TOML leaf is also settable from the command line:
 | `retention_chunks` | uint32 | `0` | Retention window in chunks. `0` = full history. |
 | `earliest_ledger` | `"<number>"` \| `"genesis"` \| `"now"` (always a string — a bare TOML integer fails to parse) | `"genesis"` | Earliest ledger this daemon will ever have data for — a fixed lower floor on history. Must be chunk-aligned; `"now"` resolves to the backfill backend's frontier chunk at first start. Resolved and pinned on the first start (a reachable backend is required, to resolve `"now"` and to reject a numeric floor past the tip; see `validateConfig`), immutable thereafter. Setting it above genesis typically skips upfront backfill — useful when no fast backfill source is available and the daemon only follows the live network (`earliest_ledger = "now"`). |
 
-**[storage]** — the data root plus one optional path per on-disk tree; an unset per-store key defaults under `{default_data_dir}`:
+**[storage]** — the data root plus one optional path per on-disk tree; an unset per-store key defaults under `{data_dir}`:
 
 | Key | Default path | Holds |
 |---|---|---|
-| `default_data_dir` | **required** | base directory for the catalog and default storage paths (moved here from `[service]` in #882) |
-| `catalog` | `{default_data_dir}/catalog/rocksdb` | the catalog RocksDB |
-| `ledgers` | `{default_data_dir}/ledgers` | `.pack` files |
-| `events` | `{default_data_dir}/events/data` | events `.pack` segments |
-| `events_index` | `{default_data_dir}/events/index` | events `index.pack` + `index.hash` |
-| `txhash_raw` | `{default_data_dir}/txhash/raw` | transient `.bin` files |
-| `txhash_index` | `{default_data_dir}/txhash/index` | per-window `.idx` |
-| `hot` | `{default_data_dir}/hot` | per-chunk hot RocksDB databases |
+| `data_dir` | **required** | base directory for the catalog and default storage paths (moved here from `[service]` in #882) |
+| `catalog` | `{data_dir}/catalog/rocksdb` | the catalog RocksDB |
+| `ledgers` | `{data_dir}/ledgers` | `.pack` files |
+| `events` | `{data_dir}/events/data` | events `.pack` segments |
+| `events_index` | `{data_dir}/events/index` | events `index.pack` + `index.hash` |
+| `txhashes` | `{data_dir}/txhash/raw` | transient `.bin` files |
+| `txhash_index` | `{data_dir}/txhash/index` | per-window `.idx` |
+| `hot` | `{data_dir}/hot` | per-chunk hot RocksDB databases |
 
 **[backfill]**
 
@@ -123,12 +123,13 @@ Every TOML leaf is also settable from the command line:
 - Any SDK datastore (GCS, S3, Filesystem) works. Optional: an empty `type` means no lake, and backfill replays through captive core from the history archives instead.
 - The network passphrase is deliberately not a key here: the daemon copies it from the captive-core file at startup, and when the lake carries a manifest the SDK verifies the lake was exported from the same network — a wrong-network lake fails startup. A manifest-less lake skips the check, but its `schema` must then be set in the config (the SDK needs one of the two).
 
-**[backfill.bsb]** — tuning for the buffered-storage stream that downloads ledger objects from the datastore. Optional:
+**[backfill.download]** — tuning for the buffered-storage stream that downloads ledger objects from the datastore. Optional:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `buffer_size` | uint32 | `5000` | Downloaded ledgers buffered in memory; >= 1. Per BSB instance — each backfill chunk task opens its own stream. |
-| `num_workers` | uint32 | `50` | Concurrent object downloads; >= 1 and <= `buffer_size`. Per BSB instance. |
+| `prefetch_files` | uint32 | `5000` | Prefetch depth in lake files (not ledgers); >= 1. Per BSB instance — each backfill chunk task opens its own stream. |
+| `prefetch_bytes` | int64 | `33554432` (32 MiB) | Prefetch budget in bytes — the bound that tracks memory; >= 1. Per BSB instance. |
+| `workers` | uint32 | `25` | Concurrent object downloads; >= 1 and <= `prefetch_files`. Per BSB instance. |
 | `max_retries` | uint32 | `3` | Retries of ONE object download after a transient error; `0` = fail on the first error. Distinct from `[backfill].max_retries`, which re-runs a whole chunk task. |
 | `retry_wait` | duration | `"5s"` | Pause between retries of one object download; >= 1ms. |
 
@@ -136,15 +137,15 @@ Every TOML leaf is also settable from the command line:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `captive_core_config` | string | **required** | Path to the CaptiveStellarCore config file. Must define `NETWORK_PASSPHRASE`. |
+| `core_config` | string | **required** | Path to the CaptiveStellarCore config file. Must define `NETWORK_PASSPHRASE`. |
 | `history_archive_urls` | []string | **required** | History-archive URLs for the SDK's archive client. Not derivable from the captive-core file, whose `[HISTORY.*]` entries are shell commands. |
-| `stellar_core_binary_path` | string | `stellar-core` on `PATH` | Path to the stellar-core binary. |
-| `captive_core_storage_path` | string | `{default_data_dir}/captive-core` | Captive core's working directory. |
+| `core_binary_path` | string | `stellar-core` on `PATH` | Path to the stellar-core binary. |
+| `core_storage_path` | string | `{data_dir}/captive-core` | Captive core's working directory. |
 | `core_http_port` | uint | `11626` | Core's admin HTTP port, where sendTransaction submits. Base for `core_url`. |
 | `core_url` | string | `http://localhost:{core_http_port}` | Where transactions are submitted; set it only if core's admin server is not on localhost. |
 | `core_request_timeout` | duration | `"2s"` | Timeout for requests to either core server. |
 | `core_http_query_port` | uint | `11628` | Core's query port, serving ledger-entry reads for getLedgerEntries and preflight. |
-| `core_http_query_thread_pool_size` | uint | `GOMAXPROCS` | Threads core's query server uses. |
+| `core_http_query_workers` | uint | `GOMAXPROCS` | Threads core's query server uses. |
 | `core_http_query_snapshot_ledgers` | uint | `4` | Recent ledgers core's query server keeps snapshots of. |
 
 - The `core_*` keys are written into the **live** ingestion core's config only. A no-lake backfill runs one bounded-replay core per chunk in parallel, so fixed ports there would collide; nothing queries a backfill core.
@@ -184,7 +185,7 @@ The `.bin` files are transient — they are the input `buildTxhashIndex` merges,
 Chunk-level files group into buckets of 1,000 chunks (`bucket_id = chunk_id / 1000`, formatted `%05d`) — a filesystem concern only; bucket ids never appear in catalog keys. Directories are created on demand.
 
 ```
-{default_data_dir}/
+{data_dir}/
 ├── catalog/rocksdb/                                  ← catalog (WAL always on)
 ├── hot/{chunk:08d}/                               ← per-chunk hot RocksDB (transient)
 ├── ledgers/{bucket:05d}/{chunk:08d}.pack

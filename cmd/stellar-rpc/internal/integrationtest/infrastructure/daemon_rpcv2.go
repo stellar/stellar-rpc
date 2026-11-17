@@ -122,14 +122,14 @@ func (d *rpcv2Daemon) flags() *pflag.FlagSet {
 	fs := pflag.NewFlagSet("rpcv2-integration-tests", pflag.ContinueOnError)
 	config.BindFlags(fs)
 	values := map[string]string{
-		"storage.default_data_dir":                 filepath.Join(i.t.TempDir(), "rpcv2"),
+		"storage.data_dir":                         filepath.Join(i.t.TempDir(), "rpcv2"),
 		"service.endpoint":                         "127.0.0.1:0",
 		"service.admin_endpoint":                   "127.0.0.1:0",
 		"service.methods.getNetwork.friendbot_url": FriendbotURL,
-		"ingestion.captive_core_config":            filepath.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename),
+		"ingestion.core_config":                    filepath.Join(i.rpcConfigFilesDir, captiveCoreConfigFilename),
 		"ingestion.history_archive_urls":           "http://" + i.testPorts.CoreArchiveHostPort,
-		"ingestion.stellar_core_binary_path":       findCoreBinary(i.t),
-		"ingestion.captive_core_storage_path":      i.captiveCoreStoragePath,
+		"ingestion.core_binary_path":               findCoreBinary(i.t),
+		"ingestion.core_storage_path":              i.captiveCoreStoragePath,
 		"ingestion.core_http_port":                 strconv.Itoa(int(d.captiveCoreHTTPPort)),
 		"ingestion.core_url":                       fmt.Sprintf("http://127.0.0.1:%d", d.captiveCoreHTTPPort),
 		"ingestion.core_http_query_port":           strconv.Itoa(int(i.testPorts.captiveCoreHTTPQueryPort)),
