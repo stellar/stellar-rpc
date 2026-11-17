@@ -431,7 +431,7 @@ func newPreflightPool(
 		Logger:             logger,
 		CoreURL:            coreDaemon.QueryURL(),
 		CoreRequestTimeout: deref(cfg.Ingestion.CoreRequestTimeout),
-		MemoryLimit:        uint64(deref(p.MemoryLimit)),
+		MemoryLimit:        uint64(deref(p.MaxMemoryBytes)),
 	})
 }
 

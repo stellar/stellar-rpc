@@ -106,11 +106,11 @@ type SimulationConfig struct {
 	// EnableDebug includes diagnostic events in simulateTransaction responses.
 	// Default true.
 	EnableDebug *bool `toml:"enable_debug"`
-	// MemoryLimit is the most heap memory, in bytes, the simulation
+	// MaxMemoryBytes is the most heap memory, in bytes, the simulation
 	// library may hold in a worker process. 0 (the default) means 8 times the
 	// network's per-transaction memory limit, and any other value must be at
 	// least 16000000. Plan for about this limit + 128 MiB per worker.
-	MemoryLimit *uint `toml:"memory_limit"`
+	MaxMemoryBytes *uint `toml:"max_memory_bytes"`
 }
 
 // FeeStatsConfig is [service.fee_stats] — the sizes, in ledgers, of the two
@@ -643,7 +643,7 @@ func (cfg Config) WithDefaults() Config {
 	fillUint(&svc.Simulation.Workers, UsableCPUs())
 	fillUint(&svc.Simulation.QueueSize, max(UsableCPUs(), *svc.MaxRequestBatchSize))
 	fillBool(&svc.Simulation.EnableDebug, DefaultSimulationEnableDebug)
-	fillUint(&svc.Simulation.MemoryLimit, 0)
+	fillUint(&svc.Simulation.MaxMemoryBytes, 0)
 
 	// The port fills FIRST, so setting only core_http_port moves core_url with it.
 	ing := &cfg.Ingestion

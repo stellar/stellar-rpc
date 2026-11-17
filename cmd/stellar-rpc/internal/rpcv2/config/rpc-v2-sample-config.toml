@@ -184,7 +184,7 @@ enable_debug = false
 # process. 0 means 8 times the network's per-transaction memory limit, and any
 # other value must be at least 16000000. Plan for about this limit + 128 MiB
 # per worker.
-#memory_limit = 0
+#max_memory_bytes = 0
 
 # -----------------------------------------------------------------------------
 # [backfill]: downloading history into local storage

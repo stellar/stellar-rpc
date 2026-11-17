@@ -332,7 +332,7 @@ func validateSimulation(p config.SimulationConfig) error {
 		return errors.New("[service.simulation].queue_size must be >= 1")
 	}
 	return limits.ValidateSimulationMemoryLimit(
-		"[service.simulation].memory_limit", uint64(*p.MemoryLimit))
+		"[service.simulation].max_memory_bytes", uint64(*p.MaxMemoryBytes))
 }
 
 func validatePaginatedMethods(m config.MethodsConfig) error {

@@ -110,7 +110,7 @@ func TestValidateConfig_AcceptsTheMinimumSimulationMemoryLimit(t *testing.T) {
 	cat, _ := testCatalog(t)
 	cfg := validCfg(4, 3, "genesis")
 	minimum := uint(limits.MinSimulationMemoryLimit)
-	cfg.Service.Simulation.MemoryLimit = &minimum
+	cfg.Service.Simulation.MaxMemoryBytes = &minimum
 	_, err := callValidate(t, cfg, cat, downTip())
 	require.NoError(t, err)
 }
@@ -273,11 +273,11 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"[service.simulation].queue_size",
 		},
 		{
-			"simulation memory_limit below the minimum",
+			"simulation max_memory_bytes below the minimum",
 			func(c *config.Config) {
-				c.Service.Simulation.MemoryLimit = uintPtr(limits.MinSimulationMemoryLimit - 1)
+				c.Service.Simulation.MaxMemoryBytes = uintPtr(limits.MinSimulationMemoryLimit - 1)
 			},
-			"[service.simulation].memory_limit must be 0 or at least 16000000 bytes",
+			"[service.simulation].max_memory_bytes must be 0 or at least 16000000 bytes",
 		},
 	}
 	for _, tc := range tests {

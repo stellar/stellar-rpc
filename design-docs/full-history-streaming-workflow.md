@@ -88,7 +88,7 @@ Every TOML leaf is also settable from the command line:
 |---|---|---|---|
 | `workers` | uint | `GOMAXPROCS` | Concurrent simulations; >= 1. |
 | `queue_size` | uint | `GOMAXPROCS` | Requests that may wait for a free worker; >= 1. |
-| `memory_limit` | uint | `0` | Most heap memory, in bytes, the simulation library may hold in a worker; 0 means 8 times the network's per-transaction memory limit, and any other value must be at least 16000000. Plan for about this limit + 128 MiB per worker. |
+| `max_memory_bytes` | uint | `0` | Most heap memory, in bytes, the simulation library may hold in a worker; 0 means 8 times the network's per-transaction memory limit, and any other value must be at least 16000000. Plan for about this limit + 128 MiB per worker. |
 | `enable_debug` | bool | `true` | Diagnostic events in simulateTransaction responses. |
 
 **[retention]** — the two inputs to the retention floor; the effective floor is the higher of the two:
