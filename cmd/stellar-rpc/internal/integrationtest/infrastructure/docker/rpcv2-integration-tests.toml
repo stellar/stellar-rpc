@@ -34,7 +34,7 @@ max_retries = 3
 retry_wait = "5s"
 
 [ingestion]
-captive_core_config = "/etc/stellar/captive-core.toml"
+core_config = "/etc/stellar/captive-core.toml"
 history_archive_urls = ["https://history.stellar.org/prd/core-live/core_live_001"]
 core_http_port = 11626
 core_http_query_port = 11628

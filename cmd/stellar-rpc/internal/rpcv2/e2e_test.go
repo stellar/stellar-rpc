@@ -179,7 +179,7 @@ func (m *e2eMetrics) prunedCount() int {
 }
 
 // e2eConfigPath writes a daemon TOML for an in-process E2E: genesis floor (no
-// tip needed to validate/start) and the given retention width. captive_core_config
+// tip needed to validate/start) and the given retention width. core_config
 // is a stub path the test's injected CoreOpener replaces, never opening a real core.
 // The one-chunk index window is set via the chunksPerTxhashIndex test seam, not config.
 func e2eConfigPath(t *testing.T, dataDir string, retentionChunks uint32) string {
@@ -194,7 +194,7 @@ earliest_ledger = "genesis"
 retention_chunks = %d
 
 [ingestion]
-captive_core_config = "/dev/null"
+core_config = "/dev/null"
 
 [logging]
 level = "error"

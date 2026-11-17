@@ -95,7 +95,7 @@ destination_bucket_path = "aws-public-blockchain/v1.1/stellar/ledgers/pubnet"
 region                  = "us-east-2" # AWS region hosting the public data lake bucket
 
 [ingestion]
-captive_core_config  = "/config/captive-core.toml"
+core_config  = "/config/captive-core.toml"
 history_archive_urls = [
   "https://history.stellar.org/prd/core-live/core_live_001",
   "https://history.stellar.org/prd/core-live/core_live_002",

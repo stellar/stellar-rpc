@@ -57,7 +57,7 @@ default_data_dir = %q
 earliest_ledger = "genesis"
 
 [ingestion]
-captive_core_config = "/dev/null"
+core_config = "/dev/null"
 
 [logging]
 level = "debug"
@@ -370,7 +370,7 @@ func TestRunDaemon_NowFloorRequiresTip(t *testing.T) {
 	err := runDaemonWith(context.Background(), configPath, daemonOptions{
 		// A never-ready bulk source (sub-genesis tip ⇒ fast permanent failure) means
 		// the network tip can't resolve "now". Core injected: the opener now resolves
-		// up front and the stub captive_core_config would otherwise error first.
+		// up front and the stub core_config would otherwise error first.
 		Backend: &fakeBackend{tip: 0},
 		Core:    &fakeCore{},
 		Logger:  silentLogger(),
@@ -389,7 +389,7 @@ default_data_dir = %q
 [retention]
 earliest_ledger = "now"
 [ingestion]
-captive_core_config = "/dev/null"
+core_config = "/dev/null"
 `, dataDir)
 	require.NoError(t, os.WriteFile(configPath, []byte(body), 0o644))
 	return configPath, dataDir
@@ -402,7 +402,7 @@ func TestRunDaemon_RequiresDataDir(t *testing.T) {
 [retention]
 earliest_ledger = "genesis"
 [ingestion]
-captive_core_config = "/dev/null"
+core_config = "/dev/null"
 `), 0o644))
 	err := runDaemonWith(context.Background(), configPath, daemonOptions{Logger: silentLogger()})
 	require.Error(t, err)
@@ -491,9 +491,9 @@ ADDRESS = "core-testnet1.stellar.org"
 func coreFileIngestion(t *testing.T, corePath string) config.IngestionConfig {
 	t.Helper()
 	return config.Config{Ingestion: config.IngestionConfig{
-		CaptiveCoreConfig:     corePath,
-		HistoryArchiveURLs:    []string{"https://archive.example"},
-		StellarCoreBinaryPath: filepath.Join(t.TempDir(), "stellar-core"),
+		CoreConfig:         corePath,
+		HistoryArchiveURLs: []string{"https://archive.example"},
+		CoreBinaryPath:     filepath.Join(t.TempDir(), "stellar-core"),
 	}}.WithDefaults().Ingestion
 }
 
@@ -532,7 +532,7 @@ func TestNewCaptiveCoreOpeners_PortsOnLiveCoreOnly(t *testing.T) {
 
 	// Both openers describe the same core.
 	assert.Equal(t, network.TestNetworkPassphrase, core.networkPassphrase)
-	assert.Equal(t, ing.StellarCoreBinaryPath, core.binaryPath)
+	assert.Equal(t, ing.CoreBinaryPath, core.binaryPath)
 	assert.Equal(t, live.config.NetworkPassphrase, backfill.config.NetworkPassphrase)
 	assert.Equal(t, live.config.StoragePath, backfill.config.StoragePath)
 }
@@ -790,7 +790,7 @@ earliest_ledger = "genesis"
 workers = 1
 
 [ingestion]
-captive_core_config = "/dev/null"
+core_config = "/dev/null"
 history_archive_urls = [%q]
 `, dataDir, archiveURL)
 	require.NoError(t, os.WriteFile(configPath, []byte(body), 0o644))

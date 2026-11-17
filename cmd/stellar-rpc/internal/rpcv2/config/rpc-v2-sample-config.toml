@@ -236,14 +236,14 @@ retry_wait = "5s"
 # Required. The captive-core config file. It must set NETWORK_PASSPHRASE and
 # a quorum set. The daemon takes the network passphrase from this file; v2 has
 # no network or network_passphrase key.
-captive_core_config = "/etc/stellar/captive-core.toml"
+core_config = "/etc/stellar/captive-core.toml"
 # Required. History archive URLs, also the backfill source when there is no
 # lake.
 history_archive_urls = ["https://history.stellar.org/prd/core-live/core_live_001"]
 # Default: stellar-core on PATH.
-#stellar_core_binary_path = "/usr/local/bin/stellar-core"
+#core_binary_path = "/usr/local/bin/stellar-core"
 # Captive core's working directory. Default: {default_data_dir}/captive-core.
-#captive_core_storage_path = ""
+#core_storage_path = ""
 # Captive core's two HTTP servers. sendTransaction submits through the admin
 # port, and getLedgerEntries and simulateTransaction read ledger entries
 # through the query port. The ports must be free and different. These keys

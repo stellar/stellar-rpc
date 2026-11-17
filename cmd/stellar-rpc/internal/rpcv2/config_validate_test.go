@@ -29,7 +29,7 @@ func validCfg(workers, maxRetries int, earliest string) config.Config {
 		Storage:   config.StorageConfig{DefaultDataDir: "/data"},
 		Retention: config.RetentionConfig{EarliestLedger: earliest},
 		Backfill:  config.BackfillConfig{Workers: &workers, MaxRetries: &maxRetries},
-		Ingestion: config.IngestionConfig{CaptiveCoreConfig: "/cc"},
+		Ingestion: config.IngestionConfig{CoreConfig: "/cc"},
 	}.WithDefaults()
 }
 

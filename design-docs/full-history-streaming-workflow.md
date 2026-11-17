@@ -137,10 +137,10 @@ Every TOML leaf is also settable from the command line:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `captive_core_config` | string | **required** | Path to the CaptiveStellarCore config file. Must define `NETWORK_PASSPHRASE`. |
+| `core_config` | string | **required** | Path to the CaptiveStellarCore config file. Must define `NETWORK_PASSPHRASE`. |
 | `history_archive_urls` | []string | **required** | History-archive URLs for the SDK's archive client. Not derivable from the captive-core file, whose `[HISTORY.*]` entries are shell commands. |
-| `stellar_core_binary_path` | string | `stellar-core` on `PATH` | Path to the stellar-core binary. |
-| `captive_core_storage_path` | string | `{default_data_dir}/captive-core` | Captive core's working directory. |
+| `core_binary_path` | string | `stellar-core` on `PATH` | Path to the stellar-core binary. |
+| `core_storage_path` | string | `{default_data_dir}/captive-core` | Captive core's working directory. |
 | `core_http_port` | uint | `11626` | Core's admin HTTP port, where sendTransaction submits. Base for `core_url`. |
 | `core_url` | string | `http://localhost:{core_http_port}` | Where transactions are submitted; set it only if core's admin server is not on localhost. |
 | `core_request_timeout` | duration | `"2s"` | Timeout for requests to either core server. |

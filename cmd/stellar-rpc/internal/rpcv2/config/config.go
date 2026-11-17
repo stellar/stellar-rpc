@@ -371,19 +371,19 @@ func (b DownloadConfig) SDKConfig() ledgerbackend.BufferedStorageBackendConfig {
 // archive client needs), and, optionally, the stellar-core binary path and the
 // captive-core storage directory.
 type IngestionConfig struct {
-	// CaptiveCoreConfig is the path to the CaptiveStellarCore (stellar-core) config
+	// CoreConfig is the path to the CaptiveStellarCore (stellar-core) config
 	// file. Required for live ingestion. Must define NETWORK_PASSPHRASE.
-	CaptiveCoreConfig string `toml:"captive_core_config"`
+	CoreConfig string `toml:"core_config"`
 	// HistoryArchiveURLs are the plain history-archive URLs the SDK reads
 	// checkpoints from. Required for live ingestion (not derivable from the
 	// captive-core file's [HISTORY.*] get-commands).
 	HistoryArchiveURLs []string `toml:"history_archive_urls"`
-	// StellarCoreBinaryPath is the path to the stellar-core binary. Optional —
+	// CoreBinaryPath is the path to the stellar-core binary. Optional —
 	// defaults to the "stellar-core" found on PATH.
-	StellarCoreBinaryPath string `toml:"stellar_core_binary_path"`
-	// CaptiveCoreStoragePath is captive core's BUCKET_DIR_PATH base; optional,
+	CoreBinaryPath string `toml:"core_binary_path"`
+	// CoreStoragePath is captive core's BUCKET_DIR_PATH base; optional,
 	// defaults to {default_data_dir}/captive-core.
-	CaptiveCoreStoragePath string `toml:"captive_core_storage_path"`
+	CoreStoragePath string `toml:"core_storage_path"`
 
 	// The six keys below configure the two HTTP servers of the same captive-core
 	// process the keys above describe, which is why they live here even though

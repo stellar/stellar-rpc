@@ -23,7 +23,7 @@ func TestSampleConfig_ParsesStrict(t *testing.T) {
 	assert.Equal(t, "/var/stellar/rpc-v2", cfg.Storage.DefaultDataDir)
 	assert.Equal(t, config.DefaultEndpoint, cfg.Service.Endpoint)
 	assert.Equal(t, "GCS", cfg.Backfill.DataStore.Type)
-	assert.Equal(t, "/etc/stellar/captive-core.toml", cfg.Ingestion.CaptiveCoreConfig)
+	assert.Equal(t, "/etc/stellar/captive-core.toml", cfg.Ingestion.CoreConfig)
 	assert.False(t, *cfg.Service.Simulation.EnableDebug,
 		"the sample deliberately departs from the true default: it is a production starting point")
 }
@@ -42,9 +42,9 @@ func TestSampleConfig_ShownValuesAreDefaults(t *testing.T) {
 	cfg.Service.Simulation = config.SimulationConfig{}
 	cfg.Backfill.Workers = nil
 	cfg.Backfill.DataStore = config.DataStoreConfig{}
-	cfg.Ingestion.CaptiveCoreConfig = ""
+	cfg.Ingestion.CoreConfig = ""
 	cfg.Ingestion.HistoryArchiveURLs = nil
-	cfg.Ingestion.StellarCoreBinaryPath = ""
+	cfg.Ingestion.CoreBinaryPath = ""
 	cfg.Ingestion.CoreHTTPQueryWorkers = nil
 
 	assert.Equal(t, config.Config{}.WithDefaults(), cfg.WithDefaults())

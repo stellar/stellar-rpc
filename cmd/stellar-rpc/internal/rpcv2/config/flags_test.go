@@ -41,7 +41,7 @@ func TestBindFlags_LockstepWithTOMLSchema(t *testing.T) {
 		"backfill.datastore.params",
 		"backfill.datastore.schema.ledgers_per_file",
 		"backfill.download.retry_wait",
-		"ingestion.captive_core_config",
+		"ingestion.core_config",
 		"ingestion.history_archive_urls",
 		"logging.level",
 		"service.endpoint",
@@ -203,7 +203,7 @@ func TestApplyFlags_MapFlagAllocatesAbsentMap(t *testing.T) {
 default_data_dir = "/d"
 
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `))
 	require.NoError(t, err)
 	require.Nil(t, cfg.Backfill.DataStore.Params)
@@ -221,7 +221,7 @@ func TestApplyFlags_SliceFlagReplacesWholesale(t *testing.T) {
 default_data_dir = "/d"
 
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 history_archive_urls = ["https://a.example", "https://b.example"]
 `))
 	require.NoError(t, err)
@@ -240,7 +240,7 @@ queue_limit = 10
 [service.methods.getLedgers]
 queue_limit = 5
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `
 
 	load := func(t *testing.T, text string, args ...string) Config {
@@ -269,7 +269,7 @@ default_data_dir = "/d"
 [service.methods.getLedgers]
 queue_limit = 5
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `, "--service.methods.getLedgers.queue_limit=50")
 		m := cfg.Service.Methods
 
@@ -285,7 +285,7 @@ default_data_dir = "/d"
 [service.methods.queryEvents]
 term_budget = 20
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `, "--service.methods.queryEvents.term_budget=30")
 		assert.Equal(t, uint(30), *cfg.Service.Methods.QueryEvents.TermBudget, "CLI beats file")
 	})
@@ -297,7 +297,7 @@ default_data_dir = "/d"
 [service.methods]
 max_execution_duration = "8s"
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `, "--service.methods.getEvents.max_execution_duration=20s")
 		m := cfg.Service.Methods
 

@@ -543,7 +543,7 @@ type captiveCoreOpener struct {
 }
 
 // newCaptiveCoreOpeners resolves the captive-core config. The
-// captive_core_config file is the source of truth for core-side settings:
+// core_config file is the source of truth for core-side settings:
 // NETWORK_PASSPHRASE is read back from it, and the binary defaults to the one on
 // PATH. Only the history-archive URLs come from [ingestion], since the file's
 // [HISTORY.*] entries are shell commands, not URLs. The toml params mirror the
@@ -556,8 +556,8 @@ type captiveCoreOpener struct {
 func newCaptiveCoreOpeners(
 	ing config.IngestionConfig, dataDir string, logger *supportlog.Entry,
 ) (resolvedCore, error) {
-	if ing.CaptiveCoreConfig == "" {
-		return resolvedCore{}, errors.New("[ingestion].captive_core_config is required for live ingestion")
+	if ing.CoreConfig == "" {
+		return resolvedCore{}, errors.New("[ingestion].core_config is required for live ingestion")
 	}
 	if len(ing.HistoryArchiveURLs) == 0 {
 		return resolvedCore{}, errors.New("[ingestion].history_archive_urls is required for live ingestion")
@@ -565,31 +565,31 @@ func newCaptiveCoreOpeners(
 
 	// Read the file ONCE: both openers are built from these bytes, so they cannot
 	// describe two different networks if the file changes underneath us.
-	data, err := os.ReadFile(ing.CaptiveCoreConfig)
+	data, err := os.ReadFile(ing.CoreConfig)
 	if err != nil {
-		return resolvedCore{}, fmt.Errorf("read captive_core_config %q: %w", ing.CaptiveCoreConfig, err)
+		return resolvedCore{}, fmt.Errorf("read core_config %q: %w", ing.CoreConfig, err)
 	}
 	var peek coreFilePeek
 	if perr := toml.Unmarshal(data, &peek); perr != nil {
-		return resolvedCore{}, fmt.Errorf("parse captive_core_config %q: %w", ing.CaptiveCoreConfig, perr)
+		return resolvedCore{}, fmt.Errorf("parse core_config %q: %w", ing.CoreConfig, perr)
 	}
 	if peek.NetworkPassphrase == "" {
-		return resolvedCore{}, fmt.Errorf("captive_core_config %q must define NETWORK_PASSPHRASE", ing.CaptiveCoreConfig)
+		return resolvedCore{}, fmt.Errorf("core_config %q must define NETWORK_PASSPHRASE", ing.CoreConfig)
 	}
 	peek.warnHTTPSettingsOverridden(ing, logger)
 
 	// stellar-core binary: explicit path, else the one on PATH (RPC daemon default).
-	binaryPath := ing.StellarCoreBinaryPath
+	binaryPath := ing.CoreBinaryPath
 	if binaryPath == "" {
 		found, lerr := exec.LookPath("stellar-core")
 		if lerr != nil {
 			return resolvedCore{}, fmt.Errorf(
-				"[ingestion].stellar_core_binary_path unset and stellar-core not found on PATH: %w", lerr)
+				"[ingestion].core_binary_path unset and stellar-core not found on PATH: %w", lerr)
 		}
 		binaryPath = found
 	}
 
-	storagePath := ing.CaptiveCoreStoragePath
+	storagePath := ing.CoreStoragePath
 	if storagePath == "" {
 		storagePath = filepath.Join(dataDir, "captive-core")
 	}
@@ -678,7 +678,7 @@ func (p coreFilePeek) warnHTTPSettingsOverridden(ing config.IngestionConfig, log
 		if s.inFile == nil || *s.inFile == s.used {
 			continue
 		}
-		logger.Warnf("captive_core_config sets %s = %d, but [ingestion].%s owns core's HTTP "+
+		logger.Warnf("core_config sets %s = %d, but [ingestion].%s owns core's HTTP "+
 			"settings — running core with %d. Remove %s from the captive-core file to silence this.",
 			s.fileKey, *s.inFile, s.configKey, s.used, s.fileKey)
 	}
@@ -716,7 +716,7 @@ func newCaptiveCoreOpener(
 ) (*captiveCoreOpener, error) {
 	coreToml, err := ledgerbackend.NewCaptiveCoreTomlFromData(data, params)
 	if err != nil {
-		return nil, fmt.Errorf("invalid captive-core toml %q: %w", ing.CaptiveCoreConfig, err)
+		return nil, fmt.Errorf("invalid captive-core toml %q: %w", ing.CoreConfig, err)
 	}
 	return &captiveCoreOpener{
 		config: ledgerbackend.CaptiveCoreConfig{

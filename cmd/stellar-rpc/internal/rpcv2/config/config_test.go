@@ -69,7 +69,7 @@ prefetch_files = 2000
 workers = 40
 
 [ingestion]
-captive_core_config = "/etc/captive-core.toml"
+core_config = "/etc/captive-core.toml"
 
 [logging]
 level = "debug"
@@ -88,7 +88,7 @@ type = "GCS"
 destination_bucket_path = "bucket/path"
 
 [ingestion]
-captive_core_config = "/etc/cc.toml"
+core_config = "/etc/cc.toml"
 `
 
 func TestParseConfig_FullDocument(t *testing.T) {
@@ -119,7 +119,7 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	assert.Equal(t, "my-bucket/ledgers", cfg.Backfill.DataStore.Params["destination_bucket_path"])
 	assert.Equal(t, uint32(2000), *cfg.Backfill.Download.PrefetchFiles)
 	assert.Equal(t, uint32(40), *cfg.Backfill.Download.Workers)
-	assert.Equal(t, "/etc/captive-core.toml", cfg.Ingestion.CaptiveCoreConfig)
+	assert.Equal(t, "/etc/captive-core.toml", cfg.Ingestion.CoreConfig)
 	assert.Equal(t, "debug", cfg.Logging.Level)
 	assert.Equal(t, "json", cfg.Logging.Format)
 }
@@ -131,7 +131,7 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	// Required keys preserved.
 	assert.Equal(t, "/data", cfg.Storage.DefaultDataDir)
 	assert.Equal(t, "bucket/path", cfg.Backfill.DataStore.Params["destination_bucket_path"])
-	assert.Equal(t, "/etc/cc.toml", cfg.Ingestion.CaptiveCoreConfig)
+	assert.Equal(t, "/etc/cc.toml", cfg.Ingestion.CoreConfig)
 
 	// Documented defaults filled.
 	assert.Equal(t, runtime.GOMAXPROCS(0), *cfg.Backfill.Workers)
@@ -386,7 +386,7 @@ max_retries = 0
 [service.methods.getLedgers]
 queue_limit = 0
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `
 	cfg, err := ParseConfig([]byte(cfgText))
 	require.NoError(t, err)
@@ -420,7 +420,7 @@ default_data_dir = "/d"
 [layout]
 chunks_per_txhash_index = 1000
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 		{
@@ -431,7 +431,7 @@ default_data_dir = "/d"
 [retention]
 earliest_ledgr = "now"
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 		{
@@ -441,7 +441,7 @@ default_data_dirr = "/d"
 [storage]
 default_data_dir = "/d"
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 		{
@@ -452,7 +452,7 @@ default_data_dir = "/d"
 [bogus_section]
 foo = "bar"
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 		{
@@ -464,7 +464,7 @@ default_data_dir = "/d"
 bucket_path = "b/p"
 bufer_size = 10
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 		{
@@ -475,7 +475,7 @@ captive_core_config = "/cc"
 [service]
 default_data_dir = "/d"
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 		{
@@ -486,7 +486,7 @@ default_data_dir = "/d"
 [service.methods.getLegders]
 queue_limit = 5
 [ingestion]
-captive_core_config = "/cc"
+core_config = "/cc"
 `,
 		},
 	}
