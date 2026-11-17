@@ -425,7 +425,7 @@ func newPreflightPool(
 	return preflight.NewPreflightWorkerPool(preflight.WorkerPoolConfig{
 		Daemon:             coreDaemon,
 		WorkerCount:        deref(p.Workers),
-		JobQueueCapacity:   deref(p.WorkerQueueSize),
+		JobQueueCapacity:   deref(p.QueueSize),
 		EnableDebug:        deref(p.EnableDebug),
 		NetworkPassphrase:  networkPassphrase,
 		Logger:             logger,

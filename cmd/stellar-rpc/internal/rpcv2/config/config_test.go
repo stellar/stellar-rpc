@@ -249,7 +249,7 @@ func TestParseConfig_SimulationDefaults(t *testing.T) {
 
 	p := cfg.Service.Simulation
 	assert.Equal(t, UsableCPUs(), *p.Workers)
-	assert.Equal(t, max(UsableCPUs(), DefaultMaxRequestBatchSize), *p.WorkerQueueSize)
+	assert.Equal(t, max(UsableCPUs(), DefaultMaxRequestBatchSize), *p.QueueSize)
 	assert.True(t, *p.EnableDebug)
 }
 
@@ -260,7 +260,7 @@ func TestParseConfig_SimulationQueueHoldsABatch(t *testing.T) {
 max_request_batch_size = 500
 `))
 	require.NoError(t, err)
-	assert.Equal(t, uint(500), *cfg.Service.Simulation.WorkerQueueSize)
+	assert.Equal(t, uint(500), *cfg.Service.Simulation.QueueSize)
 }
 
 // The concurrency defaults follow GOMAXPROCS, the CPUs the process may use,
@@ -274,7 +274,7 @@ max_request_batch_size = 1
 	require.NoError(t, err)
 
 	assert.Equal(t, uint(3), *cfg.Service.Simulation.Workers)
-	assert.Equal(t, uint(3), *cfg.Service.Simulation.WorkerQueueSize)
+	assert.Equal(t, uint(3), *cfg.Service.Simulation.QueueSize)
 	assert.Equal(t, uint(3), *cfg.Ingestion.CoreHTTPQueryWorkers)
 }
 
@@ -282,14 +282,14 @@ func TestParseConfig_SimulationExplicitValues(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig + `
 [service.simulation]
 workers = 3
-worker_queue_size = 7
+queue_size = 7
 enable_debug = false
 `))
 	require.NoError(t, err)
 
 	p := cfg.Service.Simulation
 	assert.Equal(t, uint(3), *p.Workers)
-	assert.Equal(t, uint(7), *p.WorkerQueueSize)
+	assert.Equal(t, uint(7), *p.QueueSize)
 	assert.False(t, *p.EnableDebug, "an explicit false must survive the true default")
 }
 

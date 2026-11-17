@@ -328,8 +328,8 @@ func validateSimulation(p config.SimulationConfig) error {
 	if *p.Workers < 1 {
 		return errors.New("[service.simulation].workers must be >= 1")
 	}
-	if *p.WorkerQueueSize < 1 {
-		return errors.New("[service.simulation].worker_queue_size must be >= 1")
+	if *p.QueueSize < 1 {
+		return errors.New("[service.simulation].queue_size must be >= 1")
 	}
 	return limits.ValidateSimulationMemoryLimit(
 		"[service.simulation].memory_limit", uint64(*p.MemoryLimit))

@@ -98,11 +98,11 @@ type SimulationConfig struct {
 	// Workers is how many worker processes run simulations concurrently; >= 1.
 	// Default GOMAXPROCS.
 	Workers *uint `toml:"workers"`
-	// WorkerQueueSize is how many simulation requests may wait for a free worker
+	// QueueSize is how many simulation requests may wait for a free worker
 	// before the pool starts rejecting them; >= 1. Default the larger of
 	// GOMAXPROCS and MaxRequestBatchSize, since the calls of one batch start at
 	// once.
-	WorkerQueueSize *uint `toml:"worker_queue_size"`
+	QueueSize *uint `toml:"queue_size"`
 	// EnableDebug includes diagnostic events in simulateTransaction responses.
 	// Default true.
 	EnableDebug *bool `toml:"enable_debug"`
@@ -641,7 +641,7 @@ func (cfg Config) WithDefaults() Config {
 	fillUint32(&svc.FeeStats.ClassicFeeWindowLedgers, DefaultClassicFeeWindowLedgers)
 	fillUint32(&svc.FeeStats.SorobanInclusionFeeWindowLedgers, DefaultSorobanInclusionFeeWindowLedgers)
 	fillUint(&svc.Simulation.Workers, UsableCPUs())
-	fillUint(&svc.Simulation.WorkerQueueSize, max(UsableCPUs(), *svc.MaxRequestBatchSize))
+	fillUint(&svc.Simulation.QueueSize, max(UsableCPUs(), *svc.MaxRequestBatchSize))
 	fillBool(&svc.Simulation.EnableDebug, DefaultSimulationEnableDebug)
 	fillUint(&svc.Simulation.MemoryLimit, 0)
 

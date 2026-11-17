@@ -176,7 +176,7 @@ soroban_inclusion_fee_window_ledgers = 50
 # process may use, and the queue to the larger of that and
 # max_request_batch_size, since the calls of one batch start at once.
 #workers = 8
-#worker_queue_size = 10
+#queue_size = 10
 # Diagnostic events in simulateTransaction responses. The default is true, but
 # they are expensive to produce, so this sample turns them off.
 enable_debug = false

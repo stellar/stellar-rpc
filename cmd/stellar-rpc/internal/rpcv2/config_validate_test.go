@@ -268,9 +268,9 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"[service.simulation].workers",
 		},
 		{
-			"zero simulation worker_queue_size",
-			func(c *config.Config) { c.Service.Simulation.WorkerQueueSize = uintPtr(0) },
-			"[service.simulation].worker_queue_size",
+			"zero simulation queue_size",
+			func(c *config.Config) { c.Service.Simulation.QueueSize = uintPtr(0) },
+			"[service.simulation].queue_size",
 		},
 		{
 			"simulation memory_limit below the minimum",
