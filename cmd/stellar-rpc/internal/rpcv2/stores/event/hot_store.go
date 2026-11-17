@@ -29,16 +29,21 @@ const (
 //
 //   - DataCF holds XDR-encoded event payloads: compressible (zstd
 //     typically 2-3× on XDR) and read in batches via
-//     BatchedMultiGetCF. Larger blocks give zstd more context per
-//     compression unit and align with batch-fetch shapes.
+//     BatchedMultiGetCF. A point read decompresses one block to serve
+//     one ~250B event, so a 32 KiB block paid for ~128 events per cache
+//     miss.
 //   - IndexCF stores 20-byte (term_hash || event_id) keys with
 //     empty values — nothing in the values to compress, and small
 //     blocks reduce wasted I/O per random Lookup miss (each Lookup
 //     reads one block to find one key).
 //   - OffsetsCF stores 8-byte (ledger_seq -> event_count) rows in
 //     the tens-of-thousands per chunk — same shape as IndexCF.
+//
+// A block size applies to SSTs as they are written. Chunks already on disk
+// keep theirs until compaction or rotation rewrites them; a restart changes
+// nothing.
 const (
-	dataCFBlockSize    = 32 * 1024
+	dataCFBlockSize    = 8 * 1024
 	indexCFBlockSize   = 4 * 1024
 	offsetsCFBlockSize = 4 * 1024
 )
