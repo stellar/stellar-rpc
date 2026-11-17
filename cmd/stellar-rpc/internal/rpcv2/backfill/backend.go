@@ -35,7 +35,7 @@ type Backend interface {
 }
 
 // Default buffered-storage tuning. Exported because the config package fills
-// them into an unset [backfill.bsb] section and the bench command uses them as
+// them into an unset [backfill.download] section and the bench command uses them as
 // its flag defaults — the values are defined once, here.
 const (
 	// Every value below is PER CHUNK TASK, and backfill runs [backfill].workers
@@ -101,7 +101,7 @@ var _ Backend = (*bsbSource)(nil)
 // backend rejects BufferSize == 0). The retry fields are used VERBATIM —
 // RetryLimit 0 really means no retries — so a caller wanting the default retry
 // policy must pass DefaultBSBMaxRetries / DefaultBSBRetryWait explicitly, as
-// the daemon's config layer does for an unset [backfill.bsb].
+// the daemon's config layer does for an unset [backfill.download].
 func NewBSBBackend(
 	ds datastore.DataStore,
 	cfg datastore.DataStoreConfig,

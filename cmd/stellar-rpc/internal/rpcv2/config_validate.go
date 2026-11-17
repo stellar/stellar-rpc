@@ -73,7 +73,7 @@ func validateForm(cfg config.Config) error {
 	if maxRetries := deref(cfg.Backfill.MaxRetries); maxRetries < 0 {
 		return fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
 	}
-	if err := validateBSB(cfg.Backfill.BSB); err != nil {
+	if err := validateDownload(cfg.Backfill.Download); err != nil {
 		return err
 	}
 	// logging.format silently means text unless it is exactly "json", so reject any
@@ -201,29 +201,29 @@ func isLoopbackHost(host string) bool {
 // warning threshold is never intended.
 const minConfiguredDuration = time.Millisecond
 
-// validateBSB form-validates [backfill.bsb]. It runs AFTER WithDefaults, so
+// validateDownload form-validates [backfill.download]. It runs AFTER WithDefaults, so
 // every pointer is non-nil. max_retries needs no check — any uint32 is valid,
 // including 0 (no retries).
-func validateBSB(bsb config.BSBConfig) error {
-	if *bsb.BufferSize < 1 {
-		return errors.New("[backfill.bsb].buffer_size must be >= 1")
+func validateDownload(bsb config.DownloadConfig) error {
+	if *bsb.PrefetchFiles < 1 {
+		return errors.New("[backfill.download].prefetch_files must be >= 1")
 	}
 	// There is no off switch: unset (nil, filled with the default by
 	// WithDefaults) or a positive budget. An operator wanting it effectively
 	// unbounded sets a huge value — visibly, in bytes.
-	if bytes := deref(bsb.BufferBytes); bytes < 1 {
-		return fmt.Errorf("[backfill.bsb].buffer_bytes (%d) must be >= 1; "+
+	if bytes := deref(bsb.PrefetchBytes); bytes < 1 {
+		return fmt.Errorf("[backfill.download].prefetch_bytes (%d) must be >= 1; "+
 			"delete the key to use the default", bytes)
 	}
 	if *bsb.Workers < 1 {
-		return errors.New("[backfill.bsb].workers must be >= 1")
+		return errors.New("[backfill.download].workers must be >= 1")
 	}
-	if *bsb.Workers > *bsb.BufferSize {
-		return fmt.Errorf("[backfill.bsb].workers (%d) cannot exceed buffer_size (%d) — "+
-			"each worker needs a buffer slot to download into", *bsb.Workers, *bsb.BufferSize)
+	if *bsb.Workers > *bsb.PrefetchFiles {
+		return fmt.Errorf("[backfill.download].workers (%d) cannot exceed prefetch_files (%d) — "+
+			"each worker needs a buffer slot to download into", *bsb.Workers, *bsb.PrefetchFiles)
 	}
 	if *bsb.RetryWait < minConfiguredDuration {
-		return fmt.Errorf("[backfill.bsb].retry_wait is %v — durations below 1ms are rejected; "+
+		return fmt.Errorf("[backfill.download].retry_wait is %v — durations below 1ms are rejected; "+
 			"a bare TOML integer parses as nanoseconds, write a string like \"5s\"", *bsb.RetryWait)
 	}
 	return nil

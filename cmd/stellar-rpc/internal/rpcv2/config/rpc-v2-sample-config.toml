@@ -215,15 +215,15 @@ destination_bucket_path = "my-bucket/path/to/ledgers"
 #ledgers_per_file = 1
 #files_per_partition = 64000
 
-# Download tuning for the lake. The buffer and download settings apply per
+# Download tuning for the lake. The prefetch and worker settings apply per
 # chunk, so totals scale with [backfill].workers.
-[backfill.bsb]
+[backfill.download]
 # Prefetch budget in bytes. This is what bounds memory.
-#buffer_bytes = 33_554_432  # 32 MiB
-# Concurrent downloads. At most buffer_size.
+#prefetch_bytes = 33_554_432  # 32 MiB
+# Concurrent downloads. At most prefetch_files.
 #workers = 25
 # Prefetch depth in lake files (not ledgers).
-#buffer_size = 5000
+#prefetch_files = 5000
 # Retries for one file download (0 means none), and the wait between them.
 # [backfill].max_retries is separate: it retries a whole chunk.
 max_retries = 3

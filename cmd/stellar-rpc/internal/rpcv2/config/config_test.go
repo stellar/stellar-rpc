@@ -64,8 +64,8 @@ type = "GCS"
 [backfill.datastore.params]
 destination_bucket_path = "my-bucket/ledgers"
 
-[backfill.bsb]
-buffer_size = 2000
+[backfill.download]
+prefetch_files = 2000
 workers = 40
 
 [ingestion]
@@ -117,8 +117,8 @@ func TestParseConfig_FullDocument(t *testing.T) {
 	assert.Equal(t, 5, *cfg.Backfill.MaxRetries)
 	assert.Equal(t, "GCS", cfg.Backfill.DataStore.Type)
 	assert.Equal(t, "my-bucket/ledgers", cfg.Backfill.DataStore.Params["destination_bucket_path"])
-	assert.Equal(t, uint32(2000), *cfg.Backfill.BSB.BufferSize)
-	assert.Equal(t, uint32(40), *cfg.Backfill.BSB.Workers)
+	assert.Equal(t, uint32(2000), *cfg.Backfill.Download.PrefetchFiles)
+	assert.Equal(t, uint32(40), *cfg.Backfill.Download.Workers)
 	assert.Equal(t, "/etc/captive-core.toml", cfg.Ingestion.CaptiveCoreConfig)
 	assert.Equal(t, "debug", cfg.Logging.Level)
 	assert.Equal(t, "json", cfg.Logging.Format)
@@ -136,11 +136,11 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	// Documented defaults filled.
 	assert.Equal(t, runtime.GOMAXPROCS(0), *cfg.Backfill.Workers)
 	assert.Equal(t, DefaultMaxRetries, *cfg.Backfill.MaxRetries)
-	assert.Equal(t, uint32(backfill.DefaultBSBPrefetchObjects), *cfg.Backfill.BSB.BufferSize)
-	assert.Equal(t, uint32(backfill.DefaultBSBDownloads), *cfg.Backfill.BSB.Workers)
-	assert.Equal(t, int64(backfill.DefaultBSBPrefetchBytes), *cfg.Backfill.BSB.BufferBytes)
-	assert.Equal(t, uint32(backfill.DefaultBSBMaxRetries), *cfg.Backfill.BSB.MaxRetries)
-	assert.Equal(t, backfill.DefaultBSBRetryWait, *cfg.Backfill.BSB.RetryWait)
+	assert.Equal(t, uint32(backfill.DefaultBSBPrefetchObjects), *cfg.Backfill.Download.PrefetchFiles)
+	assert.Equal(t, uint32(backfill.DefaultBSBDownloads), *cfg.Backfill.Download.Workers)
+	assert.Equal(t, int64(backfill.DefaultBSBPrefetchBytes), *cfg.Backfill.Download.PrefetchBytes)
+	assert.Equal(t, uint32(backfill.DefaultBSBMaxRetries), *cfg.Backfill.Download.MaxRetries)
+	assert.Equal(t, backfill.DefaultBSBRetryWait, *cfg.Backfill.Download.RetryWait)
 	assert.Equal(t, uint32(0), *cfg.Retention.RetentionChunks)
 	assert.Equal(t, DefaultEarliestLedger, cfg.Retention.EarliestLedger)
 	assert.Equal(t, DefaultLogLevel, cfg.Logging.Level)
@@ -192,12 +192,12 @@ func TestDataStoreConfig_SDKConfigCarriesPassphrase(t *testing.T) {
 	assert.Equal(t, "Public Global Stellar Network ; September 2015", sdk.NetworkPassphrase)
 }
 
-func TestParseConfig_ExplicitZeroBSBMaxRetriesSurvives(t *testing.T) {
-	cfg, err := ParseConfig([]byte(minimalValidConfig + "\n[backfill.bsb]\nmax_retries = 0\n"))
+func TestParseConfig_ExplicitZeroDownloadMaxRetriesSurvives(t *testing.T) {
+	cfg, err := ParseConfig([]byte(minimalValidConfig + "\n[backfill.download]\nmax_retries = 0\n"))
 	require.NoError(t, err)
 
-	assert.Zero(t, *cfg.Backfill.BSB.MaxRetries)
-	assert.Zero(t, cfg.Backfill.BSB.SDKConfig().RetryLimit)
+	assert.Zero(t, *cfg.Backfill.Download.MaxRetries)
+	assert.Zero(t, cfg.Backfill.Download.SDKConfig().RetryLimit)
 }
 
 func TestParseConfig_ServiceDefaults(t *testing.T) {
@@ -460,7 +460,7 @@ captive_core_config = "/cc"
 			text: `
 [storage]
 default_data_dir = "/d"
-[backfill.bsb]
+[backfill.download]
 bucket_path = "b/p"
 bufer_size = 10
 [ingestion]

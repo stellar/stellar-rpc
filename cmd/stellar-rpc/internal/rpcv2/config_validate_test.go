@@ -292,7 +292,7 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 	}
 }
 
-func TestValidateConfig_RejectsMalformedBSB(t *testing.T) {
+func TestValidateConfig_RejectsMalformedDownload(t *testing.T) {
 	uint32Ptr := func(v uint32) *uint32 { return &v }
 	int64Ptr := func(v int64) *int64 { return &v }
 	durPtr := func(v time.Duration) *time.Duration { return &v }
@@ -303,40 +303,40 @@ func TestValidateConfig_RejectsMalformedBSB(t *testing.T) {
 		want   string
 	}{
 		{
-			"zero buffer_size",
-			func(c *config.Config) { c.Backfill.BSB.BufferSize = uint32Ptr(0) },
-			"[backfill.bsb].buffer_size",
+			"zero prefetch_files",
+			func(c *config.Config) { c.Backfill.Download.PrefetchFiles = uint32Ptr(0) },
+			"[backfill.download].prefetch_files",
 		},
 		{
 			"zero workers",
-			func(c *config.Config) { c.Backfill.BSB.Workers = uint32Ptr(0) },
-			"[backfill.bsb].workers",
+			func(c *config.Config) { c.Backfill.Download.Workers = uint32Ptr(0) },
+			"[backfill.download].workers",
 		},
 		{
 			// The nanosecond trap again: retry_wait = 10 decodes as 10ns.
 			"sub-millisecond retry_wait",
-			func(c *config.Config) { c.Backfill.BSB.RetryWait = durPtr(10) },
+			func(c *config.Config) { c.Backfill.Download.RetryWait = durPtr(10) },
 			wantNanosecondHint,
 		},
 		{
-			"workers above buffer_size",
+			"workers above prefetch_files",
 			func(c *config.Config) {
-				c.Backfill.BSB.BufferSize = uint32Ptr(10)
-				c.Backfill.BSB.Workers = uint32Ptr(50)
+				c.Backfill.Download.PrefetchFiles = uint32Ptr(10)
+				c.Backfill.Download.Workers = uint32Ptr(50)
 			},
 			"workers",
 		},
 		{
-			"negative buffer_bytes",
-			func(c *config.Config) { c.Backfill.BSB.BufferBytes = int64Ptr(-1) },
-			"[backfill.bsb].buffer_bytes",
+			"negative prefetch_bytes",
+			func(c *config.Config) { c.Backfill.Download.PrefetchBytes = int64Ptr(-1) },
+			"[backfill.download].prefetch_bytes",
 		},
 		{
 			// There is no off switch; zero would silently mean "cap off" at the
 			// SDK, which is the configuration that caused #895.
-			"zero buffer_bytes",
-			func(c *config.Config) { c.Backfill.BSB.BufferBytes = int64Ptr(0) },
-			"[backfill.bsb].buffer_bytes",
+			"zero prefetch_bytes",
+			func(c *config.Config) { c.Backfill.Download.PrefetchBytes = int64Ptr(0) },
+			"[backfill.download].prefetch_bytes",
 		},
 	}
 	for _, tc := range tests {
@@ -502,11 +502,11 @@ func TestValidateConfig_AcceptsCoreURLsThatCannotMisroute(t *testing.T) {
 	}
 }
 
-func TestValidateConfig_AcceptsZeroBSBMaxRetries(t *testing.T) {
+func TestValidateConfig_AcceptsZeroDownloadMaxRetries(t *testing.T) {
 	uint32Ptr := func(v uint32) *uint32 { return &v }
 	cat, _ := testCatalog(t)
 	cfg := validCfg(4, 3, "genesis")
-	cfg.Backfill.BSB.MaxRetries = uint32Ptr(0)
+	cfg.Backfill.Download.MaxRetries = uint32Ptr(0)
 	_, err := callValidate(t, cfg, cat, downTip())
 	require.NoError(t, err)
 }

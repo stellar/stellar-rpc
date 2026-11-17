@@ -40,7 +40,7 @@ func TestBindFlags_LockstepWithTOMLSchema(t *testing.T) {
 		"backfill.datastore.type",
 		"backfill.datastore.params",
 		"backfill.datastore.schema.ledgers_per_file",
-		"backfill.bsb.retry_wait",
+		"backfill.download.retry_wait",
 		"ingestion.captive_core_config",
 		"ingestion.history_archive_urls",
 		"logging.level",
@@ -107,8 +107,8 @@ func TestApplyFlags_OverridesFileValues(t *testing.T) {
 		"--service.fee_stats.classic_fee_window_ledgers=33",
 		"--backfill.workers=3",
 		"--ingestion.history_archive_urls=https://a.example,https://b.example",
-		"--backfill.bsb.retry_wait=7s",
-		"--backfill.bsb.buffer_bytes=1024",
+		"--backfill.download.retry_wait=7s",
+		"--backfill.download.prefetch_bytes=1024",
 	}))
 
 	cfg, err := DecodeConfig([]byte(minimalValidConfig))
@@ -121,8 +121,8 @@ func TestApplyFlags_OverridesFileValues(t *testing.T) {
 	assert.Equal(t, uint32(33), *cfg.Service.FeeStats.ClassicFeeWindowLedgers)
 	assert.Equal(t, 3, *cfg.Backfill.Workers)
 	assert.Equal(t, []string{"https://a.example", "https://b.example"}, cfg.Ingestion.HistoryArchiveURLs)
-	assert.Equal(t, 7*time.Second, *cfg.Backfill.BSB.RetryWait)
-	assert.EqualValues(t, 1024, *cfg.Backfill.BSB.BufferBytes,
+	assert.Equal(t, 7*time.Second, *cfg.Backfill.Download.RetryWait)
+	assert.EqualValues(t, 1024, *cfg.Backfill.Download.PrefetchBytes,
 		"an explicit budget must survive WithDefaults, not be replaced by the default")
 }
 

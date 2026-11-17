@@ -254,7 +254,7 @@ type StorageConfig struct {
 	Hot         string `toml:"hot"`          // per-chunk hot RocksDB root
 }
 
-// BackfillConfig is [backfill] plus the nested [backfill.datastore] and [backfill.bsb].
+// BackfillConfig is [backfill] plus the nested [backfill.datastore] and [backfill.download].
 type BackfillConfig struct {
 	// Concurrent task-slot count for bulk backfill; >= 1. Default GOMAXPROCS.
 	Workers *int `toml:"workers"`
@@ -268,8 +268,8 @@ type BackfillConfig struct {
 	// SDK datastore type is accepted.
 	DataStore DataStoreConfig `toml:"datastore"`
 
-	// BSB tunes the buffered-storage stream over DataStore.
-	BSB BSBConfig `toml:"bsb"`
+	// Download tunes the buffered-storage stream that downloads from DataStore.
+	Download DownloadConfig `toml:"download"`
 }
 
 // DataStoreConfig is [backfill.datastore] — the bulk ledger source. The key
@@ -316,25 +316,27 @@ func (d DataStoreConfig) SDKConfig(networkPassphrase string) datastore.DataStore
 	}
 }
 
-// BSBConfig is [backfill.bsb] — tuning for the buffered-storage stream that
+// DownloadConfig is [backfill.download] — tuning for the buffered-storage stream that
 // downloads ledger objects from [backfill.datastore] during backfill. It mirrors
 // the SDK's ledgerbackend.BufferedStorageBackendConfig rather than embedding it,
 // for two reasons: the fields are pointers so an absent key is distinguishable
 // from an explicit zero (max_retries = 0 genuinely disables retries), and the
-// key is named max_retries to match [backfill].max_retries instead of the SDK's
-// retry_limit. SDKConfig converts to the SDK type at the daemon boundary.
-type BSBConfig struct {
-	// BufferSize is the prefetch depth of one chunk task, in datastore OBJECTS
+// keys are named for what they bound rather than after the SDK fields:
+// prefetch_files is the SDK's buffer_size, prefetch_bytes its buffer_bytes,
+// workers its num_workers, and max_retries its retry_limit. SDKConfig converts
+// to the SDK type at the daemon boundary.
+type DownloadConfig struct {
+	// PrefetchFiles is the prefetch depth of one chunk task, in datastore OBJECTS
 	// (an object holds ledgersPerFile ledgers). >= 1. It bounds per-object
 	// overhead, not memory.
-	BufferSize *uint32 `toml:"buffer_size"`
-	// BufferBytes is one chunk task's prefetch budget in bytes — the bound
+	PrefetchFiles *uint32 `toml:"prefetch_files"`
+	// PrefetchBytes is one chunk task's prefetch budget in bytes — the bound
 	// that tracks memory, since object size varies ~700x across pubnet history
 	// while a count does not. >= 1; unset takes the default.
-	BufferBytes *int64 `toml:"buffer_bytes"`
+	PrefetchBytes *int64 `toml:"prefetch_bytes"`
 
 	// Workers is how many object downloads run concurrently for one chunk
-	// task; >= 1 and <= buffer_size.
+	// task; >= 1 and <= prefetch_files.
 	Workers *uint32 `toml:"workers"`
 	// MaxRetries caps how many times ONE object download (a single ledger file
 	// fetched from the datastore) is retried after a transient error, waiting
@@ -349,12 +351,12 @@ type BSBConfig struct {
 	RetryWait *time.Duration `toml:"retry_wait"`
 }
 
-// SDKConfig converts the resolved [backfill.bsb] section into the SDK's config
+// SDKConfig converts the resolved [backfill.download] section into the SDK's config
 // type. Call it only after WithDefaults, when every field is non-nil.
-func (b BSBConfig) SDKConfig() ledgerbackend.BufferedStorageBackendConfig {
+func (b DownloadConfig) SDKConfig() ledgerbackend.BufferedStorageBackendConfig {
 	return ledgerbackend.BufferedStorageBackendConfig{
-		BufferSize:  *b.BufferSize,
-		BufferBytes: *b.BufferBytes,
+		BufferSize:  *b.PrefetchFiles,
+		BufferBytes: *b.PrefetchBytes,
 		NumWorkers:  *b.Workers,
 		RetryLimit:  *b.MaxRetries,
 		RetryWait:   *b.RetryWait,
@@ -605,12 +607,12 @@ func (cfg Config) WithDefaults() Config {
 	// Resolve through backfill.FillBSBDefaults so this path and the bench
 	// cannot drift apart.
 	resolved := backfill.FillBSBDefaults(ledgerbackend.BufferedStorageBackendConfig{})
-	fillUint32(&cfg.Backfill.BSB.BufferSize, resolved.BufferSize)
-	fillInt64(&cfg.Backfill.BSB.BufferBytes, backfill.DefaultBSBPrefetchBytes)
-	fillUint32(&cfg.Backfill.BSB.Workers,
-		min(resolved.NumWorkers, *cfg.Backfill.BSB.BufferSize))
-	fillUint32(&cfg.Backfill.BSB.MaxRetries, backfill.DefaultBSBMaxRetries)
-	fillDuration(&cfg.Backfill.BSB.RetryWait, backfill.DefaultBSBRetryWait)
+	fillUint32(&cfg.Backfill.Download.PrefetchFiles, resolved.BufferSize)
+	fillInt64(&cfg.Backfill.Download.PrefetchBytes, backfill.DefaultBSBPrefetchBytes)
+	fillUint32(&cfg.Backfill.Download.Workers,
+		min(resolved.NumWorkers, *cfg.Backfill.Download.PrefetchFiles))
+	fillUint32(&cfg.Backfill.Download.MaxRetries, backfill.DefaultBSBMaxRetries)
+	fillDuration(&cfg.Backfill.Download.RetryWait, backfill.DefaultBSBRetryWait)
 	if cfg.Retention.RetentionChunks == nil {
 		v := uint32(0)
 		cfg.Retention.RetentionChunks = &v

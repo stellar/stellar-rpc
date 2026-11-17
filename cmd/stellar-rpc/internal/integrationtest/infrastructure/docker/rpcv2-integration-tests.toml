@@ -29,7 +29,7 @@ enable_debug = true
 [backfill]
 max_retries = 3
 
-[backfill.bsb]
+[backfill.download]
 max_retries = 3
 retry_wait = "5s"
 

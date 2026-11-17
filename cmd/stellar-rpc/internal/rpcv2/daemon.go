@@ -473,7 +473,7 @@ func buildBackfillBackend(
 ) (backfill.Backend, func(), error) {
 	if cfg.Backfill.DataStore.Type != "" {
 		dsCfg := cfg.Backfill.DataStore.SDKConfig(networkPassphrase)
-		backend, cleanup, err := backfill.NewBSBBackendFromConfig(ctx, dsCfg, cfg.Backfill.BSB.SDKConfig())
+		backend, cleanup, err := backfill.NewBSBBackendFromConfig(ctx, dsCfg, cfg.Backfill.Download.SDKConfig())
 		if err != nil {
 			return nil, nil, err
 		}

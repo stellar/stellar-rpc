@@ -123,12 +123,13 @@ Every TOML leaf is also settable from the command line:
 - Any SDK datastore (GCS, S3, Filesystem) works. Optional: an empty `type` means no lake, and backfill replays through captive core from the history archives instead.
 - The network passphrase is deliberately not a key here: the daemon copies it from the captive-core file at startup, and when the lake carries a manifest the SDK verifies the lake was exported from the same network — a wrong-network lake fails startup. A manifest-less lake skips the check, but its `schema` must then be set in the config (the SDK needs one of the two).
 
-**[backfill.bsb]** — tuning for the buffered-storage stream that downloads ledger objects from the datastore. Optional:
+**[backfill.download]** — tuning for the buffered-storage stream that downloads ledger objects from the datastore. Optional:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `buffer_size` | uint32 | `5000` | Downloaded ledgers buffered in memory; >= 1. Per BSB instance — each backfill chunk task opens its own stream. |
-| `workers` | uint32 | `50` | Concurrent object downloads; >= 1 and <= `buffer_size`. Per BSB instance. |
+| `prefetch_files` | uint32 | `5000` | Prefetch depth in lake files (not ledgers); >= 1. Per BSB instance — each backfill chunk task opens its own stream. |
+| `prefetch_bytes` | int64 | `33554432` (32 MiB) | Prefetch budget in bytes — the bound that tracks memory; >= 1. Per BSB instance. |
+| `workers` | uint32 | `25` | Concurrent object downloads; >= 1 and <= `prefetch_files`. Per BSB instance. |
 | `max_retries` | uint32 | `3` | Retries of ONE object download after a transient error; `0` = fail on the first error. Distinct from `[backfill].max_retries`, which re-runs a whole chunk task. |
 | `retry_wait` | duration | `"5s"` | Pause between retries of one object download; >= 1ms. |
 
