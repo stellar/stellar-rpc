@@ -258,8 +258,8 @@ func TestRPCv1RejectsEveryRPCv2Table(t *testing.T) {
 func TestOnlyTheSelectedModeFlagsExist(t *testing.T) {
 	t.Run("rpcv2 flag in rpcv1 mode", func(t *testing.T) {
 		f := &fakeEntry{}
-		require.Equal(t, 1, f.run([]string{"--storage.default_data_dir=/tmp/x"}, nil))
-		assert.Contains(t, f.stderr.String(), "unknown flag: --storage.default_data_dir")
+		require.Equal(t, 1, f.run([]string{"--storage.data_dir=/tmp/x"}, nil))
+		assert.Contains(t, f.stderr.String(), "unknown flag: --storage.data_dir")
 		assert.Nil(t, f.v1cfg)
 	})
 
@@ -279,7 +279,7 @@ func TestHelpShowsOneMode(t *testing.T) {
 		assert.Contains(t, help, "--stellar-core-url")
 		assert.Contains(t, help, enableFlag)
 		assert.Contains(t, help, genConfigFileUse)
-		assert.NotContains(t, help, "--storage.default_data_dir")
+		assert.NotContains(t, help, "--storage.data_dir")
 		assert.NotContains(t, help, "--print-runtime-config")
 		assert.NotContains(t, help, "bench")
 	})
@@ -288,7 +288,7 @@ func TestHelpShowsOneMode(t *testing.T) {
 		f := &fakeEntry{}
 		require.Equal(t, 0, f.run([]string{enableFlag, "--help"}, nil), f.stderr.String())
 		help := f.stdout.String()
-		assert.Contains(t, help, "--storage.default_data_dir")
+		assert.Contains(t, help, "--storage.data_dir")
 		assert.Contains(t, help, "--print-runtime-config")
 		assert.Contains(t, help, configPathFlag)
 		assert.Contains(t, help, enableFlag)

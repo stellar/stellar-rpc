@@ -30,19 +30,19 @@
 [storage]
 # Required. The stores below and captive core's working directory default to
 # directories under it.
-default_data_dir = "/var/stellar/rpc-v2"
+data_dir = "/var/stellar/rpc-v2"
 # Per-store paths, for putting stores on different disks. Relative paths
 # resolve against the working directory, and two stores cannot share a path.
 # events and events_index move independently. The indexes are small and read
 # randomly, so putting events_index on fast local disk speeds up filtered
 # event queries over wide ranges.
-#catalog = ""        # {default_data_dir}/catalog/rocksdb  (catalog RocksDB)
-#ledgers = ""        # {default_data_dir}/ledgers          (ledger packs)
-#events = ""         # {default_data_dir}/events/data      (event packs)
-#events_index = ""   # {default_data_dir}/events/index     (event indexes)
-#txhash_raw = ""     # {default_data_dir}/txhash/raw       (unindexed tx hashes)
-#txhash_index = ""   # {default_data_dir}/txhash/index     (txhash indexes)
-#hot = ""            # {default_data_dir}/hot              (recent chunks)
+#catalog = ""        # {data_dir}/catalog/rocksdb  (catalog RocksDB)
+#ledgers = ""        # {data_dir}/ledgers          (ledger packs)
+#events = ""         # {data_dir}/events/data      (event packs)
+#events_index = ""   # {data_dir}/events/index     (event indexes)
+#txhash_raw = ""     # {data_dir}/txhash/raw       (unindexed tx hashes)
+#txhash_index = ""   # {data_dir}/txhash/index     (txhash indexes)
+#hot = ""            # {data_dir}/hot              (recent chunks)
 
 # -----------------------------------------------------------------------------
 # [retention]: how much history this daemon keeps
@@ -242,7 +242,7 @@ core_config = "/etc/stellar/captive-core.toml"
 history_archive_urls = ["https://history.stellar.org/prd/core-live/core_live_001"]
 # Default: stellar-core on PATH.
 #core_binary_path = "/usr/local/bin/stellar-core"
-# Captive core's working directory. Default: {default_data_dir}/captive-core.
+# Captive core's working directory. Default: {data_dir}/captive-core.
 #core_storage_path = ""
 # Captive core's two HTTP servers. sendTransaction submits through the admin
 # port, and getLedgerEntries and simulateTransaction read ledger entries

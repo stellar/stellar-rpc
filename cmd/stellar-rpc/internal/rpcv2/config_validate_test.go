@@ -26,7 +26,7 @@ const wantNanosecondHint = "nanoseconds"
 // post-WithDefaults config — every [service] pointer non-nil).
 func validCfg(workers, maxRetries int, earliest string) config.Config {
 	return config.Config{
-		Storage:   config.StorageConfig{DefaultDataDir: "/data"},
+		Storage:   config.StorageConfig{DataDir: "/data"},
 		Retention: config.RetentionConfig{EarliestLedger: earliest},
 		Backfill:  config.BackfillConfig{Workers: &workers, MaxRetries: &maxRetries},
 		Ingestion: config.IngestionConfig{CoreConfig: "/cc"},

@@ -32,7 +32,7 @@ func TestBindFlags_LockstepWithTOMLSchema(t *testing.T) {
 
 	// Spot-check names across every section and nesting depth.
 	for _, name := range []string{
-		"storage.default_data_dir",
+		"storage.data_dir",
 		"storage.hot",
 		"retention.earliest_ledger",
 		"retention.retention_chunks",
@@ -102,7 +102,7 @@ func TestApplyFlags_NoFlagsSetIsANoOp(t *testing.T) {
 func TestApplyFlags_OverridesFileValues(t *testing.T) {
 	fs := newBoundFlagSet(t)
 	require.NoError(t, fs.Parse([]string{
-		"--storage.default_data_dir=/flag/data",
+		"--storage.data_dir=/flag/data",
 		"--service.endpoint=0.0.0.0:7777",
 		"--service.fee_stats.classic_fee_window_ledgers=33",
 		"--backfill.workers=3",
@@ -116,7 +116,7 @@ func TestApplyFlags_OverridesFileValues(t *testing.T) {
 	require.NoError(t, ApplyFlags(&cfg, fs))
 	cfg = cfg.WithDefaults()
 
-	assert.Equal(t, "/flag/data", cfg.Storage.DefaultDataDir)
+	assert.Equal(t, "/flag/data", cfg.Storage.DataDir)
 	assert.Equal(t, "0.0.0.0:7777", cfg.Service.Endpoint)
 	assert.Equal(t, uint32(33), *cfg.Service.FeeStats.ClassicFeeWindowLedgers)
 	assert.Equal(t, 3, *cfg.Backfill.Workers)
@@ -200,7 +200,7 @@ func TestApplyFlags_MapFlagAllocatesAbsentMap(t *testing.T) {
 
 	cfg, err := DecodeConfig([]byte(`
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 
 [ingestion]
 core_config = "/cc"
@@ -218,7 +218,7 @@ func TestApplyFlags_SliceFlagReplacesWholesale(t *testing.T) {
 
 	cfg, err := DecodeConfig([]byte(`
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 
 [ingestion]
 core_config = "/cc"
@@ -234,7 +234,7 @@ history_archive_urls = ["https://a.example", "https://b.example"]
 func TestApplyFlags_Precedence(t *testing.T) {
 	const fileWithTiers = `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [service.methods]
 queue_limit = 10
 [service.methods.getLedgers]
@@ -265,7 +265,7 @@ core_config = "/cc"
 	t.Run("example B: CLI overrides one method only", func(t *testing.T) {
 		cfg := load(t, `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [service.methods.getLedgers]
 queue_limit = 5
 [ingestion]
@@ -281,7 +281,7 @@ core_config = "/cc"
 	t.Run("term_budget is flag-settable and file-settable", func(t *testing.T) {
 		cfg := load(t, `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [service.methods.queryEvents]
 term_budget = 20
 [ingestion]
@@ -293,7 +293,7 @@ core_config = "/cc"
 	t.Run("example D: durations cascade the same way", func(t *testing.T) {
 		cfg := load(t, `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [service.methods]
 max_execution_duration = "8s"
 [ingestion]

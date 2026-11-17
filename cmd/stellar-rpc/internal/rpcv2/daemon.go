@@ -136,8 +136,8 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 	if err != nil {
 		return err
 	}
-	if cfg.Storage.DefaultDataDir == "" {
-		return errors.New("[storage].default_data_dir is required")
+	if cfg.Storage.DataDir == "" {
+		return errors.New("[storage].data_dir is required")
 	}
 	// Reject a malformed config before anything is opened (catalog, core,
 	// datastore). validateConfig re-runs these pure checks as part of its gate.
@@ -383,7 +383,7 @@ func resolveCore(opts daemonOptions, cfg config.Config, logger *supportlog.Entry
 	if opts.Core != nil {
 		return resolvedCore{live: opts.Core, backfill: opts.Core}, nil
 	}
-	return newCaptiveCoreOpeners(cfg.Ingestion, cfg.Storage.DefaultDataDir, logger)
+	return newCaptiveCoreOpeners(cfg.Ingestion, cfg.Storage.DataDir, logger)
 }
 
 // startConfig assembles the StartConfig run consumes. run() builds the

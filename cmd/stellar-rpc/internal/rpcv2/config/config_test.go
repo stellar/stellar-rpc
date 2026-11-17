@@ -46,7 +46,7 @@ earliest_ledger = "now"
 retention_chunks = 100
 
 [storage]
-default_data_dir = "/var/lib/fullhistory"
+data_dir = "/var/lib/fullhistory"
 catalog = "/mnt/catalog"
 ledgers = "/mnt/ledgers"
 events = "/mnt/events"
@@ -79,7 +79,7 @@ format = "json"
 // A minimal config: only the required keys, everything else defaulted.
 const minimalValidConfig = `
 [storage]
-default_data_dir = "/data"
+data_dir = "/data"
 
 [backfill.datastore]
 type = "GCS"
@@ -106,7 +106,7 @@ func TestParseConfig_FullDocument(t *testing.T) {
 
 	assert.Equal(t, "now", cfg.Retention.EarliestLedger)
 	assert.Equal(t, uint32(100), *cfg.Retention.RetentionChunks)
-	assert.Equal(t, "/var/lib/fullhistory", cfg.Storage.DefaultDataDir)
+	assert.Equal(t, "/var/lib/fullhistory", cfg.Storage.DataDir)
 	assert.Equal(t, "/mnt/catalog", cfg.Storage.Catalog)
 	assert.Equal(t, "/mnt/ledgers", cfg.Storage.Ledgers)
 	assert.Equal(t, "/mnt/events", cfg.Storage.Events)
@@ -129,7 +129,7 @@ func TestParseConfig_MinimalAppliesDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	// Required keys preserved.
-	assert.Equal(t, "/data", cfg.Storage.DefaultDataDir)
+	assert.Equal(t, "/data", cfg.Storage.DataDir)
 	assert.Equal(t, "bucket/path", cfg.Backfill.DataStore.Params["destination_bucket_path"])
 	assert.Equal(t, "/etc/cc.toml", cfg.Ingestion.CoreConfig)
 
@@ -379,7 +379,7 @@ func TestParseConfig_ExplicitZeroPreserved(t *testing.T) {
 	// must preserve it for that rejection to fire.
 	const cfgText = `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [backfill]
 workers = 0
 max_retries = 0
@@ -416,7 +416,7 @@ func TestParseConfig_RejectsUnknownKeys(t *testing.T) {
 			name: "removed chunks_per_txhash_index key",
 			text: `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [layout]
 chunks_per_txhash_index = 1000
 [ingestion]
@@ -427,7 +427,7 @@ core_config = "/cc"
 			name: "typo'd earliest_ledger",
 			text: `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [retention]
 earliest_ledgr = "now"
 [ingestion]
@@ -437,9 +437,9 @@ core_config = "/cc"
 		{
 			name: "unknown top-level key",
 			text: `
-default_data_dirr = "/d"
+data_dirr = "/d"
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [ingestion]
 core_config = "/cc"
 `,
@@ -448,7 +448,7 @@ core_config = "/cc"
 			name: "unknown section",
 			text: `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [bogus_section]
 foo = "bar"
 [ingestion]
@@ -459,7 +459,7 @@ core_config = "/cc"
 			name: "unknown nested key under known section",
 			text: `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [backfill.download]
 bucket_path = "b/p"
 bufer_size = 10
@@ -468,12 +468,12 @@ core_config = "/cc"
 `,
 		},
 		{
-			// default_data_dir moved to [storage] in #882 — its old home must fail
+			// data_dir moved to [storage] in #882 — its old home must fail
 			// loudly, not be silently accepted.
-			name: "default_data_dir under its pre-#882 [service] home",
+			name: "data_dir under its pre-#882 [service] home",
 			text: `
 [service]
-default_data_dir = "/d"
+data_dir = "/d"
 [ingestion]
 core_config = "/cc"
 `,
@@ -482,7 +482,7 @@ core_config = "/cc"
 			name: "typo'd method table",
 			text: `
 [storage]
-default_data_dir = "/d"
+data_dir = "/d"
 [service.methods.getLegders]
 queue_limit = 5
 [ingestion]

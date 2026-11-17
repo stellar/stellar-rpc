@@ -51,7 +51,7 @@ func writeTempConfig(t *testing.T, extra string) (string, string) {
 	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	body := fmt.Sprintf(`
 [storage]
-default_data_dir = %q
+data_dir = %q
 
 [retention]
 earliest_ledger = "genesis"
@@ -289,14 +289,14 @@ func TestRunDaemon_StoragePathOverridesHonored(t *testing.T) {
 
 	cfg := config.Config{
 		Storage: config.StorageConfig{
-			DefaultDataDir: dataDir,
-			Catalog:        catalogOverride,
-			Ledgers:        ledgersOverride,
-			Events:         eventsOverride,
-			EventsIndex:    eventsIndexOverride,
-			TxhashRaw:      txhashRawOverride,
-			TxhashIndex:    txhashIndexOverride,
-			Hot:            hotOverride,
+			DataDir:     dataDir,
+			Catalog:     catalogOverride,
+			Ledgers:     ledgersOverride,
+			Events:      eventsOverride,
+			EventsIndex: eventsIndexOverride,
+			TxhashRaw:   txhashRawOverride,
+			TxhashIndex: txhashIndexOverride,
+			Hot:         hotOverride,
 		},
 	}.WithDefaults()
 
@@ -385,7 +385,7 @@ func writeTempConfigNow(t *testing.T) (string, string) {
 	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	body := fmt.Sprintf(`
 [storage]
-default_data_dir = %q
+data_dir = %q
 [retention]
 earliest_ledger = "now"
 [ingestion]
@@ -395,7 +395,7 @@ core_config = "/dev/null"
 	return configPath, dataDir
 }
 
-// A missing default_data_dir is rejected before any store opens.
+// A missing data_dir is rejected before any store opens.
 func TestRunDaemon_RequiresDataDir(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	require.NoError(t, os.WriteFile(configPath, []byte(`
@@ -406,7 +406,7 @@ core_config = "/dev/null"
 `), 0o644))
 	err := runDaemonWith(context.Background(), configPath, daemonOptions{Logger: silentLogger()})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "default_data_dir")
+	assert.Contains(t, err.Error(), "data_dir")
 }
 
 // A nonexistent config path errors at load.
@@ -781,7 +781,7 @@ func TestRunDaemon_NoLakeBackfillsThroughCaptiveCore(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "daemon.toml")
 	body := fmt.Sprintf(`
 [storage]
-default_data_dir = %q
+data_dir = %q
 
 [retention]
 earliest_ledger = "genesis"

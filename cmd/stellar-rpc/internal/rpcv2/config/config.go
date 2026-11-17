@@ -31,7 +31,7 @@ import (
 // geometry.ChunksPerTxhashIndex constant.)
 //
 // Every leaf key is also settable from the command line as a flag named by its
-// dotted TOML path (--storage.default_data_dir, --service.methods.getLedgers.queue_limit);
+// dotted TOML path (--storage.data_dir, --service.methods.getLedgers.queue_limit);
 // see BindFlags/ApplyFlags in flags.go. Flags override the file; the file stays
 // the single source of truth and --config-path stays required.
 type Config struct {
@@ -239,11 +239,11 @@ type RetentionConfig struct {
 // StorageConfig is [storage]: the data root plus one optional path per on-disk
 // tree (consolidating what were the separate [catalog] / [immutable_storage.*] /
 // [streaming.hot_storage] sections). An empty per-store value defaults under
-// default_data_dir.
+// data_dir.
 type StorageConfig struct {
 	// Base dir for the catalog and default storage paths. Required.
 	// (Moved here from [service] in #882 — it governs storage placement.)
-	DefaultDataDir string `toml:"default_data_dir"`
+	DataDir string `toml:"data_dir"`
 
 	Catalog     string `toml:"catalog"`      // catalog RocksDB dir
 	Ledgers     string `toml:"ledgers"`      // immutable ledger packs root
@@ -382,7 +382,7 @@ type IngestionConfig struct {
 	// defaults to the "stellar-core" found on PATH.
 	CoreBinaryPath string `toml:"core_binary_path"`
 	// CoreStoragePath is captive core's BUCKET_DIR_PATH base; optional,
-	// defaults to {default_data_dir}/captive-core.
+	// defaults to {data_dir}/captive-core.
 	CoreStoragePath string `toml:"core_storage_path"`
 
 	// The six keys below configure the two HTTP servers of the same captive-core
@@ -765,7 +765,7 @@ func fillDuration(p **time.Duration, v time.Duration) {
 }
 
 // Paths is the resolved set of on-disk paths the daemon uses — the single place
-// the {default_data_dir}/... layout lives, so locking and store-opening agree
+// the {data_dir}/... layout lives, so locking and store-opening agree
 // on every root.
 type Paths struct {
 	DataDir     string // the data root
@@ -778,14 +778,14 @@ type Paths struct {
 	HotStorage  string // per-chunk hot RocksDB root
 }
 
-// ResolvePaths fills every storage path, defaulting under default_data_dir.
+// ResolvePaths fills every storage path, defaulting under data_dir.
 // Relative overrides are kept relative (resolved against the caller's working
 // dir); only the defaults are joined to the data dir. The default tree is spelled
 // ONCE, by geometry.NewLayout — production flows through here and every package's
 // test helpers through NewLayout, so a rename to the tree can't leave the two
 // disagreeing.
 func (cfg Config) ResolvePaths() Paths {
-	dataDir := cfg.Storage.DefaultDataDir
+	dataDir := cfg.Storage.DataDir
 	def := geometry.NewLayout(dataDir)
 	pick := func(override, defPath string) string {
 		if override != "" {

@@ -81,7 +81,7 @@ Paths in this file are paths inside the container (see the `-v` mounts in [5.3](
 ```toml
 [storage]
 # Data directory for RocksDB, flat files, and Captive Core scratch space. Must be on NVMe.
-default_data_dir = "/data"
+data_dir = "/data"
 
 [service]
 endpoint       = "0.0.0.0:8000"  # JSON-RPC endpoint (Binds 0.0.0.0 for Docker forwarding)
@@ -105,17 +105,17 @@ history_archive_urls = [
 
 **Retention** defaults to full history. Leave the `[retention]` section at its defaults.
 
-**Splitting storage across disks (optional):** By default, the node keeps all of its data under `default_data_dir`. If a single NVMe volume is too small for full history, you can put one of the two large stores (`ledgers` or `events`) on a second NVMe volume. The stores are:
+**Splitting storage across disks (optional):** By default, the node keeps all of its data under `data_dir`. If a single NVMe volume is too small for full history, you can put one of the two large stores (`ledgers` or `events`) on a second NVMe volume. The stores are:
 
 | Store key | Default path | What it holds |
 |---|---|---|
-| `catalog` | `{default_data_dir}/catalog/rocksdb` | The node's record of which chunks it holds and their state (small) |
-| `ledgers` | `{default_data_dir}/ledgers` | Ledger data for completed chunks (large) |
-| `events` | `{default_data_dir}/events/data` | Event data for completed chunks (large) |
-| `events_index` | `{default_data_dir}/events/index` | Indexes for event queries |
-| `txhash_raw` | `{default_data_dir}/txhash/raw` | Temporary files used to build the transaction-hash indexes |
-| `txhash_index` | `{default_data_dir}/txhash/index` | Indexes for looking up transactions by hash |
-| `hot` | `{default_data_dir}/hot` | The hot tier: one RocksDB database per chunk not yet moved to flat files |
+| `catalog` | `{data_dir}/catalog/rocksdb` | The node's record of which chunks it holds and their state (small) |
+| `ledgers` | `{data_dir}/ledgers` | Ledger data for completed chunks (large) |
+| `events` | `{data_dir}/events/data` | Event data for completed chunks (large) |
+| `events_index` | `{data_dir}/events/index` | Indexes for event queries |
+| `txhash_raw` | `{data_dir}/txhash/raw` | Temporary files used to build the transaction-hash indexes |
+| `txhash_index` | `{data_dir}/txhash/index` | Indexes for looking up transactions by hash |
+| `hot` | `{data_dir}/hot` | The hot tier: one RocksDB database per chunk not yet moved to flat files |
 
 To put a store on a different volume, set its key inside `[storage]`. Mount that volume into the container with another `-v` flag, and use the container path in the key.
 
@@ -123,7 +123,7 @@ For example, with a second NVMe volume mounted on the host at `/mnt/nvme2`, this
 
 ```toml
 [storage]
-default_data_dir = "/data"
+data_dir = "/data"
 ledgers          = "/data2/ledgers"
 ```
 

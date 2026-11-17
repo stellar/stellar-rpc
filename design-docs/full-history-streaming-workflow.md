@@ -46,7 +46,7 @@ One TOML file configures the daemon, passed as `--config-path` to the binary in 
 
 Every TOML leaf is also settable from the command line:
 
-- One flag per leaf, named by its dotted TOML path: `--storage.default_data_dir`, `--service.methods.getLedgers.queue_limit`.
+- One flag per leaf, named by its dotted TOML path: `--storage.data_dir`, `--service.methods.getLedgers.queue_limit`.
 - The flag set is derived from the config structs by reflection, so it can never drift from the file schema.
 - Precedence: specificity beats source; within a tier, a set flag beats the file; compiled defaults are the last tier.
 - Map-valued keys merge per entry (`--backfill.datastore.params=region=x` sets one param and keeps the file's others); list-valued keys are replaced wholesale.
@@ -98,18 +98,18 @@ Every TOML leaf is also settable from the command line:
 | `retention_chunks` | uint32 | `0` | Retention window in chunks. `0` = full history. |
 | `earliest_ledger` | `"<number>"` \| `"genesis"` \| `"now"` (always a string — a bare TOML integer fails to parse) | `"genesis"` | Earliest ledger this daemon will ever have data for — a fixed lower floor on history. Must be chunk-aligned; `"now"` resolves to the backfill backend's frontier chunk at first start. Resolved and pinned on the first start (a reachable backend is required, to resolve `"now"` and to reject a numeric floor past the tip; see `validateConfig`), immutable thereafter. Setting it above genesis typically skips upfront backfill — useful when no fast backfill source is available and the daemon only follows the live network (`earliest_ledger = "now"`). |
 
-**[storage]** — the data root plus one optional path per on-disk tree; an unset per-store key defaults under `{default_data_dir}`:
+**[storage]** — the data root plus one optional path per on-disk tree; an unset per-store key defaults under `{data_dir}`:
 
 | Key | Default path | Holds |
 |---|---|---|
-| `default_data_dir` | **required** | base directory for the catalog and default storage paths (moved here from `[service]` in #882) |
-| `catalog` | `{default_data_dir}/catalog/rocksdb` | the catalog RocksDB |
-| `ledgers` | `{default_data_dir}/ledgers` | `.pack` files |
-| `events` | `{default_data_dir}/events/data` | events `.pack` segments |
-| `events_index` | `{default_data_dir}/events/index` | events `index.pack` + `index.hash` |
-| `txhash_raw` | `{default_data_dir}/txhash/raw` | transient `.bin` files |
-| `txhash_index` | `{default_data_dir}/txhash/index` | per-window `.idx` |
-| `hot` | `{default_data_dir}/hot` | per-chunk hot RocksDB databases |
+| `data_dir` | **required** | base directory for the catalog and default storage paths (moved here from `[service]` in #882) |
+| `catalog` | `{data_dir}/catalog/rocksdb` | the catalog RocksDB |
+| `ledgers` | `{data_dir}/ledgers` | `.pack` files |
+| `events` | `{data_dir}/events/data` | events `.pack` segments |
+| `events_index` | `{data_dir}/events/index` | events `index.pack` + `index.hash` |
+| `txhash_raw` | `{data_dir}/txhash/raw` | transient `.bin` files |
+| `txhash_index` | `{data_dir}/txhash/index` | per-window `.idx` |
+| `hot` | `{data_dir}/hot` | per-chunk hot RocksDB databases |
 
 **[backfill]**
 
@@ -140,7 +140,7 @@ Every TOML leaf is also settable from the command line:
 | `core_config` | string | **required** | Path to the CaptiveStellarCore config file. Must define `NETWORK_PASSPHRASE`. |
 | `history_archive_urls` | []string | **required** | History-archive URLs for the SDK's archive client. Not derivable from the captive-core file, whose `[HISTORY.*]` entries are shell commands. |
 | `core_binary_path` | string | `stellar-core` on `PATH` | Path to the stellar-core binary. |
-| `core_storage_path` | string | `{default_data_dir}/captive-core` | Captive core's working directory. |
+| `core_storage_path` | string | `{data_dir}/captive-core` | Captive core's working directory. |
 | `core_http_port` | uint | `11626` | Core's admin HTTP port, where sendTransaction submits. Base for `core_url`. |
 | `core_url` | string | `http://localhost:{core_http_port}` | Where transactions are submitted; set it only if core's admin server is not on localhost. |
 | `core_request_timeout` | duration | `"2s"` | Timeout for requests to either core server. |
@@ -185,7 +185,7 @@ The `.bin` files are transient — they are the input `buildTxhashIndex` merges,
 Chunk-level files group into buckets of 1,000 chunks (`bucket_id = chunk_id / 1000`, formatted `%05d`) — a filesystem concern only; bucket ids never appear in catalog keys. Directories are created on demand.
 
 ```
-{default_data_dir}/
+{data_dir}/
 ├── catalog/rocksdb/                                  ← catalog (WAL always on)
 ├── hot/{chunk:08d}/                               ← per-chunk hot RocksDB (transient)
 ├── ledgers/{bucket:05d}/{chunk:08d}.pack
