@@ -95,7 +95,7 @@ Since the query range is also capped at 10,000 ledgers, any single query touches
 
 Events are organized into two types of segments based on their mutability:
 
-* **Hot Segment:** This is the single, currently mutable segment that receives all new events. Its index lives in memory for fast mutation and querying.
+* **Hot Segment:** This is the single, currently mutable segment that receives all new events. Its index is built in memory one slab (65,536 event IDs) at a time; a full slab is sealed into the hot DB's index column family, and only the slab being filled (and one being sealed) stays in memory.
 * **Cold Segments:** These segments are immutable, with both the events and their corresponding index stored on disk.
 
 When the hot segment reaches capacity, it is frozen into a cold segment (see Section 10 for details).
@@ -138,21 +138,21 @@ Roaring bitmaps are used because term density varies widely across the data. Mos
 
 ### 8.1 Hot Event Storage
 
-Events are stored uncompressed as raw bytes (XDR payload + metadata), with direct access by event ID. The hot segment also maintains a ledger offset array (cumulative event counts per ledger) and index deltas (per-ledger term-to-event-ID mappings used for crash recovery).
+Events are stored uncompressed as raw bytes (XDR payload + metadata), with direct access by event ID. The hot segment also maintains a ledger offset array (cumulative event counts per ledger). There are no per-ledger index deltas: the index column family holds one (slab, term) → bitmap entry per sealed slab, and the events after the last sealed slab are indexed again from their stored payloads at open.
 
 The exact storage backend for hot event data is an implementation detail (TODO: decide on storage backend). Regardless of backend, events must be retrievable by event ID in O(1), and the ledger offset array must support O(1) lookup by ledger number.
 
 ### 8.2 Hot Index Storage
 
-Bitmaps live entirely in memory as a single concurrent map of `16-byte term key → roaring bitmap pointer`. The map is protected by a read-write lock so that concurrent readers do not block each other and only contend briefly with the single writer during ledger commits.
+Event IDs are cut into **slabs** of 65,536. The index handles one slab at a time.
 
-During ingestion, every ledger requires adding new event IDs to the relevant bitmaps (~4,000 adds per ledger assuming ~1,000 events with ~4 indexed fields each).
+- **Filling.** The slab receiving events lives in memory as a list of **postings** (one term on one event), appended in arrival order. Adding an event's terms is one append each, with no I/O.
+- **Sealing.** When a slab is full, its postings are grouped by term, each term's event IDs are serialized as one bitmap, and the slab is written as one sorted file of (slab ‖ term) → bitmap and loaded into the index column family. This runs in the background while the next slab fills.
+- **Bound.** The writer waits for the previous seal before starting another, so at most two slabs are in memory.
+- **Lookups.** A sealed slab is read from the column family. A slab still in memory is read without a lock: postings that share the leading 16 bits of their key form a chain, and a lookup walks one chain.
+- **Keys.** Each term is filed under its routed key, the term key blinded under the chunk secret, as in the cold index (Section 9.2).
 
-If bitmaps lived on disk or in the embedded DB, each add would require deserializing the bitmap, updating it, and re-serializing it back. For dense terms like "transfer" that can grow to millions of entries, this serialize/deserialize cycle on every ledger would be far too slow.
-
-Keeping bitmaps in memory makes each add a simple `bitmap.Add` call with no I/O or serialization overhead. Queries also benefit since bitmap intersections can be done directly on the in-memory bitmaps.
-
-Changes are persisted as per-ledger deltas on disk, allowing the in-memory index to be reconstructed on startup (both crash recovery and graceful restarts).
+After a restart, the events after the last sealed slab (at most about two slabs) are indexed again from the events data column family.
 
 ### 8.3 Hot Write Path
 
@@ -163,13 +163,11 @@ For each incoming ledger:
 
 2. Persist events (XDR bytes + event metadata), keyed by event ID.
 
-3. Persist (term_key, event_id) delta pairs for this ledger.
+3. Persist cumulative event count for this ledger in the ledger offset array.
 
-4. Update in-memory bitmaps (bitmap.Add for each event's contract + topics).
+4. Atomically commit: the events and the ledger's offset row become durable together, before the index is updated; the index is derived state, rebuilt from them on open.
 
-5. Persist cumulative event count for this ledger in the ledger offset array.
-
-6. Atomically commit: last_committed_ledger and all data written in steps 2–5 must become durable together. The exact mechanism depends on the storage backend (TODO); if all writes go through the embedded DB, a single DB transaction suffices.
+5. After the commit, append each event's terms to the live slab; when an event starts a new slab, wait for the previous seal to finish and seal the full slab into the index column family in the background. A seal that fails keeps its slab readable from memory and fails the next ledger's apply, which ends the ingestion run; the next open seals the slab again.
 ```
 
 ## 9. Cold Segment
@@ -282,7 +280,7 @@ The resulting bitmap contains the event IDs matching the term, over the range th
 6. Discard in-memory index and hot files.
 ```
 
-The old hot segment continues serving reads throughout. During freeze, two hot segments coexist briefly: the old segment being frozen (still serving reads) and the new segment accepting writes. Since the new segment has just started, its index is near-empty during freeze. Peak memory overhead is one full hot index plus a negligible new one.
+The old hot segment continues serving reads throughout. During freeze, two hot segments coexist briefly: the old segment being frozen (still serving reads) and the new segment accepting writes. A hot index holds at most two slabs in memory (about 11 MiB each) whatever its segment holds, so the overlap costs at most that twice.
 
 ## 11. Query Path
 
@@ -314,7 +312,7 @@ flowchart TD
 ### 11.2 Hot Segment Read Path
 
 ```
-1. Look up bitmaps for all query terms from the in-memory concurrent map.
+1. Look up each term's bitmap in the slabs the query window touches: the live slab (and a slab being sealed) from memory, sealed slabs from the index column family; the answer covers those slabs.
 
 2. Combine bitmaps with AND/OR according to the query filters.
 
@@ -330,7 +328,7 @@ flowchart TD
 The cold segment read path follows the same workflow as the hot segment (steps 2, 3, and 5 are identical). The two differences are:
 
 ```
-1. Load bitmaps from the immutable index files instead of the in-memory concurrent map:
+1. Load bitmaps from the immutable index files instead of the hot index:
    * Hash the term key, query the MPHF in index.hash to get a slot, and
      find the slot's position in index.pack from the app data's rows (§9.2).
    * Read the entry at that position, or for a split term the slab entries
@@ -354,7 +352,7 @@ The cold segment read path follows the same workflow as the hot segment (steps 2
 
 * `nil` means the term is absent from the chunk. A present term with nothing in the window is a non-nil empty bitmap, since a `nil` would read as absent and drop that filter's plan for the rest of the query.
 * Every returned bitmap agrees with the index on every ID in the covered range, and the covered range always contains the window. A whole term's bitmap agrees on every ID. Elsewhere IDs may be present or absent, and callers must not depend on them, neither as matches nor as the answer to a `NextValue` or `PreviousValue` that leaves it.
-* The cold reader reads a split term's slab entries whole and reports their span, up to the top of the ID space when they reach the chunk's last slab, past which the index holds no ID. Every split term shares the chunk's slabs, so one range serves the whole lookup. A lookup that reached no split term reports the whole ID space, and so does the hot store, whose images are whole-chunk and already in memory.
+* The cold reader reads a split term's slab entries whole and reports their span, up to the top of the ID space when they reach the chunk's last slab, past which the index holds no ID. Every split term shares the chunk's slabs, so one range serves the whole lookup. A cold lookup that reached no split term reports the whole ID space. The hot store reads only the slabs the window touches and reports their span, with no term whole; it never returns `nil` for a term, since it has not looked at the other slabs.
 
 **Stages.** A query materializes its window in stages, each one `LookupKeys` walked as far as that lookup says it covered. Stage 1 is the leading 4 slabs in the walk's direction (the trailing 4 when descending), and every later stage the next 16, each run only if the consumer is still pulling when the previous one runs out and no earlier lookup already covered it, and each starting where the walk stopped, so no slab is read twice. So a first page reads 4 slab entries of a split term, the common page makes one lookup, and a query never holds more than 16 slabs of a split term at once: at most one container per slab, so 128 KiB per split term whatever the chunk's density, under 2 MiB for queryEvents' 15-term budget (getEvents v1 has no term budget). Bitmaps, and bounds proved from them, do not carry across a stage; the cursor and the emitted count do. A whole term's bounds are the exception: its bitmap is exact on every ID. When every plan that can still match has a whole term, each later stage runs from the first to the last ID in its 16 slabs where some plan's sparsest whole term has an event, and the walk ends when none has one left. So a wallet's query, a popular contract and the account's address, reads only the slabs near the account's events.
 
@@ -375,7 +373,10 @@ On startup:
 
 3. Ensure no hot segment data exists beyond last_committed_ledger.
 
-4. Replay persisted index deltas to rebuild in-memory bitmaps.
+4. Rebuild the index:
+   a. Read the number of sealed slabs from the last key of the index column family.
+   b. Fail if that is more slabs than the committed events fill.
+   c. Index the events after the last sealed slab again from the events data column family, sealing each slab once the next one has its first event.
 
 5. Load ledger offset array.
 
@@ -457,23 +458,18 @@ The average uncompressed event size (~250 bytes) includes the raw event XDR and 
 
 ## 15. Memory Profile
 
-This section covers memory usage of the in-memory bitmap index for the hot segment. It does not account for memory used during query execution against cold segments (e.g., decompressing packfile records, loading MPHF and bitmaps from disk) which occurs concurrently with ingestion.
+This section covers memory usage of the hot segment's index. It does not account for memory used during query execution against cold segments (e.g., decompressing packfile records, loading MPHF and bitmaps from disk) which occurs concurrently with ingestion.
 
-The following measurements are from 9 recent segments, computed by rebuilding bitmaps from persisted index deltas and measuring the resulting allocations.
+The hot index holds at most two slabs in memory: the one being filled and the one being sealed.
 
-**Per-segment memory:**
+| Item | Size |
+|---|---|
+| Postings: 65,536 events × 7 terms × 24 bytes | 10.5 MiB |
+| Chain heads: 65,536 × 4 bytes | 0.25 MiB |
+| One slab | about 11 MiB |
+| Hot index: 2 slabs | about 22 MiB |
 
-| Metric | Average | Range |
-| :---- | :---- | :---- |
-| Unique terms | ~1.8M | 554K – 2.6M |
-| Bitmap data | ~57 MB | 38 – 69 MB |
-| Go overhead (maps, pointers, bitmap objects) | ~312 MB | 94 – 448 MB |
-| **Total bitmap index** | **~369 MB** | **132 – 517 MB** |
-
-- Go overhead is ~170 bytes per term and dominates total memory.
-- Bitmap data is compact due to roaring bitmap compression.
-- topic2 accounts for ~85% of all unique terms and drives memory variance.
-- High topic2 cardinality (2.2M terms): ~510 MB; low (253K terms): ~132 MB.
+It does not grow with the number of unique terms: a segment with 1.8M unique terms used to cost about 370 MB. Sealed slabs live in the index column family and are read through the RocksDB block cache, which also holds their index and filter blocks, so a segment's many sealed files cost bounded memory.
 
 **Other in-memory structures:**
 
@@ -578,16 +574,7 @@ Beyond 2x, tiered storage becomes important to manage cost. See Section 19.
 
 ### 18.2 Memory
 
-Bitmap index memory scales roughly linearly with event volume at ~170 bytes per unique term (see Section 15).
-
-| Scenario | Bitmap index |
-| :---- | :---- |
-| 1x (baseline, measured) | ~369 MB |
-| 2x | ~600–800 MB |
-| 5x | ~1.5–2.0 GB |
-| 10x | ~3.0–4.0 GB |
-
-At higher scaling factors, reducing per-term overhead through in-memory index optimization becomes relevant. Work on this is in progress but does not affect the overall design.
+The hot index's memory is fixed at two slabs regardless of event volume (see Section 15). Volume changes how often a slab seals and how many files the index column family holds, whose index blocks are bounded by the block cache.
 
 ### 18.3 Query Performance
 
