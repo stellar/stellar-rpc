@@ -21,7 +21,10 @@ RUN WITH_TOOLS=1 PREFIX=/usr/local ZSTD_HOME=/usr/local /tmp/install-rocksdb.sh
 
 # --- Stage 3: Build stellar-rpc ---
 FROM ubuntu:22.04 AS build
-ARG GO_VERSION=1.26.9
+# No default, so the toolchain line in go.mod stays the one Go version:
+# --build-arg GO_VERSION=$(sed -n 's/^toolchain go//p' go.mod)
+ARG GO_VERSION
+RUN test -n "$GO_VERSION" || (echo "GO_VERSION build arg is required" && exit 1)
 ARG RUST_TOOLCHAIN_VERSION=stable
 ARG REPOSITORY_VERSION
 # false builds a binary that refuses --enable-rpcv2, the same as every release.

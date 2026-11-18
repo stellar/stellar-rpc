@@ -83,8 +83,12 @@ bootstrap_box() {
   log "installing build deps"
   apt-get install -y -qq --no-install-recommends git build-essential
 
-  GO_VERSION=1.26.5
+  # go-bench builds the baseline (the latest release) and the candidate with this one Go,
+  # ignoring go.mod's toolchain line. Go 1.26.11 and later reject the LLVM bitcode in the
+  # Rust libraries of releases older than #1190, so this stays on 1.26.10.
+  GO_VERSION=1.26.10
   curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -xz -C /usr/local
+  export GOTOOLCHAIN=local
   export HOME="${HOME:-/root}"
   export GOPATH="${GOPATH:-$HOME/go}"
   export GOMODCACHE="${GOMODCACHE:-$GOPATH/pkg/mod}"
