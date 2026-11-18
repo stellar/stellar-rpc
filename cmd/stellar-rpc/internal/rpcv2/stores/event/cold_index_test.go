@@ -46,7 +46,7 @@ const indexTestChunkID = chunk.ID(0)
 func writeColdIndex(
 	ctx context.Context, chunkID chunk.ID, bitmaps Bitmaps, dir string, secret [stores.SecretLen]byte,
 ) error {
-	b := NewColdIndexBuilder(chunkID, dir, secret)
+	b := NewColdIndexBuilder(chunkID, ColdDirs{Data: dir, Index: dir, Scratch: dir}, secret)
 	type cursor struct {
 		key  TermKey
 		next uint32
@@ -428,18 +428,19 @@ func TestIndexPack_IndexCostsAtMostFourBytesPerRecord(t *testing.T) {
 }
 
 // A build over several slabs, with a term whose bitmap is split, checked
-// through the cold reader against the postings fed in. The runs live
-// beside the index files only while the build runs.
+// through the cold reader against the postings fed in. The runs live under
+// scratch only while the build runs.
 func TestColdIndexBuilder_BuildsAcrossSlabs(t *testing.T) {
 	const total = 9*hotSlabEvents + 100
 	dir, _ := buildColdFixture(t, indexTestChunkID, 1, 1)
-	runsDir := filepath.Join(dir, IndexRunsDirName(indexTestChunkID))
+	scratch := t.TempDir()
+	runsDir := filepath.Join(scratch, IndexRunsDirName(indexTestChunkID))
 	// Leftovers of an attempt that never finished are ignored and go with
 	// the directory.
 	require.NoError(t, os.MkdirAll(runsDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(runsDir, "stale"), []byte("x"), 0o600))
 
-	b := NewColdIndexBuilder(indexTestChunkID, dir, testIndexSecret)
+	b := NewColdIndexBuilder(indexTestChunkID, ColdDirs{Data: dir, Index: dir, Scratch: scratch}, testIndexSecret)
 	key := func(name string) TermKey { return ComputeTermKey([]byte(name), FieldContractID) }
 	want := NewBitmaps()
 	for id := range uint32(total) {
@@ -462,6 +463,7 @@ func TestColdIndexBuilder_BuildsAcrossSlabs(t *testing.T) {
 	}
 	require.FileExists(t, filepath.Join(runsDir, "runs"))
 	require.FileExists(t, filepath.Join(runsDir, "stale"))
+	require.NoDirExists(t, filepath.Join(dir, IndexRunsDirName(indexTestChunkID)))
 	require.NoError(t, b.Write(context.Background()))
 	require.NoDirExists(t, runsDir)
 	require.ErrorContains(t, b.Write(context.Background()), "already written")
@@ -503,7 +505,7 @@ func TestColdIndexBuilder_FailedSpillFailsTheBuild(t *testing.T) {
 	dir := t.TempDir()
 	// A file where the runs directory belongs fails every spill.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, IndexRunsDirName(indexTestChunkID)), nil, 0o600))
-	b := NewColdIndexBuilder(indexTestChunkID, dir, testIndexSecret)
+	b := NewColdIndexBuilder(indexTestChunkID, ColdDirs{Data: dir, Index: dir, Scratch: dir}, testIndexSecret)
 	var err error
 	for id := uint32(0); id <= 2*hotSlabEvents && err == nil; id++ {
 		err = b.Add(id, []TermKey{{1}})
@@ -516,7 +518,7 @@ func TestColdIndexBuilder_RemovesRuns(t *testing.T) {
 	build := func(t *testing.T) (*ColdIndexBuilder, string, string) {
 		t.Helper()
 		dir := t.TempDir()
-		b := NewColdIndexBuilder(chunk.ID(0), dir, testIndexSecret)
+		b := NewColdIndexBuilder(chunk.ID(0), ColdDirs{Data: dir, Index: dir, Scratch: dir}, testIndexSecret)
 		for id := range uint32(hotSlabEvents + 1) {
 			require.NoError(t, b.Add(id, []TermKey{{1}}))
 		}
@@ -542,7 +544,7 @@ func TestColdIndexBuilder_RemovesRuns(t *testing.T) {
 	})
 	t.Run("on a Write canceled with a spill in flight", func(t *testing.T) {
 		dir := t.TempDir()
-		b := NewColdIndexBuilder(chunk.ID(0), dir, testIndexSecret)
+		b := NewColdIndexBuilder(chunk.ID(0), ColdDirs{Data: dir, Index: dir, Scratch: dir}, testIndexSecret)
 		for id := range uint32(hotSlabEvents + 1) {
 			require.NoError(t, b.Add(id, []TermKey{{1}}))
 		}
