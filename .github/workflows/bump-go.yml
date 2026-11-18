@@ -1,0 +1,43 @@
+name: Bump Go
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump-go:
+    # The bump PRs belong in this repo. The internal repo gets them when it syncs.
+    if: github.repository == 'stellar/stellar-rpc'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Move go.mod's toolchain line to the newest Go patch release
+        id: bump
+        run: |
+          current=$(sed -n 's/^toolchain go//p' go.mod)
+          releases=$(curl -fsSL 'https://go.dev/dl/?mode=json')
+          # The newest patch of our Go, or of the oldest supported Go once ours is no longer supported.
+          target=$(jq -r --arg minor "go${current%.*}." \
+            'map(.version) | (map(select(startswith($minor))) + [last])[0] | ltrimstr("go")' <<< "$releases")
+          if [ "$target" != "$current" ] && [ "$(printf '%s\n' "$current" "$target" | sort -V | tail -n 1)" = "$target" ]; then
+            sed -i "s/^toolchain go.*/toolchain go$target/" go.mod
+            echo "current=$current" >> "$GITHUB_OUTPUT"
+            echo "target=$target" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.bump.outputs.target
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          branch: automation/bump-go
+          delete-branch: true
+          add-paths: go.mod
+          title: Bump Go to ${{ steps.bump.outputs.target }}
+          commit-message: Bump Go to ${{ steps.bump.outputs.target }}
+          body: |
+            Moves go.mod's toolchain line from go${{ steps.bump.outputs.current }} to go${{ steps.bump.outputs.target }}, the newest patch release of a supported Go. Every build reads this line. Release notes: https://go.dev/doc/devel/release
+
+            GitHub Actions opened this PR, so CI doesn't start on its own. Close and reopen the PR to run it.
