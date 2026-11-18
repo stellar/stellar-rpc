@@ -309,6 +309,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 		start.lifecycleGrace = deriveLifecycleGrace(cfg.Service)
 	}
 	start.FeeWindows = feeWindows
+	start.indexMetrics = newIndexMetrics(registry, host.StellarPrometheusNamespace)
 	if opts.OnListen != nil {
 		onListen := opts.OnListen
 		start.OnListen = func(rpc net.Addr) { onListen(rpc, adminAddr) }

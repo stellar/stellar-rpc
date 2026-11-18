@@ -7,6 +7,7 @@ package query
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -187,6 +188,17 @@ func (r *Registry) LatestLedger() uint32 { return r.latest.Load().seq }
 func (r *Registry) Handle(c chunk.ID) (*hotchunk.DB, bool) {
 	db, ok := r.handles.Load().byChunk[c]
 	return db, ok
+}
+
+// HotChunks returns the published hot databases, oldest chunk first. The last
+// one is the chunk that ingest writes to.
+func (r *Registry) HotChunks() []*hotchunk.DB {
+	byChunk := r.handles.Load().byChunk
+	dbs := make([]*hotchunk.DB, 0, len(byChunk))
+	for _, c := range slices.Sorted(maps.Keys(byChunk)) {
+		dbs = append(dbs, byChunk[c])
+	}
+	return dbs
 }
 
 // PublishHandle adds or replaces the hot database for chunk c and publishes the

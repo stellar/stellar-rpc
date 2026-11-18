@@ -1,6 +1,7 @@
 package event
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 
@@ -483,4 +484,84 @@ func TestNewConcurrentBitmapsFromBitmaps_DirectlyPinsContract(t *testing.T) {
 	assert.True(t, post.GetCopyOnWrite())
 	assert.Equal(t, uint64(len(dense)+1), post.GetCardinality())
 	assert.Equal(t, uint64(len(dense)), bmDense.GetCardinality(), "earlier snapshot stays immutable")
+}
+
+func TestConcurrentBitmaps_Stats(t *testing.T) {
+	// Warmup input: one sparse term and one dense term.
+	b := NewBitmaps()
+	sparse := ComputeTermKey([]byte("sparse"), FieldTopic0)
+	dense := ComputeTermKey([]byte("dense"), FieldTopic0)
+	b.AddTo(sparse, 1, 2)
+	for i := range uint32(promotionThreshold) {
+		b.AddTo(dense, i)
+	}
+	s := NewConcurrentBitmapsFromBitmaps(b)
+	assert.Equal(t, IndexStats{Terms: 2, DenseTerms: 1}, s.Stats())
+
+	// More ids for terms that exist change nothing.
+	s.AddTo(sparse, 3)
+	s.AddTo(dense, promotionThreshold)
+	assert.Equal(t, IndexStats{Terms: 2, DenseTerms: 1}, s.Stats())
+
+	// A new sparse term.
+	grows := ComputeTermKey([]byte("grows"), FieldTopic0)
+	s.AddTo(grows, 0)
+	assert.Equal(t, IndexStats{Terms: 3, DenseTerms: 1}, s.Stats())
+
+	// The term reaches the threshold, one id at a time.
+	for i := uint32(1); i < promotionThreshold; i++ {
+		s.AddTo(grows, i)
+	}
+	assert.Equal(t, IndexStats{Terms: 3, DenseTerms: 2}, s.Stats())
+
+	// A new term whose first batch is at the threshold.
+	batch := make([]uint32, 0, promotionThreshold)
+	for i := range uint32(promotionThreshold) {
+		batch = append(batch, i)
+	}
+	s.AddTo(ComputeTermKey([]byte("batch"), FieldTopic0), batch...)
+	assert.Equal(t, IndexStats{Terms: 4, DenseTerms: 3}, s.Stats())
+}
+
+// Stats is safe during AddTo and Get, and never reports more dense terms
+// than terms. Run with -race.
+func TestConcurrentBitmaps_StatsDuringWrites(t *testing.T) {
+	const terms = 20_000
+	s := newTestConcurrentBitmaps()
+	key := func(i int) TermKey { return ComputeTermKey(fmt.Appendf(nil, "term-%d", i), FieldTopic0) }
+
+	done := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Go(func() {
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				stats := s.Stats()
+				if stats.DenseTerms > stats.Terms {
+					t.Errorf("dense terms %d > terms %d", stats.DenseTerms, stats.Terms)
+					return
+				}
+				_, err := s.Get(key(0))
+				assert.NoError(t, err)
+			}
+		})
+	}
+
+	// The single writer. Each term is dense from its first batch, so each
+	// AddTo adds to the map and to the dense count.
+	batch := make([]uint32, 0, promotionThreshold)
+	for id := range uint32(promotionThreshold) {
+		batch = append(batch, id)
+	}
+	for i := range terms {
+		s.AddTo(key(i), batch...)
+	}
+	close(done)
+	readers.Wait()
+
+	assert.Equal(t, IndexStats{Terms: terms, DenseTerms: terms}, s.Stats())
 }

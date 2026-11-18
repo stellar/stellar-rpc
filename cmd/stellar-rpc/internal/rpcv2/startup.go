@@ -102,6 +102,7 @@ func run(ctx context.Context, cfg StartConfig) error {
 	// Runs after g.Wait joins the loops below; Registry.Close owns the
 	// double-close story.
 	defer registry.Close()
+	cfg.indexMetrics.setSource(registry.HotChunks)
 
 	// Seed the hot-chunk gauge after the resume open, which may have created
 	// the live chunk's key. The lifecycle tick keeps it current from here.
@@ -445,6 +446,9 @@ type StartConfig struct {
 	// once, before the daemon body; nil (tests without a fee consumer)
 	// means the loop never computes fees.
 	FeeWindows *feewindow.FeeWindows
+
+	// indexMetrics reports the in-memory events index. nil reports nothing.
+	indexMetrics *indexMetrics
 }
 
 // withDefaults fills the embedded Exec defaults (Workers -> GOMAXPROCS). The

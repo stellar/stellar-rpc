@@ -56,6 +56,17 @@ type termState struct {
 type ConcurrentBitmaps struct {
 	rwmu  sync.RWMutex
 	terms map[TermKey]*atomic.Pointer[termState]
+
+	// denseCount is the number of dense terms, for Stats.
+	denseCount atomic.Int64
+}
+
+// IndexStats are the counts of one in-memory index.
+type IndexStats struct {
+	// Terms is the number of terms in the index.
+	Terms int64
+	// DenseTerms is the number of terms that are roaring bitmaps.
+	DenseTerms int64
 }
 
 // NewConcurrentBitmapsFromBitmaps takes ownership of a Bitmaps built
@@ -76,10 +87,23 @@ func NewConcurrentBitmapsFromBitmaps(b Bitmaps) *ConcurrentBitmaps {
 			p.Store(termStateFromIDs(bm.ToArray()))
 		} else {
 			p.Store(&termState{dense: newDenseState(bm)})
+			cb.denseCount.Add(1)
 		}
 		cb.terms[k] = p
 	}
 	return cb
+}
+
+// Stats returns the current counts. It is safe to call concurrently with
+// AddTo and Get.
+func (s *ConcurrentBitmaps) Stats() IndexStats {
+	// Read the dense count first. AddTo adds a term to the map before it
+	// counts the term as dense, so DenseTerms is never larger than Terms.
+	dense := s.denseCount.Load()
+	s.rwmu.RLock()
+	terms := len(s.terms)
+	s.rwmu.RUnlock()
+	return IndexStats{Terms: int64(terms), DenseTerms: dense}
 }
 
 // Get returns the bitmap for key, or (nil, nil) when key is not
@@ -158,6 +182,9 @@ func (s *ConcurrentBitmaps) AddTo(key TermKey, eventIDs ...uint32) {
 		s.rwmu.Lock()
 		s.terms[key] = p
 		s.rwmu.Unlock()
+		if next.dense != nil {
+			s.denseCount.Add(1)
+		}
 		return
 	}
 
@@ -173,7 +200,11 @@ func (s *ConcurrentBitmaps) AddTo(key TermKey, eventIDs ...uint32) {
 	// Sparse mode: new list, then promote if it crossed the threshold.
 	ids := make([]uint32, 0, len(old.ids)+len(eventIDs))
 	ids = append(ids, old.ids...)
-	p.Store(termStateFromIDs(appendSorted(ids, eventIDs)))
+	next := termStateFromIDs(appendSorted(ids, eventIDs))
+	p.Store(next)
+	if next.dense != nil {
+		s.denseCount.Add(1)
+	}
 }
 
 // appendSorted appends the ids in src that are greater than dst's

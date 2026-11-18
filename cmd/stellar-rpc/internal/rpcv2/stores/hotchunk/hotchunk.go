@@ -197,10 +197,19 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mus
 	if readOnly {
 		return db, nil
 	}
+	start := time.Now()
 	es, err := event.NewWithStore(store, chunkID)
 	if err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("compose events facade for chunk %s: %w", chunkID, err)
+	}
+	// A new chunk has no terms, and its warmup has nothing to report.
+	if terms := es.IndexStats().Terms; terms > 0 {
+		logger.WithFields(supportlog.F{
+			"chunk": chunkID.String(),
+			"took":  time.Since(start).Round(time.Millisecond).String(),
+			"terms": terms,
+		}).Info("events index warmup done")
 	}
 	db.events = es
 	return db, nil
@@ -231,6 +240,10 @@ func (d *DB) Events() *event.HotStore {
 	}
 	return d.events
 }
+
+// HasEvents reports whether the DB has an events facade. A read-only DB has
+// none, and Events panics on it.
+func (d *DB) HasEvents() bool { return d.events != nil }
 
 // Source streams the chunk's LCMs from the ledgers CF as a ledgerbackend.LedgerStream
 // the cold writer (backfill's WriteColdChunk) drains, so a just-closed chunk freezes

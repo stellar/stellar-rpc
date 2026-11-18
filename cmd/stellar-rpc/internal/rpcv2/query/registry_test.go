@@ -489,3 +489,22 @@ func TestOpenRegistry_ErrorClosesOpenedHandles(t *testing.T) {
 	_, _, err = live.MaxCommittedSeq()
 	require.NoError(t, err, "the live handle was not closed by the failed constructor")
 }
+
+func TestRegistry_HotChunksAreOldestFirst(t *testing.T) {
+	cat, _ := rpcv2test.OpenTestCatalog(t, 1)
+	r := NewRegistry(cat, geometry.Retention{})
+	assert.Empty(t, r.HotChunks())
+
+	live, completed := &hotchunk.DB{}, &hotchunk.DB{}
+	r.PublishHandle(7, live)
+	r.PublishHandle(5, completed)
+	got := r.HotChunks()
+	require.Len(t, got, 2)
+	assert.Same(t, completed, got[0])
+	assert.Same(t, live, got[1])
+
+	r.DiscardHandle(5)
+	got = r.HotChunks()
+	require.Len(t, got, 1)
+	assert.Same(t, live, got[0])
+}

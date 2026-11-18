@@ -95,8 +95,8 @@ var ErrLedgerOutOfOrder = errors.New("events: ledger out of order")
 //   - Reads (LookupKeys, FetchEvents, All) take NO HotStore-level lock — they guard
 //     via chunkStore.IsClosed() and rely on the mirror's internal locks and
 //     RocksDB's thread-safety.
-//   - Metadata split after the caller-owned store is closed: ChunkID is
-//     infallible (cached, usable post-close); EventCount and
+//   - Metadata split after the caller-owned store is closed: ChunkID and
+//     IndexStats are infallible (in memory, usable post-close); EventCount and
 //     Offsets return stores.ErrStoreClosed after close (Reader-interface contract).
 type HotStore struct {
 	chunkStore *rocksdb.Store
@@ -126,6 +126,9 @@ func NewWithStore(store *rocksdb.Store, chunkID chunk.ID) (*HotStore, error) {
 		offsets:    offsets,
 	}, nil
 }
+
+// IndexStats returns the counts of the in-memory index. Usable post-close.
+func (h *HotStore) IndexStats() IndexStats { return h.mirror.Stats() }
 
 // ChunkID returns the chunk this store serves. Infallible and usable post-close
 // (the Reader exception). No production caller yet — the intended read seam for
