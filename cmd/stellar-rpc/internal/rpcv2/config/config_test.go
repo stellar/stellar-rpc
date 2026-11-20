@@ -509,6 +509,7 @@ func TestResolvePaths_DefaultsUnderDataDir(t *testing.T) {
 	assert.Equal(t, filepath.Join("/data", "ledgers"), p.Ledgers)
 	assert.Equal(t, filepath.Join("/data", "events", "data"), p.Events)
 	assert.Equal(t, filepath.Join("/data", "events", "index"), p.EventsIndex)
+	assert.Equal(t, filepath.Join("/data", "entrychanges"), p.EntryChanges)
 	assert.Equal(t, filepath.Join("/data", "txhash", "raw"), p.TxhashRaw)
 	assert.Equal(t, filepath.Join("/data", "txhash", "index"), p.TxhashIndex)
 	assert.Equal(t, filepath.Join("/data", "hot"), p.HotStorage)
@@ -531,21 +532,22 @@ func TestRoots_AllDistinct(t *testing.T) {
 	cfg, err := ParseConfig([]byte(minimalValidConfig))
 	require.NoError(t, err)
 	roots := cfg.ResolvePaths().Roots()
-	// Meta store + five immutable trees + hot storage = seven roots. The
+	// Meta store + six immutable trees + hot storage = eight roots. The
 	// events pack and its index are separate trees so a deployment can put
 	// the randomly-probed index on faster storage than the bulk pack.
-	require.Len(t, roots, 7)
+	require.Len(t, roots, 8)
 	assert.NotContains(t, roots, "/data", "the data dir parent is not itself a root")
 }
 
 func TestValidateRoots(t *testing.T) {
 	base := Paths{
-		Catalog:     "/data/catalog/rocksdb",
-		Ledgers:     "/data/ledgers",
-		Events:      "/data/events",
-		TxhashRaw:   "/data/txhash/raw",
-		TxhashIndex: "/data/txhash/index",
-		HotStorage:  "/data/hot",
+		Catalog:      "/data/catalog/rocksdb",
+		Ledgers:      "/data/ledgers",
+		Events:       "/data/events",
+		EntryChanges: "/data/entrychanges",
+		TxhashRaw:    "/data/txhash/raw",
+		TxhashIndex:  "/data/txhash/index",
+		HotStorage:   "/data/hot",
 	}
 
 	t.Run("default sibling layout is valid", func(t *testing.T) {

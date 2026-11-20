@@ -17,6 +17,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/durable"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/ingest"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/entrychange"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
@@ -62,11 +63,12 @@ func (cfg ProcessConfig) validate() error {
 // catalog (the same one the index build derives), so ingest keys stay consistent.
 func ingestConfigFor(s catalog.ArtifactSet, chunkID chunk.ID, cfg ProcessConfig) ingest.Config {
 	c := ingest.Config{
-		Ledgers: s.Has(geometry.KindLedgers),
-		Txhash:  s.Has(geometry.KindTxHash),
-		Events:  s.Has(geometry.KindEvents),
+		Ledgers:      s.Has(geometry.KindLedgers),
+		Txhash:       s.Has(geometry.KindTxHash),
+		Events:       s.Has(geometry.KindEvents),
+		EntryChanges: s.Has(geometry.KindEntryChanges),
 	}
-	if c.Txhash || c.Events {
+	if c.Txhash || c.Events || c.EntryChanges {
 		catalogSecret := cfg.Catalog.Secret()
 		if c.Txhash {
 			indexID := uint32(cfg.Catalog.TxHashIndexLayout().TxHashIndexID(chunkID))
@@ -76,6 +78,10 @@ func ingestConfigFor(s catalog.ArtifactSet, chunkID chunk.ID, cfg ProcessConfig)
 		if c.Events {
 			sec := event.ColdIndexSecret(catalogSecret[:], chunkID)
 			c.EventsSecret = sec[:]
+		}
+		if c.EntryChanges {
+			sec := entrychange.ColdIndexSecret(catalogSecret[:], chunkID)
+			c.EntryChangesSecret = sec[:]
 		}
 	}
 	return c
@@ -127,9 +133,10 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	// one-write:create — materialize this chunk's cold artifacts from the resolved
 	// source's raw ledger iterator. WriteColdChunk is source-blind.
 	dirs := ingest.ColdDirs{
-		LedgerPack: layout.LedgerPackPath(chunkID),
-		TxhashBin:  layout.TxHashBinPath(chunkID),
-		Events:     layout.EventsColdDirs(chunkID),
+		LedgerPack:   layout.LedgerPackPath(chunkID),
+		TxhashBin:    layout.TxHashBinPath(chunkID),
+		Events:       layout.EventsColdDirs(chunkID),
+		EntryChanges: layout.EntryChangesBucketDir(chunkID),
 	}
 	raw := src.RawLedgers(ctx, ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
 	ic := ingestConfigFor(artifacts, chunkID, cfg)

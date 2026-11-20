@@ -76,7 +76,7 @@ func TestResolve_SteadyStateRestartIsEmpty(t *testing.T) {
 	// Post-finalization steady state: ledgers+events frozen, terminal coverage
 	// [0,3] frozen, .bins demoted+swept (no txhash keys remain).
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents)
+		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges)
 	}
 	freezeCoverage(t, cat, 3)
 
@@ -95,7 +95,7 @@ func TestResolve_RisenFloorSchedulesNothing(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 4) // window 0 = chunks [0,3]
 
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents)
+		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges)
 	}
 	// Stored terminal coverage spans the whole window [0,3].
 	freezeCoverage(t, cat, 3)
@@ -118,7 +118,7 @@ func TestResolve_WindowMidRollAtShutdownSchedulesTail(t *testing.T) {
 
 	// At shutdown: coverage [0,1], chunks 0,1 fully frozen, chunks 2,3 not produced.
 	for c := chunk.ID(0); c <= 1; c++ {
-		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges, geometry.KindTxHash)
 	}
 	freezeCoverage(t, cat, 1) // stored_hi = 1 < lastChunk(0) = 3
 
@@ -139,6 +139,7 @@ func TestResolve_WindowMidRollAtShutdownSchedulesTail(t *testing.T) {
 	require.True(t, cb2.Artifacts.Has(geometry.KindLedgers))
 	require.True(t, cb2.Artifacts.Has(geometry.KindEvents))
 	require.True(t, cb2.Artifacts.Has(geometry.KindTxHash))
+	require.True(t, cb2.Artifacts.Has(geometry.KindEntryChanges))
 }
 
 // Mid-roll re-derive: resolve requests txhash for every desired chunk whose .bin
@@ -148,7 +149,7 @@ func TestResolve_MidRollReDerivesMissingBins(t *testing.T) {
 
 	// ledgers+events frozen for all four chunks; .bin frozen only for 0,1.
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents)
+		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges)
 	}
 	freezeKinds(t, cat, 0, geometry.KindTxHash)
 	freezeKinds(t, cat, 1, geometry.KindTxHash)
@@ -178,7 +179,7 @@ func TestResolve_FinalizedWindowRangeEndsIn(t *testing.T) {
 
 	// Window 0 finalized: ledgers/events frozen, terminal coverage [0,3] frozen.
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents)
+		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges)
 	}
 	freezeCoverage(t, cat, 3)
 
@@ -200,7 +201,7 @@ func TestResolve_SpanFinalizedPlusFreshTrailing(t *testing.T) {
 
 	// Window 0 fully finalized.
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents)
+		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges)
 	}
 	freezeCoverage(t, cat, 3)
 

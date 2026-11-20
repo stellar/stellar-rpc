@@ -40,6 +40,7 @@ default_data_dir = "/var/stellar/rpc-v2"
 #ledgers = ""        # {default_data_dir}/ledgers          (ledger packs)
 #events = ""         # {default_data_dir}/events/data      (event packs)
 #events_index = ""   # {default_data_dir}/events/index     (event indexes)
+#entry_changes = ""  # {default_data_dir}/entrychanges     (ledger entry change indexes)
 #txhash_raw = ""     # {default_data_dir}/txhash/raw       (unindexed tx hashes)
 #txhash_index = ""   # {default_data_dir}/txhash/index     (txhash indexes)
 #hot = ""            # {default_data_dir}/hot              (recent chunks)
