@@ -11,6 +11,7 @@ import (
 	"github.com/pelletier/go-toml"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
@@ -209,6 +210,10 @@ type QueryEventsMethodConfig struct {
 	// up; over budget fails with the queryEvents invalid_params error. Must be
 	// >= 1: a zero budget would reject every filtered request.
 	TermBudget *uint `toml:"term_budget"`
+
+	// MaxFilters caps the filters list of one request; more fails with
+	// invalid_params. Must be >= 1.
+	MaxFilters *uint `toml:"max_filters"`
 }
 
 // HealthMethodConfig extends MethodConfig for getHealth with the staleness
@@ -486,9 +491,8 @@ const (
 	DefaultQueryEventsMaxItemsPerResponse   uint = 1000
 	DefaultGetEventsDefaultItemsPerResponse uint = 100
 
-	// DefaultQueryEventsTermBudget is the getEvents v2 proposal's default
-	// (github.com/orgs/stellar/discussions/1872).
-	DefaultQueryEventsTermBudget uint = 15
+	DefaultQueryEventsTermBudget uint = protocol.QueryEventsDefaultTermBudget
+	DefaultQueryEventsMaxFilters      = uint(protocol.QueryEventsDefaultMaxFilters)
 
 	// DefaultGetEventsV1MaxItemsPerResponse is v1's own page cap, matching
 	// the existing service's max-events-limit. The 1,000 above is the v2
@@ -716,6 +720,7 @@ func (cfg Config) WithDefaults() Config {
 	fillUint(&m.QueryEvents.MaxItemsPerResponse, DefaultQueryEventsMaxItemsPerResponse)
 	fillUint(&m.QueryEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
 	fillUint(&m.QueryEvents.TermBudget, DefaultQueryEventsTermBudget)
+	fillUint(&m.QueryEvents.MaxFilters, DefaultQueryEventsMaxFilters)
 
 	queue(&m.GetFeeStats.QueueLimit, DefaultGetFeeStatsQueueLimit)
 	dur(&m.GetFeeStats.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)

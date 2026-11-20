@@ -33,6 +33,11 @@ func (r Retention) FloorAt(frontier int64) chunk.ID {
 	return chunk.ID(max(sliding, int64(r.earliestChunk))) //nolint:gosec // max >= earliestChunk >= 0, fits uint32
 }
 
+// EarliestLedger is the first ledger of the pinned earliest chunk.
+func (r Retention) EarliestLedger() uint32 {
+	return r.earliestChunk.FirstLedger()
+}
+
 // RetentionWindow is the configured window's width in ledgers — the
 // retention_chunks knob in ledger units. 0 means full history (nothing is ever
 // pruned); a size whose ledger count exceeds uint32 clamps to the maximum.

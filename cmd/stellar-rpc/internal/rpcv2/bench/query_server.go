@@ -44,6 +44,11 @@ func maxEventsLimit() uint {
 	return *servingConfig().Service.Methods.QueryEvents.MaxItemsPerResponse
 }
 
+// maxEventFilters is the daemon's default queryEvents filter cap.
+func maxEventFilters() protocol.MaxFilters {
+	return protocol.MaxFilters(*servingConfig().Service.Methods.QueryEvents.MaxFilters)
+}
+
 // readServer serves the daemon's read methods through the daemon's JSON-RPC
 // bridge, in process and without HTTP. A call's latency covers the bridge's
 // request parse, the wait for a handler slot, the handler and the response

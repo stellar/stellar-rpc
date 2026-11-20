@@ -334,7 +334,7 @@ func filterMatches(ctx context.Context, ds *queryDataset, filter protocol.QueryE
 func validateFilterSets(sets []eventFilterSet) error {
 	for _, set := range sets {
 		req := protocol.QueryEventsRequest{MinLedger: chunk.FirstLedgerSeq, Filters: set.filters}
-		if err := req.Valid(protocol.QueryEventsDefaultMaxFilters); err != nil {
+		if err := req.Valid(maxEventFilters(), maxEventsLimit()); err != nil {
 			return fmt.Errorf("derived event filter is invalid: %w", err)
 		}
 	}

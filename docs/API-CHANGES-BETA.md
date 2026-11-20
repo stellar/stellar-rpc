@@ -10,6 +10,55 @@ No existing method, parameter, or response field was removed. `getEvents`, `getL
 |---|---|
 | `getHealth` | The `ledgerRetentionWindow` field in the response is `0` when the node keeps full history. Use `oldestLedger` to find the oldest served ledger. |
 | `getLedgers` | Page limits are maximum 20, default 5. The current RPC uses 200 and 50. A `limit` above 20 returns an error. The operator can change the limits under `[service.methods.getLedgers]`. |
+| `getVersionInfo` | The response has three new fields, `methods`, `limits`, and `retention`. See [getVersionInfo](#getversioninfo). |
+
+### getVersionInfo
+
+The response has all the fields of the current RPC, and three new fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `methods` | string[] | The names of all JSON-RPC methods that the node serves, in sorted order. |
+| `limits` | object | The request limits that the node configuration sets. A client can check a request against them before it sends the request. |
+| `retention` | object | The ledgers that the node keeps. See [Retention](#retention). |
+
+`limits` has these fields:
+
+| Field | Type | Description | Configuration |
+|---|---|---|---|
+| `maxBatchSize` | number | The maximum number of calls in one JSON-RPC batch. | `[service].max_request_batch_size` |
+| `getEvents.maxLimit` | number | The maximum `limit` in one request. | `[service.methods.getEvents].max_items_per_response` |
+| `getLedgers.maxLimit` | number | The maximum `limit` in one request. | `[service.methods.getLedgers].max_items_per_response` |
+| `getTransactions.maxLimit` | number | The maximum `limit` in one request. | `[service.methods.getTransactions].max_items_per_response` |
+| `queryEvents.termBudget` | number | The maximum number of distinct filter terms in one query. See [Term budget](#term-budget). | `[service.methods.queryEvents].term_budget` |
+| `queryEvents.maxFilters` | number | The maximum number of filters in one query. | `[service.methods.queryEvents].max_filters` |
+| `queryEvents.maxLimit` | number | The maximum `limit` in one request. | `[service.methods.queryEvents].max_items_per_response` |
+
+```json
+"methods": ["getEvents", "getFeeStats", "getHealth", "...", "queryEvents", "sendTransaction", "simulateTransaction"],
+"limits": {
+  "maxBatchSize": 10,
+  "getEvents": { "maxLimit": 10000 },
+  "getLedgers": { "maxLimit": 20 },
+  "getTransactions": { "maxLimit": 200 },
+  "queryEvents": { "termBudget": 15, "maxFilters": 256, "maxLimit": 1000 }
+},
+"retention": { "keeps": "all", "fromLedger": 2 }
+```
+
+An SDK can use one `getVersionInfo` call to find if the node serves `queryEvents`, and to check a request against the limits before it sends the request. The current RPC does not return `methods`. If `methods` is not in the response, call the method and look for the JSON-RPC error `-32601` (method not found).
+
+#### Retention
+
+`retention` has these fields:
+
+| Field | Type | Description | Configuration |
+|---|---|---|---|
+| `keeps` | string | `"all"` when the node keeps every ledger from `fromLedger`. `"latest"` when the node keeps the most recent `ledgers` ledgers. | `[retention].retention_chunks`: `0` gives `"all"` |
+| `fromLedger` | number | The first ledger that the node keeps. Only when `keeps` is `"all"`. | `[retention].earliest_ledger`, as fixed at first start |
+| `ledgers` | number | The minimum number of ledgers that the node keeps: `retention_chunks` × 10,000. The node can keep up to one chunk more. Only when `keeps` is `"latest"`. | `[retention].retention_chunks` |
+
+`retention` gives the ledgers that the node keeps after it has all the data that its configuration sets. During backfill, or before the window is full, the node has fewer ledgers. `getHealth` gives the ledgers that the node has now.
 
 ## 2. New method: queryEvents
 
@@ -51,7 +100,7 @@ Rules:
 - With `desc` and no `maxLedger`, the top edge is the latest ledger at query start, so every page shares it.
 - Descending reverses the full event order, including events inside one ledger.
 - An omitted topic position matches any value. A set position must match exactly. There is no topic-count matching, so events with more than four topics still match on positions 0 to 3.
-- The list may hold at most 256 filters. Each distinct field value counts against the term budget of 15, however many filters reuse it.
+- The list may hold at most 256 filters by default. The operator can change this limit with `max_filters` under `[service.methods.queryEvents]`. Each distinct field value counts against the term budget of 15, however many filters reuse it.
 - An empty `filters` list, a `topic4` field, or a `limit` outside 1 to 1000 returns `invalid_params`.
 
 ### Result

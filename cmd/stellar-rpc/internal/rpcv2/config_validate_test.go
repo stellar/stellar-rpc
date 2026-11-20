@@ -219,6 +219,11 @@ func TestValidateConfig_RejectsMalformedService(t *testing.T) {
 			"[service.methods.queryEvents].term_budget",
 		},
 		{
+			"zero max_filters",
+			func(c *config.Config) { c.Service.Methods.QueryEvents.MaxFilters = uintPtr(0) },
+			"[service.methods.queryEvents].max_filters",
+		},
+		{
 			"fee window above the cap",
 			func(c *config.Config) { c.Service.FeeStats.ClassicFeeWindowLedgers = uint32Ptr(1001) },
 			"classic_fee_window_ledgers",

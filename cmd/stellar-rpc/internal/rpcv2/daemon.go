@@ -297,7 +297,7 @@ func runDaemonWith(ctx context.Context, configPath string, opts daemonOptions) e
 			preflightGetter:   preflightPool,
 			feeWindows:        feeWindows,
 			networkPassphrase: core.networkPassphrase,
-			retentionWindow:   retention.RetentionWindow(),
+			retention:         retention,
 		})
 	}
 

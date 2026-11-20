@@ -11,6 +11,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 )
@@ -36,7 +37,7 @@ func TestServeReads_ServesAndDrainsOnCancel(t *testing.T) {
 		metrics:           observability.NopMetrics{},
 		feeWindows:        feewindow.NewFeeWindows(10, 10),
 		networkPassphrase: "test passphrase",
-		retentionWindow:   1,
+		retention:         geometry.NewRetention(0, 0),
 	})
 
 	var lc net.ListenConfig

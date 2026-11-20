@@ -40,13 +40,14 @@ type Limits struct {
 	MaxResponseBytes uint
 }
 
-// QueryEventsLimits adds the term budget. Only queryEvents has one: v1's own caps
-// bound a request's terms already, so a budget there could only reject
-// requests v1 accepts.
+// QueryEventsLimits adds the term budget and the filter cap. Only queryEvents
+// has a term budget: v1's own caps bound a request's terms already, so a
+// budget there could only reject requests v1 accepts.
 type QueryEventsLimits struct {
 	Limits
 
 	TermBudget uint32
+	MaxFilters protocol.MaxFilters
 }
 
 // NewQueryEventsHandler builds the queryEvents handler. It decodes the params itself,
@@ -225,26 +226,17 @@ func scanPage(
 func requestCursor(
 	limits QueryEventsLimits, req *protocol.QueryEventsRequest, oldest, latest uint32,
 ) (query.EventCursor, int, error) {
-	// Check the operator's limit first. req.Valid checks
-	// protocol.QueryEventsMaxLimit, and whichever check runs first is the number
-	// the error names.
+	if err := req.Valid(limits.MaxFilters, limits.MaxLimit); err != nil {
+		return query.EventCursor{}, 0, err
+	}
 	limit := limits.DefaultLimit
 	if req.Limit != nil {
-		if *req.Limit == 0 || *req.Limit > limits.MaxLimit {
-			return query.EventCursor{}, 0, &protocol.InvalidParamsError{
-				Message: fmt.Sprintf("limit must be between 1 and %d", limits.MaxLimit),
-				Data:    protocol.InvalidParamsErrorData{Reason: protocol.ErrorReasonInvalidParams},
-			}
-		}
 		limit = *req.Limit
 	}
 	// min makes the conversion provably safe. The suppression stays because
 	// CI's gosec still reports it; nolintlint is suppressed with it, because
 	// the newer gosec does not.
 	pageLimit := int(min(limit, math.MaxInt32)) //nolint:gosec,nolintlint
-	if err := req.Valid(protocol.QueryEventsDefaultMaxFilters); err != nil {
-		return query.EventCursor{}, 0, err
-	}
 	if req.Cursor != "" {
 		cursor, err := query.DecodeEventCursor(req.Cursor)
 		if err != nil {
@@ -252,6 +244,15 @@ func requestCursor(
 		}
 		if err := validateCursorFilters(cursor.Scope.Filters); err != nil {
 			return query.EventCursor{}, 0, err
+		}
+		// req.Valid counts filters only on a range query. A cursor is not
+		// signed, so a hand-built one could carry any number of them. The
+		// message must match the SDK's validRangeQuery.
+		if uint(len(cursor.Scope.Filters)) > uint(limits.MaxFilters) {
+			return query.EventCursor{}, 0, &protocol.InvalidParamsError{
+				Message: fmt.Sprintf("filters must contain 1 to %d filters", limits.MaxFilters),
+				Data:    protocol.InvalidParamsErrorData{Reason: protocol.ErrorReasonInvalidParams},
+			}
 		}
 		return *cursor, pageLimit, nil
 	}
