@@ -65,7 +65,7 @@ func testHandlerParams(t *testing.T, r *query.Registry) handlerParams {
 		transactionReader: adapters.NewTransactionReader("test passphrase", nil),
 		feeWindows:        feewindow.NewFeeWindows(10, 10),
 		networkPassphrase: "test passphrase",
-		retentionWindow:   1,
+		retention:         geometry.NewRetention(0, 0),
 	}
 }
 

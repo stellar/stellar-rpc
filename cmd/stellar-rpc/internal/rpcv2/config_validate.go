@@ -368,6 +368,9 @@ func validateQueryEvents(e config.QueryEventsMethodConfig) error {
 	if *e.TermBudget < 1 {
 		return errors.New("[service.methods.queryEvents].term_budget must be >= 1")
 	}
+	if *e.MaxFilters < 1 {
+		return errors.New("[service.methods.queryEvents].max_filters must be >= 1")
+	}
 	if *e.MaxItemsPerResponse > protocol.QueryEventsMaxLimit {
 		return fmt.Errorf("[service.methods.queryEvents].max_items_per_response (%d) cannot exceed %d",
 			*e.MaxItemsPerResponse, protocol.QueryEventsMaxLimit)

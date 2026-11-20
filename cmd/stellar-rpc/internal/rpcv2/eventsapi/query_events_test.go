@@ -33,6 +33,7 @@ func testLimits() QueryEventsLimits {
 			DefaultLimit: 100,
 		},
 		TermBudget: protocol.QueryEventsDefaultTermBudget,
+		MaxFilters: protocol.QueryEventsDefaultMaxFilters,
 	}
 }
 
@@ -364,6 +365,45 @@ func TestQueryEvents_WithoutAViewIsAnError(t *testing.T) {
 	require.ErrorAs(t, err, &jerr)
 	assert.Equal(t, jrpc2.InternalError, jerr.Code,
 		"a missing view is a server fault, not a client error")
+}
+
+// queryEvents rejects a request with more filters than the configured cap.
+func TestQueryEvents_FiltersOverTheOperatorCapAreRejected(t *testing.T) {
+	limits := testLimits()
+	limits.MaxFilters = 2
+	ctx, first := seedView(t)
+	filter := protocol.QueryEventsFilter{EventType: protocol.EventTypeContract}
+
+	_, err := queryEvents(ctx, limits, nil, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		MinLedger: first,
+		Filters:   []protocol.QueryEventsFilter{filter, filter},
+	})
+	require.NoError(t, err, "a request at the cap is served")
+
+	_, err = queryEvents(ctx, limits, nil, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		MinLedger: first,
+		Filters:   []protocol.QueryEventsFilter{filter, filter, filter},
+	})
+	require.Error(t, err)
+	requireErrorData(t, err, protocol.ErrorReasonInvalidParams, nil)
+	assert.Contains(t, err.Error(), "1 to 2 filters")
+
+	// One contract ID repeated is one index term, so only the cap stops it.
+	contractID := make([]byte, 32)
+	over := make([]event.Filter, 3)
+	for i := range over {
+		over[i] = event.Filter{ContractID: contractID}
+	}
+	top := first + 2
+	token, err := (&query.EventCursor{Scope: query.EventScope{
+		MinLedger: first, MaxLedger: &top, Filters: over,
+	}}).Encode()
+	require.NoError(t, err)
+
+	_, err = queryEvents(ctx, limits, nil, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{Cursor: token})
+	require.Error(t, err, "a cursor over the cap is rejected too")
+	requireErrorData(t, err, protocol.ErrorReasonInvalidParams, nil)
+	assert.Contains(t, err.Error(), "1 to 2 filters")
 }
 
 func TestQueryEvents_LimitOverTheOperatorCapIsRejected(t *testing.T) {

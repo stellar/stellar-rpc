@@ -209,6 +209,10 @@ type QueryEventsMethodConfig struct {
 	// up; over budget fails with the queryEvents invalid_params error. Must be
 	// >= 1: a zero budget would reject every filtered request.
 	TermBudget *uint `toml:"term_budget"`
+
+	// MaxFilters caps the filters list of one request; more fails with
+	// invalid_params. Must be >= 1.
+	MaxFilters *uint `toml:"max_filters"`
 }
 
 // HealthMethodConfig extends MethodConfig for getHealth with the staleness
@@ -490,6 +494,9 @@ const (
 	// (github.com/orgs/stellar/discussions/1872).
 	DefaultQueryEventsTermBudget uint = 15
 
+	// DefaultQueryEventsMaxFilters is protocol.QueryEventsDefaultMaxFilters.
+	DefaultQueryEventsMaxFilters uint = 256
+
 	// DefaultGetEventsV1MaxItemsPerResponse is v1's own page cap, matching
 	// the existing service's max-events-limit. The 1,000 above is the v2
 	// spec's constant; applying it to v1 would reject pages v1 serves.
@@ -716,6 +723,7 @@ func (cfg Config) WithDefaults() Config {
 	fillUint(&m.QueryEvents.MaxItemsPerResponse, DefaultQueryEventsMaxItemsPerResponse)
 	fillUint(&m.QueryEvents.DefaultItemsPerResponse, DefaultGetEventsDefaultItemsPerResponse)
 	fillUint(&m.QueryEvents.TermBudget, DefaultQueryEventsTermBudget)
+	fillUint(&m.QueryEvents.MaxFilters, DefaultQueryEventsMaxFilters)
 
 	queue(&m.GetFeeStats.QueueLimit, DefaultGetFeeStatsQueueLimit)
 	dur(&m.GetFeeStats.MaxExecutionDuration, DefaultMethodMaxExecutionDuration)
