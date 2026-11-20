@@ -21,6 +21,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/entrychange"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
@@ -109,8 +110,8 @@ func TestOpen_ValidatesInputs(t *testing.T) {
 
 func TestColumnFamilies_UnionIsNonColliding(t *testing.T) {
 	cfs := ColumnFamilies()
-	// 1 ledger CF + 3 events CFs + 1 txhash CF = 5.
-	require.Len(t, cfs, len(ledger.CFNames())+len(event.CFNames())+len(txhash.CFNames()))
+	// 1 ledger CF + 3 events CFs + 1 txhash CF + 1 entry change CF = 6.
+	require.Len(t, cfs, len(ledger.CFNames())+len(event.CFNames())+len(txhash.CFNames())+len(entrychange.CFNames()))
 	seen := map[string]bool{}
 	for _, cf := range cfs {
 		require.False(t, seen[cf], "CF name %q collides across facades", cf)

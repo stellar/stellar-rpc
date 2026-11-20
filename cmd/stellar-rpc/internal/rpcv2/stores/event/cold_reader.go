@@ -400,7 +400,17 @@ func (c *ColdReader) LookupKeys(
 	if err != nil {
 		return nil, Coverage{}, err
 	}
+	return lookupIndexKeys(ctx, c.chunkID.String(), c.index, mphf, layout, keys, window)
+}
 
+// lookupIndexKeys is LookupKeys over one opened index pair, shared by
+// ColdReader and ColdIndexReader. label names the index in errors.
+//
+//nolint:cyclop // resolve, read and assemble in one pass
+func lookupIndexKeys(
+	ctx context.Context, label string, index *stores.PackReader, mphf *mphf, layout indexLayout,
+	keys []TermKey, window IDRange,
+) ([]*roaring.Bitmap, Coverage, error) {
 	lo, hi, splitCovered := layout.slabsIn(window)
 
 	results := make([]*roaring.Bitmap, len(keys))
@@ -413,7 +423,7 @@ func (c *ColdReader) LookupKeys(
 			if errors.Is(hit.err, ErrKeyNotFound) {
 				continue // result[i] stays nil
 			}
-			return nil, Coverage{}, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, hit.err)
+			return nil, Coverage{}, fmt.Errorf("events: LookupKeys MPHF for %s: %w", label, hit.err)
 		}
 		pos, rowFP, split := layout.locate(hit.slot)
 		if !split {
@@ -432,8 +442,8 @@ func (c *ColdReader) LookupKeys(
 		}
 	}
 
-	if err := readIndexEntries(ctx, c.index, reads); err != nil {
-		return nil, Coverage{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
+	if err := readIndexEntries(ctx, index, reads); err != nil {
+		return nil, Coverage{}, fmt.Errorf("events: LookupKeys read for %s: %w", label, err)
 	}
 	// reads is in position order, so each Or appends a split term's next
 	// slab; with copy-on-write on both sides it takes over the slab's

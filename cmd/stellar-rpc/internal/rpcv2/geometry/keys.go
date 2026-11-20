@@ -52,12 +52,14 @@ const (
 	// KindTxHash is the per-chunk sorted txhash run (.bin). Transient — removed
 	// at index finalization.
 	KindTxHash Kind = "txhash"
+	// KindEntryChanges is the ledger entry change index (two files per chunk).
+	KindEntryChanges Kind = "entrychanges"
 )
 
 // allKinds is the canonical iteration order for per-chunk artifact kinds.
 //
 //nolint:gochecknoglobals // immutable kind registry, single source of truth
-var allKinds = []Kind{KindLedgers, KindEvents, KindTxHash}
+var allKinds = []Kind{KindLedgers, KindEvents, KindTxHash, KindEntryChanges}
 
 // AllKinds returns the per-chunk artifact kinds in canonical order.
 func AllKinds() []Kind { return append([]Kind(nil), allKinds...) }

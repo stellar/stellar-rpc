@@ -27,7 +27,7 @@ func TestLifecycleLoop_RunsTickPerNotifyThenStopsOnCtx(t *testing.T) {
 	// fully frozen and folded into its (terminal, cpi=1) window, with a leftover
 	// "ready" hot DB on disk. The plan stage is a no-op; the discard scan retires
 	// chunk 0's hot DB. A live chunk 1 keeps chunk 0 below the partition.
-	freezeKinds(t, cat, 0, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+	freezeKinds(t, cat, 0, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges, geometry.KindTxHash)
 	freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(0), 0, 0) // terminal coverage of chunk 0
 	makeReadyHotDirNoData(t, cat, 0)
 	live := openLiveHotDB(t, cat, 1)
@@ -62,7 +62,7 @@ func TestLifecycleLoop_DrainsToMostRecent(t *testing.T) {
 	cfg := lifecycleTestConfig(t, cat, 0)
 
 	for c := chunk.ID(0); c <= 1; c++ {
-		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges, geometry.KindTxHash)
 		freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(c), c, c)
 		makeReadyHotDirNoData(t, cat, c)
 	}

@@ -24,7 +24,7 @@ func TestReaderRetention_WindowStraddlingFloorServesInRangeNotBelow(t *testing.T
 	// Window 0 was finalized at terminal coverage [0,3] when the floor sat at
 	// genesis. Its frozen .idx hashes chunks 0..3 — a static, stale-lo artifact.
 	for c := chunk.ID(0); c <= 3; c++ {
-		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents)
+		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges)
 	}
 	freezeCoverage(t, cat, 0, 0, 3)
 	fk, ok, err := cat.FrozenTxHashIndex(0)

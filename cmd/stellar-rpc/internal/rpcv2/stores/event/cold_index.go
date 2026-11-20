@@ -91,10 +91,17 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // same secret routes the same keys to the same blocks.
 func WriteColdIndex(
 	ctx context.Context, chunkID chunk.ID, bitmaps Bitmaps, bucketDir string, secret [stores.SecretLen]byte,
-) (err error) {
-	indexPackPath := filepath.Join(bucketDir, IndexPackName(chunkID))
-	indexHashPath := filepath.Join(bucketDir, IndexHashName(chunkID))
+) error {
+	return WriteColdIndexFiles(ctx, bitmaps,
+		filepath.Join(bucketDir, IndexPackName(chunkID)), filepath.Join(bucketDir, IndexHashName(chunkID)), secret)
+}
 
+// WriteColdIndexFiles is WriteColdIndex at explicit paths, for index families
+// other than events that reuse the term → bitmap format (read back with
+// OpenColdIndexReader).
+func WriteColdIndexFiles(
+	ctx context.Context, bitmaps Bitmaps, indexPackPath, indexHashPath string, secret [stores.SecretLen]byte,
+) (err error) {
 	// On any error path past this point (including a partial write
 	// from buildMPHF itself), remove the orphaned index.hash. Joined
 	// into the returned error so cleanup failures surface to callers.

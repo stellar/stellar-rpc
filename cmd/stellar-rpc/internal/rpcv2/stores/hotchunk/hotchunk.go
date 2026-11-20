@@ -27,6 +27,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/entrychange"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
@@ -47,6 +48,8 @@ type DB struct {
 	ledger *ledger.HotStore
 	txhash *txhash.HotStore
 	events *event.HotStore
+
+	entryChanges *entrychange.HotStore
 }
 
 // ColumnFamilies is the full CF list for the shared per-chunk DB (ledger + 3
@@ -54,7 +57,7 @@ type DB struct {
 // callers (including tests) never hand-stitch the union. Names are non-colliding
 // across the facades.
 func ColumnFamilies() []string {
-	return slices.Concat(ledger.CFNames(), event.CFNames(), txhash.CFNames())
+	return slices.Concat(ledger.CFNames(), event.CFNames(), txhash.CFNames(), entrychange.CFNames())
 }
 
 // dbTuning is the DB-wide half of the shared store's configuration, owned
@@ -185,10 +188,11 @@ func open(path string, chunkID chunk.ID, logger *supportlog.Entry, readOnly, mus
 	}
 
 	db := &DB{
-		store:   store,
-		chunkID: chunkID,
-		ledger:  ledger.NewWithStore(store),
-		txhash:  txhash.NewWithStore(store),
+		store:        store,
+		chunkID:      chunkID,
+		ledger:       ledger.NewWithStore(store),
+		txhash:       txhash.NewWithStore(store),
+		entryChanges: entrychange.NewWithStore(store),
 	}
 	// A read-only open is a ledgers-only freeze/probe view (see OpenReadOnly): it
 	// never reads events, so skip composing the events facade and its unconditional
@@ -217,6 +221,9 @@ func (d *DB) Ledgers() *ledger.HotStore { return d.ledger }
 // side feeds the ingestion loop; the read side probes it via
 // query.ReadView.HotTxHashIndexes.
 func (d *DB) Txhash() *txhash.HotStore { return d.txhash }
+
+// EntryChanges returns the ledger entry change index over the shared store.
+func (d *DB) EntryChanges() *entrychange.HotStore { return d.entryChanges }
 
 // Events returns the events read/write facade over the shared store. Writes feed
 // ingestion; the read side serves hot events through it (query.ReadView.Events).
@@ -388,6 +395,12 @@ func (d *DB) IngestLedger(
 		return rep, fmt.Errorf("ledger close time seq %d: %w", seq, err)
 	}
 	rep.CloseTime = closedAt
+	changeTerms, err := ledgerChangeTerms(lcmView)
+	if err != nil {
+		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
+		rep.Failed = PhaseExtract
+		return rep, fmt.Errorf("ledger entry changes seq %d: %w", seq, err)
+	}
 	// A pre-Soroban ledger yields zero payloads, no error.
 	payloads, err := event.PayloadsFromLedgerEvents(txParts, seq, closedAt)
 	if err != nil {
@@ -419,6 +432,7 @@ func (d *DB) IngestLedger(
 			failed = PhaseLedgers
 			return fmt.Errorf("queue ledger seq %d: %w", seq, err)
 		}
+		d.entryChanges.AddLedgerToBatch(b, seq, changeTerms)
 		rep.Phases[PhaseLedgers].Dur = time.Since(ls)
 
 		ts := time.Now()
@@ -514,4 +528,23 @@ func (st *hotLedgerStream) RawLedgers(
 			expected++
 		}
 	}
+}
+
+// ledgerChangeTerms returns the entry change index terms for a ledger: one
+// per ledger key it changes. It decodes the whole ledger, unlike the other
+// products, which read the zero-copy view.
+func ledgerChangeTerms(lcmView xdr.LedgerCloseMetaView) ([]event.TermKey, error) {
+	var lcm xdr.LedgerCloseMeta
+	if err := lcm.UnmarshalBinary(lcmView); err != nil {
+		return nil, err
+	}
+	keys, err := entrychange.ChangedKeys(lcm)
+	if err != nil {
+		return nil, err
+	}
+	terms := make([]event.TermKey, len(keys))
+	for i, k := range keys {
+		terms[i] = entrychange.TermKey(k)
+	}
+	return terms, nil
 }

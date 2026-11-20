@@ -56,7 +56,7 @@ func eligibleDiscardChunks(cat *catalog.Catalog, floor chunk.ID, lastChunk chunk
 // key is demoted/swept, so regenerating the .bin would orphan it).
 func pendingArtifacts(c chunk.ID, cat *catalog.Catalog, covers bool) (catalog.ArtifactSet, error) {
 	var need catalog.ArtifactSet
-	for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents} {
+	for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges} {
 		state, err := cat.State(c, kind)
 		if err != nil {
 			return need, err

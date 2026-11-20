@@ -57,6 +57,8 @@ type ColdDirs struct {
 	LedgerPack string
 	TxhashBin  string
 	Events     event.ColdDirs
+	// EntryChanges is the chunk's entry change index bucket dir.
+	EntryChanges string
 }
 
 // WriteColdChunk materializes ONE chunk's cold artifacts at the resolved paths
