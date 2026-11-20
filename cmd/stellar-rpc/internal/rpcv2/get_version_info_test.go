@@ -2,9 +2,7 @@ package rpcv2
 
 import (
 	"encoding/json"
-	"maps"
 	"net/http/httptest"
-	"slices"
 	"strings"
 	"testing"
 
@@ -48,11 +46,11 @@ func TestJSONRPCHandler_GetVersionInfoAdvertisesMethodsAndLimits(t *testing.T) {
 
 	var result protocol.GetVersionInfoResponse
 	require.NoError(t, json.Unmarshal(out.Result, &result))
-	// limitsByMethod must name exactly the served methods, or Apply panics.
-	want := slices.Sorted(maps.Keys(limitsByMethod(cfg.Service.Methods)))
-	assert.Equal(t, want, result.Methods)
-	assert.Contains(t, result.Methods, protocol.QueryEventsMethodName)
-	assert.Contains(t, result.Methods, protocol.GetVersionInfoMethodName)
+	assert.Equal(t, []string{
+		"getEvents", "getFeeStats", "getHealth", "getLatestLedger", "getLedgerEntries", "getLedgers",
+		"getNetwork", "getTransaction", "getTransactions", "getVersionInfo", "queryEvents",
+		"sendTransaction", "simulateTransaction",
+	}, result.Methods)
 	assert.Equal(t, &protocol.VersionInfoLimits{
 		MaxBatchSize:    4,
 		GetEvents:       &protocol.PageLimits{MaxLimit: 30},

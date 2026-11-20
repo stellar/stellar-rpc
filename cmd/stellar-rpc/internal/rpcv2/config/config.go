@@ -11,6 +11,7 @@ import (
 	"github.com/pelletier/go-toml"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/backfill"
@@ -490,12 +491,8 @@ const (
 	DefaultQueryEventsMaxItemsPerResponse   uint = 1000
 	DefaultGetEventsDefaultItemsPerResponse uint = 100
 
-	// DefaultQueryEventsTermBudget is the getEvents v2 proposal's default
-	// (github.com/orgs/stellar/discussions/1872).
-	DefaultQueryEventsTermBudget uint = 15
-
-	// DefaultQueryEventsMaxFilters is protocol.QueryEventsDefaultMaxFilters.
-	DefaultQueryEventsMaxFilters uint = 256
+	DefaultQueryEventsTermBudget uint = protocol.QueryEventsDefaultTermBudget
+	DefaultQueryEventsMaxFilters      = uint(protocol.QueryEventsDefaultMaxFilters)
 
 	// DefaultGetEventsV1MaxItemsPerResponse is v1's own page cap, matching
 	// the existing service's max-events-limit. The 1,000 above is the v2

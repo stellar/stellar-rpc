@@ -395,11 +395,19 @@ func TestQueryEvents_FiltersOverTheOperatorCapAreRejected(t *testing.T) {
 		over[i] = event.Filter{ContractID: contractID}
 	}
 	top := first + 2
-	token, err := (&query.EventCursor{Scope: query.EventScope{
-		MinLedger: first, MaxLedger: &top, Filters: over,
-	}}).Encode()
-	require.NoError(t, err)
+	cursorWith := func(filters []event.Filter) string {
+		token, err := (&query.EventCursor{Scope: query.EventScope{
+			MinLedger: first, MaxLedger: &top, Filters: filters,
+		}}).Encode()
+		require.NoError(t, err)
+		return token
+	}
 
+	_, err = queryEvents(ctx, limits, nil, rpcv2test.SilentLogger(),
+		&protocol.QueryEventsRequest{Cursor: cursorWith(over[:2])})
+	require.NoError(t, err, "a cursor at the cap is served")
+
+	token := cursorWith(over)
 	_, err = queryEvents(ctx, limits, nil, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{Cursor: token})
 	require.Error(t, err, "a cursor over the cap is rejected too")
 	requireErrorData(t, err, protocol.ErrorReasonInvalidParams, nil)

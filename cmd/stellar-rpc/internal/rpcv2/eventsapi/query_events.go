@@ -246,8 +246,9 @@ func requestCursor(
 			return query.EventCursor{}, 0, err
 		}
 		// req.Valid counts filters only on a range query. A cursor is not
-		// signed, so a hand-built one could carry any number of them.
-		if len(cursor.Scope.Filters) > int(limits.MaxFilters) { //nolint:gosec // a configured cap fits an int
+		// signed, so a hand-built one could carry any number of them. The
+		// message must match the SDK's validRangeQuery.
+		if uint(len(cursor.Scope.Filters)) > uint(limits.MaxFilters) {
 			return query.EventCursor{}, 0, &protocol.InvalidParamsError{
 				Message: fmt.Sprintf("filters must contain 1 to %d filters", limits.MaxFilters),
 				Data:    protocol.InvalidParamsErrorData{Reason: protocol.ErrorReasonInvalidParams},
