@@ -21,7 +21,7 @@ import (
 // the report. Covers both sink interfaces (ingest.MetricSink and the
 // observability.Metrics signals RunBackfill emits), the zero-duration
 // exclusion rule, row suppression, file suppression (no per-type txhash or
-// events stage signals → no txhash.csv / events.csv), and the fixed row
+// events stage signals → no txhashes.csv / events.csv), and the fixed row
 // orders.
 func TestCSVSinkExactOutput(t *testing.T) {
 	sink := newCSVSink()
@@ -45,7 +45,7 @@ func TestCSVSinkExactOutput(t *testing.T) {
 		sink.ColdExtract(40, 4, nil)
 		sink.IngestStage("ledgers", "write", 5, 1)
 		sink.ColdIngest("events", 50, 20, nil)
-		sink.ColdChunkTotal(200)
+		sink.ColdChunkTotal(200, nil)
 		sink.Rebuild(40)
 		sink.HotPhase(hotchunk.PhaseCommit, 50, 0, nil)
 		sink.HotPhase(hotchunk.PhaseCommit, 60, 3, nil)
@@ -77,12 +77,12 @@ func TestCSVSinkExactOutput(t *testing.T) {
 		require.NoError(t, rerr, name)
 		assert.Equal(t, content, string(got), name)
 	}
-	assert.NoFileExists(t, filepath.Join(outDir, "txhash.csv"))
+	assert.NoFileExists(t, filepath.Join(outDir, "txhashes.csv"))
 	assert.NoFileExists(t, filepath.Join(outDir, "events.csv"))
 }
 
 // TestCSVSinkHotIngestTotal drives the ingest_total reconstruction directly:
-// two complete per-ledger HotPhase bursts (extract→ledgers→txhash→events→
+// two complete per-ledger HotPhase bursts (extract→ledger→txhashes→events→
 // commit→apply) plus one FAILED burst (extract, then a phase carrying an error,
 // no apply). Only PhaseApply — the terminal, success-only phase — emits an
 // ingest_total sample, so the failed burst contributes nothing; each complete

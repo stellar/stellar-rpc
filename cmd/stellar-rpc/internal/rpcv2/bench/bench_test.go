@@ -130,7 +130,7 @@ func TestRunColdFromPack(t *testing.T) {
 	// Sub-tick (zero-duration) samples are excluded from n / n_items, so
 	// per-ledger events rows only bound loosely; the finalize rows are
 	// per-chunk and deterministic (txhash finalize items = total hashes).
-	txhash := readCSV(t, filepath.Join(csvDir, "txhash.csv"))
+	txhash := readCSV(t, filepath.Join(csvDir, "txhashes.csv"))
 	require.Contains(t, txhash, "finalize")
 	assert.EqualValues(t, 1, txhash["finalize"]["n"])
 	assert.EqualValues(t, txLedgers, txhash["finalize"]["n_items"])
@@ -146,13 +146,13 @@ func TestRunColdFromPack(t *testing.T) {
 	// index build the range plans.
 	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
 	for _, name := range []string{
-		"backfill_wall", "index_rebuild", "chunk_total", "ledgers_total", "txhash_total", "events_total",
+		"backfill_wall", "index_rebuild", "chunk_total", "ledgers_total", "txhashes_total", "events_total",
 	} {
 		require.Contains(t, driver, name)
 		assert.EqualValues(t, 1, driver[name]["n"], name)
 	}
 	assert.EqualValues(t, chunk.LedgersPerChunk, driver["ledgers_total"]["n_items"])
-	assert.EqualValues(t, txLedgers, driver["txhash_total"]["n_items"])
+	assert.EqualValues(t, txLedgers, driver["txhashes_total"]["n_items"])
 	assert.EqualValues(t, txLedgers, driver["events_total"]["n_items"])
 
 	// The shared per-ledger ExtractLedgerTxParts walk is ledger-scoped (no data

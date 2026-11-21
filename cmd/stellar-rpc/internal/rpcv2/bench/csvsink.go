@@ -41,7 +41,7 @@ const (
 // that drifts is still reported, after the known ones (see withUnknown).
 const (
 	coldTypeLedgers = "ledgers"
-	coldTypeTxhash  = "txhash"
+	coldTypeTxhash  = "txhashes"
 	coldTypeEvents  = "events"
 
 	coldStageTermIndex = "term_index"
@@ -174,13 +174,16 @@ func (s *csvSink) HotPhase(phase hotchunk.Phase, d time.Duration, items int, _ e
 	}
 }
 
+// HotLedger is dropped: HotPhase already derives the per-ledger ingest_total.
+func (*csvSink) HotLedger(time.Duration) {}
+
 // ColdIngest records one cold ingester's per-chunk total.
 func (s *csvSink) ColdIngest(dataType string, d time.Duration, items int, _ error) {
 	s.observe(fileDriver, dataType+driverTotalSuffix, d, items)
 }
 
 // ColdChunkTotal records the per-chunk aggregate wall-clock.
-func (s *csvSink) ColdChunkTotal(d time.Duration) {
+func (s *csvSink) ColdChunkTotal(d time.Duration, _ error) {
 	s.observe(fileDriver, driverChunkTotal, d, 0)
 }
 
