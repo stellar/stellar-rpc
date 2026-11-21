@@ -705,3 +705,13 @@ func readLedgerRaw(r interface {
 	})
 	return out, err
 }
+
+// The phase names are metric label values: a rename breaks dashboards and
+// alerts, so the names are pinned here in run order.
+func TestPhaseString_MetricLabels(t *testing.T) {
+	want := [NumPhases]string{"extract", "ledger", "txhashes", "events", "commit", "apply"}
+	for p := range NumPhases {
+		assert.Equal(t, want[p], p.String(), "phase %d", p)
+	}
+	assert.Equal(t, "unknown", NumPhases.String())
+}

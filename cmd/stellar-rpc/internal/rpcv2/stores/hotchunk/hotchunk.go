@@ -261,7 +261,8 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 // Phase enumerates the ordered phases of one IngestLedger call. It is a typed
 // index into a fixed-size array (LedgerReport.Phases), so an out-of-table phase is
 // unrepresentable — no string label to mistype and no map lookup to nil-panic in a
-// sink. The phases partition the per-ledger wall-clock:
+// sink. The phases partition the IngestLedger call (the fee append that
+// HotService.Ingest runs after it is in no phase):
 //   - PhaseExtract: the product reads over the caller's shared
 //     ExtractLedgerTxParts walk (txhash-entry build, events extraction, event
 //     shaping — all pre-batch, so every decode failure lands here by
@@ -286,15 +287,17 @@ const (
 	NumPhases
 )
 
-// String is the metric label for a phase.
+// String is the metric label for a phase. A phase runs once per ledger, so the
+// name counts what one ledger holds: one ledger, many tx hashes, many events.
+// (The data_type label counts across ledgers, so it says "ledgers".)
 func (p Phase) String() string {
 	switch p {
 	case PhaseExtract:
 		return "extract"
 	case PhaseLedgers:
-		return "ledgers"
+		return "ledger"
 	case PhaseTxhash:
-		return "txhash"
+		return "txhashes"
 	case PhaseEvents:
 		return "events"
 	case PhaseCommit:

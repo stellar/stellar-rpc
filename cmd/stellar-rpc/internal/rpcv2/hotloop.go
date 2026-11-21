@@ -186,7 +186,7 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// One atomic synced WriteBatch across all hot CFs (via hotDB.IngestLedger).
 		view := xdr.LedgerCloseMetaView(raw)
 		start := time.Now()
-		closeUnix, ierr := hotService.Ingest(seq, view)
+		res, ierr := hotService.Ingest(seq, view)
 		if ierr != nil {
 			return fmt.Errorf("ingest ledger %d: %w", seq, ierr)
 		}
@@ -200,9 +200,10 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 		// returning, so a read view acquired after this can serve seq from
 		// every hot store. This one write carries the sequence and its close
 		// time, so getLedgerRange never point-reads the tip.
-		cfg.Registry.SetLatestLedger(seq, query.CloseTimeAt(closeUnix))
+		cfg.Registry.SetLatestLedger(seq, query.CloseTimeAt(res.CloseTime))
 		// One line per ledger at network pace. A replay that commits many a
-		// second (catch-up after downtime, a bench) gets one a second instead.
+		// second (catch-up after downtime, a bench) gets one a second instead;
+		// its txhashes and events counts are of the logged ledger only.
 		if now := time.Now(); now.Sub(lastLogged) >= time.Second {
 			lastLogged = now
 			c := chunk.IDFromLedger(seq)
@@ -210,8 +211,10 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 				"ledger":          seq,
 				"chunk":           c.String(),
 				"ledger_in_chunk": seq - c.FirstLedger() + 1,
+				"txhashes":        res.Txhashes,
+				"events":          res.Events,
 				"ingest_took":     now.Sub(start).Round(time.Millisecond).String(),
-				"behind":          now.Sub(time.Unix(closeUnix, 0)).Round(time.Second).String(),
+				"behind":          now.Sub(time.Unix(res.CloseTime, 0)).Round(time.Second).String(),
 			}).Info("ledger ingested")
 		}
 
