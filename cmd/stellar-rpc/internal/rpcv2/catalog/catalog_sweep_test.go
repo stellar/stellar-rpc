@@ -52,23 +52,25 @@ func TestSweepChunkArtifacts(t *testing.T) {
 	}
 }
 
-// A build that crashed after spilling index runs leaves the runs directory
-// beside the "freezing" key; the sweep removes it with the key.
+// A build that crashed after spilling runs leaves the runs directory beside
+// the "freezing" key; the sweep removes it with the key.
 func TestSweepChunkArtifactsRemovesScratch(t *testing.T) {
-	cat, _ := testCatalog(t)
-	_, scratch := cat.layout.ChunkPaths(4, geometry.KindEvents)
-	runs := scratch[0]
-	require.NoError(t, os.MkdirAll(runs, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(runs, "runs"), []byte("run"), 0o600))
-	require.NoError(t, cat.MarkChunkFreezing(4, geometry.KindEvents))
+	for _, kind := range []geometry.Kind{geometry.KindEvents, geometry.KindTxHash} {
+		cat, _ := testCatalog(t)
+		_, scratch := cat.layout.ChunkPaths(4, kind)
+		runs := scratch[0]
+		require.NoError(t, os.MkdirAll(runs, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(runs, "runs"), []byte("run"), 0o600))
+		require.NoError(t, cat.MarkChunkFreezing(4, kind))
 
-	require.NoError(t, cat.SweepChunkArtifacts([]ArtifactRef{
-		{Chunk: 4, Kind: geometry.KindEvents, State: geometry.StateFreezing},
-	}))
-	require.NoDirExists(t, runs)
-	s, err := cat.State(4, geometry.KindEvents)
-	require.NoError(t, err)
-	require.Equal(t, geometry.State(""), s)
+		require.NoError(t, cat.SweepChunkArtifacts([]ArtifactRef{
+			{Chunk: 4, Kind: kind, State: geometry.StateFreezing},
+		}))
+		require.NoDirExists(t, runs, kind)
+		s, err := cat.State(4, kind)
+		require.NoError(t, err)
+		require.Equal(t, geometry.State(""), s)
+	}
 }
 
 func TestSweepChunkArtifactsIdempotentOnMissingFiles(t *testing.T) {

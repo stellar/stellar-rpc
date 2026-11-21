@@ -77,3 +77,12 @@ func (l TxHashIndexLayout) LastChunk(id TxHashIndexID) chunk.ID {
 func (l TxHashIndexLayout) IsTerminalCoverage(cov TxHashIndexCoverage) bool {
 	return cov.Hi == l.LastChunk(cov.Index)
 }
+
+func (l TxHashIndexLayout) ColdMetadata(catalogSecret [32]byte, cov TxHashIndexCoverage) txhash.ColdMetadata {
+	return txhash.ColdMetadata{
+		MinLedger:    l.FirstChunk(cov.Index).FirstLedger(),
+		FirstCovered: cov.Lo.FirstLedger(),
+		MaxLedger:    cov.Hi.LastLedger(),
+		Secret:       txhash.ColdIndexSecret(catalogSecret[:], uint32(cov.Index)),
+	}
+}

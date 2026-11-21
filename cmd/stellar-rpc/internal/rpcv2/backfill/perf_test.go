@@ -12,17 +12,16 @@ package backfill
 //   - Format identity. buildTxhashIndex (the streaming rebuild) and a direct
 //     txhash.BuildColdIndex over the SAME .bin inputs produce a byte-identical
 //     .idx — same MPHF structure, same 3-byte payload, same 1-byte fingerprint,
-//     same [MinLedger, MaxLedger] metadata. The streaming path adds catalog
-//     bookkeeping around the build; it must not perturb the artifact.
+//     same payload base and [MinLedger, MaxLedger] metadata. The streaming path
+//     adds catalog bookkeeping around the build; it must not perturb the
+//     artifact.
 //
-//   - On-disk format pins. The .bin inputs match gettransaction §6.1
-//     (uint64-LE count header, 20-byte [16-key|4-seq-LE] entries) and the .idx
-//     matches §6.2 (16-byte routing key, 3-byte payload offset from MinLedger,
-//     1-byte fingerprint), read back through the real reader.
+//   - On-disk format pin. The .idx matches gettransaction §6.2 (16-byte
+//     routing key, 3-byte payload offset from the payload base, 1-byte
+//     fingerprint), read back through the real reader.
 
 import (
 	"context"
-	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,7 +31,6 @@ import (
 	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
@@ -43,7 +41,7 @@ import (
 
 // TestStreamingRebuild_ByteIdenticalToColdPath is the heart of Issue 20. It
 // freezes a set of per-chunk .bin runs through the one-write protocol (the real
-// txhash.WriteColdBin codec), then builds the SAME coverage two ways:
+// sorted-file writer), then builds the SAME coverage two ways:
 //
 //  1. the streaming rebuild — buildTxhashIndex, which the daemon's executor
 //     drives on every boundary (build.go); and
@@ -59,17 +57,17 @@ func TestStreamingRebuild_ByteIdenticalToColdPath(t *testing.T) {
 	cat, _ := smallTxHashIndexCatalog(t, 4) // window 0 = chunks [0,3]
 	cfg := testBuildConfig(cat)
 
-	// Spread entries across several chunks so the build genuinely k-way merges
-	// the runs (not a single trivial input).
+	// Spread entries across several chunks so the build reads several files
+	// (not a single trivial input).
 	entriesByChunk := map[chunk.ID][]txEntry{
 		0: {{hashAt(1), seqIn(0, 5)}, {hashAt(2), seqIn(0, 9000)}},
 		1: {{hashAt(3), seqIn(1, 1)}, {hashAt(4), seqIn(1, 4321)}},
 		2: {{hashAt(5), seqIn(2, 77)}},
 	}
-	var inputs []string
+	var inputs []txhash.ColdBinInput
 	for c := chunk.ID(0); c <= 2; c++ {
 		freezeChunkBin(t, cat, c, entriesByChunk[c])
-		inputs = append(inputs, cat.Layout().TxHashBinPath(c))
+		inputs = append(inputs, txhash.ColdBinInput{Path: cat.Layout().TxHashBinPath(c), Chunk: c})
 	}
 
 	// (1) The streaming rebuild. Non-terminal coverage [0,2] (hi 2 < window-last
@@ -81,14 +79,16 @@ func TestStreamingRebuild_ByteIdenticalToColdPath(t *testing.T) {
 	streamingIdx := cat.Layout().TxHashIndexFilePath(frozen)
 
 	// (2) The merged cold path, over the SAME .bin inputs, with the SAME
-	// MinLedger/MaxLedger anchor (lo.FirstLedger, hi.LastLedger, window 0 —
-	// build.go step 3). Both paths adopt the same secret from the .bin
-	// headers, so the bytes must still match.
-	minLedger := chunk.ID(0).FirstLedger()
-	maxLedger := chunk.ID(2).LastLedger()
+	// MinLedger/MaxLedger coverage (lo.FirstLedger, hi.LastLedger, window 0 —
+	// build.go step 3). Both paths key with the secret the catalog derives for
+	// window 0 and count from the same payload base, so the bytes must still
+	// match.
+	meta := txhash.ColdMetadata{
+		MinLedger: chunk.ID(0).FirstLedger(), FirstCovered: chunk.ID(0).FirstLedger(), MaxLedger: chunk.ID(2).LastLedger(),
+		Secret: chunkSecret(cat, 0),
+	}
 	directIdx := filepath.Join(t.TempDir(), "direct.idx")
-	require.NoError(t, txhash.BuildColdIndex(
-		context.Background(), inputs, directIdx, minLedger, maxLedger))
+	require.NoError(t, txhash.BuildColdIndex(context.Background(), inputs, directIdx, meta))
 
 	streamingBytes, err := os.ReadFile(streamingIdx)
 	require.NoError(t, err)
@@ -101,67 +101,15 @@ func TestStreamingRebuild_ByteIdenticalToColdPath(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// On-disk format pins: §6.1 (.bin) and §6.2 (.idx).
+// On-disk format pin: §6.2 (.idx).
 // ---------------------------------------------------------------------------
-
-// TestStreamingBin_MatchesSpecFormat asserts the .bin a frozen chunk leaves on
-// disk matches gettransaction §6.1: the "SBIN" magic-and-version prelude, a
-// uint64-LE entry-count, the 16-byte index secret the keys were blinded with,
-// then 20-byte [16-byte key | 4-byte LE seq] entries. freezeChunkBin uses the
-// real txhash.WriteColdBin, so this is the producer's actual on-disk contract.
-func TestStreamingBin_MatchesSpecFormat(t *testing.T) {
-	cat, _ := smallTxHashIndexCatalog(t, 4)
-
-	e0 := txEntry{hashAt(11), seqIn(0, 5)}
-	e1 := txEntry{hashAt(12), seqIn(0, 9999)}
-	freezeChunkBin(t, cat, 0, []txEntry{e0, e1})
-
-	raw, err := os.ReadFile(cat.Layout().TxHashBinPath(0))
-	require.NoError(t, err)
-
-	// §6.1: 32-byte header (8-byte magic/version prelude + 8-byte uint64-LE
-	// count + 16-byte index secret) + N * 20-byte entries.
-	const (
-		preludeW  = 8                // magic "SBIN" + version + reserved
-		countW    = 8                // uint64-LE entry count
-		secretW   = stores.SecretLen // index secret the keys were blinded with
-		hdrSize   = preludeW + countW + secretW
-		keyW      = 16 // streamhash.MinKeySize
-		seqW      = 4
-		entryW    = keyW + seqW // 20 bytes exactly
-		wantCount = 2
-	)
-	require.Equal(t, txhash.ColdKeySize, keyW, "spec pins the .bin key to 16 bytes")
-	require.Equal(t, streamhash.MinKeySize, keyW, "16-byte key == streamhash routing-key width")
-	require.Len(t, raw, hdrSize+wantCount*entryW, "header + 20-byte entries")
-
-	require.Equal(t, []byte("SBIN"), raw[:4], "magic in on-disk byte order")
-	require.Equal(t, byte(1), raw[4], ".bin format version")
-	count := binary.LittleEndian.Uint64(raw[preludeW : preludeW+countW])
-	require.Equal(t, uint64(wantCount), count, "uint64-LE entry-count header")
-
-	// Each entry: the 16-byte secret-keyed routing key (keyed at ingest — never
-	// the raw hash prefix), then a uint32-LE absolute seq. Entries are written
-	// sorted lex by keyed key, so locate each by its expected keyed key.
-	secret := chunkSecret(cat, 0)
-	wantSeqByKey := map[[keyW]byte]uint32{}
-	for _, e := range []txEntry{e0, e1} {
-		wantSeqByKey[stores.BlindKey(secret, e.hash[:keyW])] = e.seq
-	}
-	for i := range wantCount {
-		off := hdrSize + i*entryW
-		var k [keyW]byte
-		copy(k[:], raw[off:off+keyW])
-		gotSeq := binary.LittleEndian.Uint32(raw[off+keyW : off+entryW])
-		require.Equal(t, wantSeqByKey[k], gotSeq, "entry %d: 16-byte key then uint32-LE seq", i)
-	}
-}
 
 // TestStreamingIdx_MatchesSpecFormat asserts the .idx the streaming rebuild
 // writes matches gettransaction §6.2 — the merged #728/#780 cold-index format —
 // read back through the real streamhash reader and the cold metadata codec:
-// 16-byte routing key, 3-byte payload (ledgerSeq - MinLedger), 1-byte
-// fingerprint, [MinLedger, MaxLedger] in the user-metadata slot.
+// 16-byte routing key, 3-byte payload (ledgerSeq minus the payload base),
+// 1-byte fingerprint, the base and [MinLedger, MaxLedger] in the user-metadata
+// slot.
 func TestStreamingIdx_MatchesSpecFormat(t *testing.T) {
 	// Pin the spec constants themselves (a config change that moved a width
 	// would break the bench-transferred figures, so fail here too).
@@ -191,22 +139,22 @@ func TestStreamingIdx_MatchesSpecFormat(t *testing.T) {
 	require.Equal(t, txhash.ColdFingerprintSize, idx.Stats().FingerprintSize, "1-byte fingerprint on disk")
 	require.Equal(t, uint64(2), idx.NumKeys(), "one key per indexed transaction")
 
-	gotMin, gotMax, gotSecret, err := txhash.ParseColdMetadata(idx.UserMetadata())
-	require.NoError(t, err)
-	require.Equal(t, chunkSecret(cat, 0), gotSecret,
-		"metadata carries the derived per-index routing secret")
-	require.Equal(t, chunk.ID(0).FirstLedger(), gotMin, "MinLedger anchor = lo.FirstLedger")
-	require.Equal(t, chunk.ID(1).LastLedger(), gotMax, "MaxLedger = hi.LastLedger")
+	want := txhash.ColdMetadata{
+		MinLedger: chunk.ID(0).FirstLedger(), FirstCovered: chunk.ID(0).FirstLedger(), MaxLedger: chunk.ID(1).LastLedger(),
+		Secret: chunkSecret(cat, 0),
+	}
+	require.Equal(t, txhash.EncodeColdMetadata(want), idx.UserMetadata(),
+		"metadata carries the coverage and the derived per-index routing secret")
 
-	// The 3-byte payload is the seq's offset from MinLedger, recovered as the
-	// absolute seq by the reader.
-	reader, err := txhash.OpenColdReader(cat.Layout().TxHashIndexFilePath(frozen))
+	// The 3-byte payload is the seq's offset from the payload base, recovered
+	// as the absolute seq by the reader.
+	reader, err := txhash.OpenColdReader(cat.Layout().TxHashIndexFilePath(frozen), want)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = reader.Close() })
 	for _, e := range []txEntry{e0, e1} {
 		got, gerr := reader.Get(e.hash)
 		require.NoError(t, gerr)
-		require.Equal(t, e.seq, got, "payload decodes to absolute seq (offset + MinLedger)")
+		require.Equal(t, e.seq, got, "payload decodes to absolute seq (offset + base)")
 	}
 }
 

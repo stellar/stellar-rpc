@@ -116,7 +116,8 @@ type lazyColdTxIndex struct {
 
 func (l *lazyColdTxIndex) Get(hash [32]byte) (uint32, error) {
 	if l.reader == nil {
-		r, err := txhash.OpenColdReader(l.view.catalog.Layout().TxHashIndexFilePath(l.cov))
+		r, err := txhash.OpenColdReader(l.view.catalog.Layout().TxHashIndexFilePath(l.cov),
+			l.view.catalog.TxHashIndexLayout().ColdMetadata(l.view.catalog.Secret(), l.cov))
 		if err != nil {
 			return 0, fmt.Errorf("query: open cold tx index [%s, %s]: %w", l.cov.Lo, l.cov.Hi, err)
 		}

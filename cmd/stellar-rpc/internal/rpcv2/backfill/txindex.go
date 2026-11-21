@@ -46,7 +46,7 @@ func (cfg BuildConfig) validate() error {
 
 // buildTxhashIndex rebuilds window w's index at [lo, hi] from scratch (rule 3 /
 // gettransaction §7.2) via the one-write protocol: skip if already frozen; require
-// every .bin frozen; merge into the .idx and fsync; commit. It never deletes a
+// every .bin frozen; build the .idx from them and fsync; commit. It never deletes a
 // file — that's the sweeps' job. A crash before the commit leaves "freezing"
 // debris; after, the demoted keys become "pruning" sweep work.
 func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chunk.ID, cfg BuildConfig) error {
@@ -94,9 +94,8 @@ func buildTxhashIndex(ctx context.Context, w geometry.TxHashIndexID, lo, hi chun
 	if mkErr := os.MkdirAll(indexDir, 0o755); mkErr != nil {
 		return fmt.Errorf("buildTxhashIndex mkdir %s: %w", indexDir, mkErr)
 	}
-	if berr := txhash.BuildColdIndex(
-		ctx, inputs, idxPath, lo.FirstLedger(), hi.LastLedger(),
-	); berr != nil {
+	meta := cat.TxHashIndexLayout().ColdMetadata(cat.Secret(), cov)
+	if berr := txhash.BuildColdIndex(ctx, inputs, idxPath, meta); berr != nil {
 		return fmt.Errorf("buildTxhashIndex build window %s coverage [%s,%s]: %w", w, lo, hi, berr)
 	}
 
@@ -150,11 +149,13 @@ func buildThenSweep(ctx context.Context, b IndexBuild, cfg BuildConfig) error {
 	return nil
 }
 
-// txhashBinInputs returns the .bin paths for chunks [lo, hi], requiring every
+// txhashBinInputs returns the .bin files of chunks [lo, hi], requiring every
 // chunk's txhash key be "frozen". Errors on the first that isn't, with no partial result.
-func txhashBinInputs(cat *catalog.Catalog, w geometry.TxHashIndexID, lo, hi chunk.ID) ([]string, error) {
+func txhashBinInputs(
+	cat *catalog.Catalog, w geometry.TxHashIndexID, lo, hi chunk.ID,
+) ([]txhash.ColdBinInput, error) {
 	layout := cat.Layout()
-	inputs := make([]string, 0, uint32(hi)-uint32(lo)+1)
+	inputs := make([]txhash.ColdBinInput, 0, uint32(hi)-uint32(lo)+1)
 	for cs, err := range txHashStates(cat, lo, hi) {
 		if err != nil {
 			return nil, err
@@ -164,7 +165,7 @@ func txhashBinInputs(cat *catalog.Catalog, w geometry.TxHashIndexID, lo, hi chun
 				"buildTxhashIndex precondition violated: window %s chunk %s txhash is %q, want %q",
 				w, cs.Chunk, cs.State, geometry.StateFrozen)
 		}
-		inputs = append(inputs, layout.TxHashBinPath(cs.Chunk))
+		inputs = append(inputs, txhash.ColdBinInput{Path: layout.TxHashBinPath(cs.Chunk), Chunk: cs.Chunk})
 	}
 	return inputs, nil
 }

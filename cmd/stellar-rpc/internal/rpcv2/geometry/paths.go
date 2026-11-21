@@ -18,7 +18,8 @@ import (
 //	├── hot/
 //	│   ├── {chunk:08d}/                                      (per-chunk hot RocksDB)
 //	│   ├── txhash-index-{window:08d}/{lo:08d}-{hi:08d}.idx   (the window still being rebuilt)
-//	│   └── scratch/{chunk:08d}-index.runs/                   (while a chunk's events index is built)
+//	│   ├── scratch/{chunk:08d}-index.runs/                   (while a chunk's events index is built)
+//	│   └── scratch/{chunk:08d}-txhash.runs/                  (while a chunk's .bin is built)
 //	├── ledgers/{bucket:05d}/{chunk:08d}.pack
 //	├── events/
 //	│   ├── data/{bucket:05d}/{chunk:08d}-events.pack
@@ -153,6 +154,11 @@ func (l Layout) ChunkPaths(c chunk.ID, kind Kind) ([]string, []string) {
 	return l.ArtifactPaths(c, kind), l.scratchPaths(c, kind)
 }
 
+// TxHashRunsDir is where a build of chunk c's .bin spills its sorted runs.
+func (l Layout) TxHashRunsDir(c chunk.ID) string {
+	return filepath.Join(l.scratchDir(), txhash.RunsDirName(c))
+}
+
 // TxHashBinPath is a chunk's raw txhash run. Leaf owned by txhash.ColdBinName.
 func (l Layout) TxHashBinPath(c chunk.ID) string {
 	return filepath.Join(l.txhashRawRoot, c.BucketID(), txhash.ColdBinName(c))
@@ -214,6 +220,9 @@ func (l Layout) ArtifactPaths(c chunk.ID, kind Kind) []string {
 // before the kind is frozen. A crashed build leaves them, and they are not
 // in ArtifactPaths, so the sweep removes them with the key.
 func (l Layout) scratchPaths(c chunk.ID, kind Kind) []string {
+	if kind == KindTxHash {
+		return []string{l.TxHashRunsDir(c)}
+	}
 	if kind != KindEvents {
 		return nil
 	}

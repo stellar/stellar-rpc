@@ -5,6 +5,7 @@ package txhash
 // Turning that into the transaction is the downstream read-assembly layer.
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -21,17 +22,16 @@ import (
 // catches calls starting after Close returns, not one mid-flight when Close
 // unmaps.
 type ColdReader struct {
-	idx       *streamhash.PayloadIndex
-	secret    [stores.SecretLen]byte
-	minLedger uint32
-	maxLedger uint32
-	closed    atomic.Bool
+	idx    *streamhash.PayloadIndex
+	meta   ColdMetadata
+	closed atomic.Bool
 }
 
 // OpenColdReader opens the mmap-backed cold txhash index at path (the
 // on-disk layout composes it via geometry.Layout.TxHashIndexFilePath),
-// validating its payload width and metadata.
-func OpenColdReader(path string) (*ColdReader, error) {
+// validating its payload width and that its metadata is want's. The index's
+// own secret keys its lookups.
+func OpenColdReader(path string, want ColdMetadata) (*ColdReader, error) {
 	idx, err := streamhash.OpenPayload(path)
 	if err != nil {
 		return nil, fmt.Errorf("txhash: open cold index %s: %w", path, err)
@@ -42,24 +42,30 @@ func OpenColdReader(path string) (*ColdReader, error) {
 		_ = idx.Close()
 		return nil, fmt.Errorf("txhash: cold index %s payload size %d, want %d", path, got, ColdPayloadSize)
 	}
-	minLedger, maxLedger, secret, err := ParseColdMetadata(idx.UserMetadata())
-	if err != nil {
+	meta := idx.UserMetadata()
+	if err := stores.CheckBlobVersion(meta, coldMetadataVersion); err != nil {
 		_ = idx.Close()
-		return nil, fmt.Errorf("txhash: open cold index %s: %w", path, err)
+		return nil, fmt.Errorf("txhash: open cold index %s: %w: %w", path, ErrInvalidMetadata, err)
 	}
-	return &ColdReader{idx: idx, secret: secret, minLedger: minLedger, maxLedger: maxLedger}, nil
+	enc := EncodeColdMetadata(want)
+	n := len(enc) - stores.SecretLen
+	if len(meta) != len(enc) || !bytes.Equal(meta[:n], enc[:n]) {
+		_ = idx.Close()
+		return nil, fmt.Errorf("%w: txhash: cold index %s is not the index of ledgers %d to %d",
+			stores.ErrCorrupt, path, want.FirstCovered, want.MaxLedger)
+	}
+	want.Secret = [stores.SecretLen]byte(meta[n:])
+	return &ColdReader{idx: idx, meta: want}, nil
 }
 
 // Get returns the ledgerSeq the hash was committed in, stores.ErrNotFound
 // if it wasn't in the build set (residual fingerprint false positives are
-// caught downstream), or stores.ErrStoreClosed after Close. The index keys on
-// the secret-keyed routing key of hash[:ColdKeySize] (see cold_format.go), so
-// the full 32-byte hash and hash[:16] are equivalent.
+// caught downstream), or stores.ErrStoreClosed after Close.
 func (r *ColdReader) Get(hash [32]byte) (uint32, error) {
 	if r.closed.Load() {
 		return 0, stores.ErrStoreClosed
 	}
-	rk := stores.BlindKey(r.secret, hash[:ColdKeySize])
+	rk := RoutingKey(r.meta.Secret, hash)
 	_, payload, err := r.idx.QueryPayload(rk[:])
 	if err != nil {
 		if errors.Is(err, streamhash.ErrNotFound) {
@@ -67,16 +73,12 @@ func (r *ColdReader) Get(hash [32]byte) (uint32, error) {
 		}
 		return 0, fmt.Errorf("txhash: cold index query: %w", err)
 	}
-	return r.minLedger + uint32(payload), nil //nolint:gosec // 24-bit payload (width enforced at open)
+	if payload < uint64(r.meta.FirstCovered-r.meta.MinLedger) || payload > uint64(r.meta.MaxLedger-r.meta.MinLedger) {
+		return 0, fmt.Errorf("%w: txhash: cold index payload %d is outside ledgers %d to %d",
+			stores.ErrCorrupt, payload, r.meta.FirstCovered, r.meta.MaxLedger)
+	}
+	return r.meta.MinLedger + uint32(payload), nil //nolint:gosec // 24-bit payload (width enforced at open)
 }
-
-// MinLedger returns the first ledger the index covers (the payload anchor).
-// Immutable; safe after Close.
-func (r *ColdReader) MinLedger() uint32 { return r.minLedger }
-
-// MaxLedger returns the last ledger the index covers.
-// Immutable; safe after Close.
-func (r *ColdReader) MaxLedger() uint32 { return r.maxLedger }
 
 // Close releases the mmap. Idempotent. Not safe concurrent with Get.
 func (r *ColdReader) Close() error {

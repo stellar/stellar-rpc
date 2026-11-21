@@ -1,114 +1,154 @@
 package ingest
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"time"
 
-	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
+	"golang.org/x/sync/errgroup"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
+	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
+	"github.com/stellar/streamhash"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
 )
 
 // ───────────────────────── Cold writer ─────────────────────────
 
-// txhashCold accumulates (routing key, seq) tuples per ledger — each stored
-// key is stores.BlindKey(secret, txhash[:ColdKeySize]), keyed at ingest so
-// the deferred SortedBuilder index build consumes an already-keyed, sorted
-// .bin unchanged. At finalize time it lex-sorts by the (keyed) key and writes
-// a per-chunk sorted .bin file under <out-root>/<bucketID:05d>/<chunkID:08d>.bin
-// (the documented cold-txhash layout). The .bin codec — including the matching
-// reader the index-build step uses — lives in pkg/stores/txhash
-// (txhash.WriteColdBin and friends). A separate index-build step (not in
-// this package) turns these .bin files into the queryable cold MPHF index.
+// txhashSpillEntries is how many entries the txhash writer holds before it
+// writes them as a sorted run, so a chunk's entries never all sit in memory.
+const txhashSpillEntries = 1 << 20
+
+// txhashCold accumulates one chunk's (routing key, seq) tuples, each key
+// txhash.RoutingKey(secret, hash), and writes them as the chunk's sorted
+// .bin at finalize. Every txhashSpillEntries entries it sorts what it holds
+// and writes it as a run under runsDir, in the background while the next
+// entries fill a second buffer; a chunk that spilled gets its .bin by
+// merging its runs. The .bin and the runs are streamhash sorted
+// files whose header records bin (see txhash.ColdBin), and a separate
+// index-build step turns the .bin files into the queryable cold index.
 type txhashCold struct {
 	binPath string
-	chunkID chunk.ID
-	secret  [stores.SecretLen]byte
+	runsDir string
+	bin     txhash.ColdBin
 	entries []txhash.ColdEntry
+	// spare is the buffer being spilled, or the free one once that is
+	// over; spills runs the spill in flight, at most one.
+	spare   []txhash.ColdEntry
+	spills  errgroup.Group
+	runs    []string
+	total   int
+	spillAt int
 	metrics coldMetrics
 }
 
-// newTxhashCold returns a cold txhash writer that accumulates a per-chunk
-// sorted .bin at binPath — the caller's geometry.Layout.TxHashBinPath(chunkID),
-// so the write path is Layout's single derivation — written at finalize
-// (overwriting any prior attempt's file — see the package doc's artifact model).
-// secret is the chunk's per-index secret — the same one the index build derives
-// (txhash.ColdIndexSecret) — that the stored keys are blinded with.
-func newTxhashCold(
-	binPath string, chunkID chunk.ID, sink MetricSink, secret [stores.SecretLen]byte,
-) (*txhashCold, error) {
+// newTxhashCold returns a cold txhash writer of bin.Chunk's .bin at binPath,
+// the caller's geometry.Layout.TxHashBinPath(bin.Chunk), spilling runs into
+// runsDir. bin.Secret is the chunk's per-index secret, the one the index
+// build derives (txhash.ColdIndexSecret), that the stored keys are blinded
+// with.
+func newTxhashCold(binPath, runsDir string, sink MetricSink, bin txhash.ColdBin) (*txhashCold, error) {
 	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(binPath), err)
 	}
-	// The initial cap (64Ki entries, ~1.3 MB) deliberately starts well below a
-	// typical pubnet chunk's tx count (~3M): empty/sparse chunks stay cheap,
-	// and a busy chunk just pays a few amortized growths.
-	t := &txhashCold{
+	return &txhashCold{
 		binPath: binPath,
-		chunkID: chunkID,
+		runsDir: runsDir,
+		bin:     bin,
+		// The initial cap (64Ki entries, ~1.3 MB) keeps empty and sparse
+		// chunks cheap; a busy one pays a few amortized growths.
 		entries: make([]txhash.ColdEntry, 0, 1<<16),
+		spillAt: txhashSpillEntries,
 		metrics: newColdMetrics(sink, dataTypeTxhash),
-	}
-	t.secret = secret
-	return t, nil
+	}, nil
 }
 
 // write accumulates one ledger's tx hashes — one entry per hash, two for a
 // fee-bump (outer + inner). They come from coldChunk's shared
-// ExtractLedgerTxParts walk, in apply order. Each is keyed
-// (BlindKey(secret, hash[:ColdKeySize])) and appended STRAIGHT into the
-// accumulator — no intermediate per-ledger entry slice; over a ~3M-tx chunk
-// that intermediate would be hundreds of MB of transient garbage. The
-// extraction itself is metered once, ledger-scoped, as the ColdExtract signal;
-// this cheap key-append folds into the per-writer ColdIngest total (its
-// per-chunk cost is the finalize sort + .bin write).
+// ExtractLedgerTxParts walk, in apply order. The extraction itself is metered
+// once, ledger-scoped, as the ColdExtract signal; the key-append, and a spill
+// when one is due, fold into the per-writer ColdIngest total.
 func (t *txhashCold) write(seq uint32, txParts []sdkingest.LedgerTxParts) error {
 	start := time.Now()
 	before := len(t.entries)
 	for i := range txParts {
 		t.entries = append(t.entries, txhash.ColdEntry{
-			Key: stores.BlindKey(t.secret, txParts[i].Hash[:txhash.ColdKeySize]),
+			Key: txhash.RoutingKey(t.bin.Secret, txParts[i].Hash),
 			Seq: seq,
 		})
 		if txParts[i].FeeBump {
 			t.entries = append(t.entries, txhash.ColdEntry{
-				Key: stores.BlindKey(t.secret, txParts[i].InnerHash[:txhash.ColdKeySize]),
+				Key: txhash.RoutingKey(t.bin.Secret, txParts[i].InnerHash),
 				Seq: seq,
 			})
 		}
 	}
-	t.metrics.observe(time.Since(start), len(t.entries)-before, nil)
+	added := len(t.entries) - before
+	t.total += added
+	var err error
+	if len(t.entries) >= t.spillAt {
+		err = t.spill()
+	}
+	t.metrics.observe(time.Since(start), added, err)
+	return err
+}
+
+// spill starts writing the entries held as the next sorted run. The spill
+// before it is over first, so its buffer is free for the next entries.
+func (t *txhashCold) spill() error {
+	if err := t.spills.Wait(); err != nil {
+		return err
+	}
+	if len(t.runs) == 0 {
+		if err := os.MkdirAll(t.runsDir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", t.runsDir, err)
+		}
+	}
+	path := filepath.Join(t.runsDir, fmt.Sprintf("%05d.bin", len(t.runs)))
+	t.runs = append(t.runs, path)
+	full := t.entries
+	if t.spare == nil {
+		t.spare = make([]txhash.ColdEntry, 0, t.spillAt)
+	}
+	t.entries, t.spare = t.spare[:0], full
+	t.spills.Go(func() error { return txhash.WriteColdBin(path, t.bin, full, coldBytesPerSync) })
 	return nil
 }
 
-// finalize sorts the in-memory accumulator and writes the per-chunk .bin file
-// via txhash.WriteColdBin (the codec's documentation in
-// pkg/stores/txhash/cold_bin.go pins the layout).
-func (t *txhashCold) finalize(_ context.Context) error {
+// finalize writes the per-chunk .bin: straight from memory when nothing was
+// spilled, else by spilling the rest and merging the runs. It removes the
+// runs directory either way, with whatever an earlier attempt left in it.
+func (t *txhashCold) finalize(ctx context.Context) error {
 	start := time.Now()
-	// slices.SortFunc over sort.Slice: reflection-free, meaningfully faster
-	// on a ~3M-element sort.
-	slices.SortFunc(t.entries, func(a, b txhash.ColdEntry) int {
-		return bytes.Compare(a.Key[:], b.Key[:])
-	})
-	err := txhash.WriteColdBin(t.binPath, t.secret, t.entries)
+	var err error
+	if len(t.runs) == 0 {
+		err = txhash.WriteColdBin(t.binPath, t.bin, t.entries, coldBytesPerSync)
+	} else {
+		if len(t.entries) > 0 {
+			err = t.spill()
+		}
+		if err == nil {
+			err = t.spills.Wait()
+		}
+		if err == nil {
+			err = streamhash.MergeSortedFiles(ctx, t.binPath, t.runs, t.bin.SortedFileConfig(coldBytesPerSync))
+		}
+	}
+	err = errors.Join(err, os.RemoveAll(t.runsDir))
 	if err == nil {
-		t.metrics.sink.IngestStage(dataTypeTxhash, stageFinalize, time.Since(start), len(t.entries))
+		t.metrics.sink.IngestStage(dataTypeTxhash, stageFinalize, time.Since(start), t.total)
 	}
 	t.metrics.emit(time.Since(start), err)
 	return err
 }
 
-// close is a no-op: there is no open file handle to release (the .bin is written
-// in finalize), and the cold metric is emitted on a terminal write error or in
-// finalize — never here, so a rolled-back build produces no phantom sample.
+// close removes the runs directory a build that did not finalize left. The
+// cold metric is emitted on a terminal write error or in finalize, never
+// here, so a rolled-back build produces no phantom sample.
 func (t *txhashCold) close() error {
-	return nil
+	_ = t.spills.Wait() // a spill error fails the build close abandons
+	return os.RemoveAll(t.runsDir)
 }

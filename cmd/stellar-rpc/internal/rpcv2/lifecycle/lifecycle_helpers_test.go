@@ -21,11 +21,8 @@ import (
 // against (any stable value works; the index only needs deterministic hashes).
 const lifecyclePassphrase = network.PublicNetworkPassphrase
 
-// oneTxLCMRand builds the wire bytes of a V2 LedgerCloseMeta carrying ONE
-// transaction for seq, so a chunk ingested with at least one such ledger yields
-// a NON-empty txhash .bin, which exercises the real merge-and-fold index path
-// (a fully zero-tx chunk now builds a valid but trivial empty index instead).
-// Mirrors ingest_test's buildLCMReturningHashes, trimmed to one tx.
+// oneTxLCMRand builds the wire bytes of a V2 LedgerCloseMeta carrying one
+// transaction for seq, mirroring ingest_test's buildLCMReturningHashes.
 func oneTxLCMRand(t *testing.T, seq uint32) []byte {
 	t.Helper()
 	envelope := xdr.TransactionEnvelope{
@@ -88,8 +85,8 @@ func ingestFullHotChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID) {
 	t.Helper()
 	db := openLiveHotDB(t, cat, c)
 	for seq := c.FirstLedger(); seq <= c.LastLedger(); seq++ {
-		// The first ledger carries one tx so the chunk's txhash .bin is non-empty
-		// (streamhash refuses a zero-key index); the rest stay zero-tx for speed.
+		// The first ledger carries one tx so the chunk's txhash .bin is non-empty;
+		// the rest stay zero-tx for speed.
 		var raw []byte
 		if seq == c.FirstLedger() {
 			raw = oneTxLCMRand(t, seq)

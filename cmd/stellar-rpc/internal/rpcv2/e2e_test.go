@@ -402,7 +402,8 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	// =====================================================================
 
 	// Cold .idx — the exact reader getTransaction will sit on for frozen history.
-	coldReader, err := txhash.OpenColdReader(postCat.Layout().TxHashIndexFilePath(frozenCov))
+	coldReader, err := txhash.OpenColdReader(postCat.Layout().TxHashIndexFilePath(frozenCov),
+		postCat.TxHashIndexLayout().ColdMetadata(postCat.Secret(), frozenCov))
 	require.NoError(t, err)
 	gotSeq, err := coldReader.Get(coldHash)
 	require.NoError(t, err, "the chunk-0 tx hash must resolve from the frozen cold index")
