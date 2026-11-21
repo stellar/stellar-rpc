@@ -444,7 +444,7 @@ func buildSinks(opts daemonOptions, registry *prometheus.Registry) (observabilit
 	}
 	sink := opts.IngestSink
 	if sink == nil {
-		sink = ingest.NewPrometheusSink(registry, host.PrometheusNamespace)
+		sink = ingest.NewPrometheusSink(registry, host.StellarPrometheusNamespace)
 	}
 	return metrics, sink
 }

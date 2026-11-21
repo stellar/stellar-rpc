@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -90,10 +91,12 @@ type coldExtractCall struct {
 type testSink struct {
 	mu              sync.Mutex
 	hotPhases       []hotPhaseCall
+	hotLedgers      int
 	coldIngests     []coldCall
 	stages          []stageCall
 	coldExtracts    []coldExtractCall // one entry per shared-walk ColdExtract call
 	coldChunkTotals int
+	coldChunkErrs   []error // one entry per ColdChunkTotal call
 }
 
 func (s *testSink) HotPhase(phase hotchunk.Phase, dur time.Duration, items int, err error) {
@@ -102,16 +105,23 @@ func (s *testSink) HotPhase(phase hotchunk.Phase, dur time.Duration, items int, 
 	s.hotPhases = append(s.hotPhases, hotPhaseCall{phase, dur, items, err})
 }
 
+func (s *testSink) HotLedger(time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hotLedgers++
+}
+
 func (s *testSink) ColdIngest(dataType string, _ time.Duration, items int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.coldIngests = append(s.coldIngests, coldCall{dataType, items, err})
 }
 
-func (s *testSink) ColdChunkTotal(time.Duration) {
+func (s *testSink) ColdChunkTotal(_ time.Duration, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.coldChunkTotals++
+	s.coldChunkErrs = append(s.coldChunkErrs, err)
 }
 
 func (s *testSink) ColdExtract(_ time.Duration, items int, err error) {
@@ -239,6 +249,14 @@ func fullStream(t *testing.T, chunkID chunk.ID, gen func(*testing.T, uint32) []b
 	}
 }
 
+// Per-type directory names of the test layout: the names geometry.Layout uses
+// in production. They are not the data_type metric labels.
+const (
+	dirLedgers = "ledgers"
+	dirTxhash  = "txhash"
+	dirEvents  = "events"
+)
+
 // packPath returns a chunk's cold pack path under a per-type ledgers root. The
 // production packPath moved into the ledger store package alongside NewPackStream,
 // so tests keep their own copy for readback assertions.
@@ -258,9 +276,9 @@ func sameDirs(dir string) event.ColdDirs { return event.ColdDirs{Data: dir, Inde
 //nolint:unparam // chunk-general helper; every current caller uses chunk 0
 func coldDirsAt(dir string, c chunk.ID) ColdDirs {
 	return ColdDirs{
-		LedgerPack: packPath(filepath.Join(dir, dataTypeLedgers), c),
-		TxhashBin:  txhashBinPath(filepath.Join(dir, dataTypeTxhash)),
-		Events:     sameDirs(filepath.Join(dir, dataTypeEvents, c.BucketID())),
+		LedgerPack: packPath(filepath.Join(dir, dirLedgers), c),
+		TxhashBin:  txhashBinPath(filepath.Join(dir, dirTxhash)),
+		Events:     sameDirs(filepath.Join(dir, dirEvents, c.BucketID())),
 	}
 }
 
@@ -650,7 +668,7 @@ func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 		coldDirsAt(coldDir, chunkID), sink, Config{Events: true, EventsSecret: testEventsSecretBytes()},
 	))
 
-	bucketDir := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())
+	bucketDir := filepath.Join(coldDir, dirEvents, chunkID.BucketID())
 
 	// All three cold artifacts exist (events.pack + the empty index pair).
 	for _, name := range []string{
@@ -711,7 +729,7 @@ func TestColdChunk_Success(t *testing.T) {
 	// Ledger cold readback: tx hashes use random keypairs, so bytes can't be
 	// regenerated for comparison — assert the boundary ledger reads back and
 	// decodes to the right sequence.
-	lcr, err := ledger.OpenColdReader(packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID))
+	lcr, err := ledger.OpenColdReader(packPath(filepath.Join(coldDir, dirLedgers), chunkID))
 	require.NoError(t, err)
 	defer func() { require.NoError(t, lcr.Close()) }()
 	gotFirst, err := readLedgerRaw(lcr, first)
@@ -722,7 +740,7 @@ func TestColdChunk_Success(t *testing.T) {
 
 	// Events cold readback.
 	ecr, err := event.OpenColdReader(
-		chunkID, sameDirs(filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())), event.ColdReaderOptions{})
+		chunkID, sameDirs(filepath.Join(coldDir, dirEvents, chunkID.BucketID())), event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ecr.Close()) }()
 	bms, _, err := ecr.LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
@@ -730,7 +748,7 @@ func TestColdChunk_Success(t *testing.T) {
 	require.Equal(t, uint64(2), bms[0].GetCardinality())
 
 	// Txhash .bin count.
-	binEntries := rpcv2test.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
+	binEntries := rpcv2test.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dirTxhash)))
 	require.Len(t, binEntries, 2)
 
 	// Metrics: one ColdIngest per data type, no errors. (The aggregate
@@ -810,7 +828,7 @@ func TestColdChunk_MidChunkFailure_NoArtifact(t *testing.T) {
 	require.Empty(t, sink.coldDataTypes(), "an abandoned chunk emits no per-writer ColdIngest")
 
 	// No finalized ledger pack must exist.
-	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
+	path := packPath(filepath.Join(coldDir, dirLedgers), chunkID)
 	_, statErr := os.Stat(path)
 	require.True(t, os.IsNotExist(statErr), "expected no cold ledger artifact at %s, stat err: %v", path, statErr)
 }
@@ -854,16 +872,17 @@ func TestPrometheusSink_Smoke(t *testing.T) {
 	require.NotPanics(t, func() {
 		sink := NewPrometheusSink(reg, "test")
 		// The six hot per-ledger phases: extract/commit/apply carry no items, the
-		// write phases carry per-type volume; the commit phase exercises the error
-		// dimension.
+		// write phases carry per-type volume; the commit phase carries an error,
+		// which the sink does not count.
 		sink.HotPhase(hotchunk.PhaseExtract, time.Millisecond, 0, nil)
 		sink.HotPhase(hotchunk.PhaseLedgers, time.Millisecond, 1, nil)
 		sink.HotPhase(hotchunk.PhaseTxhash, time.Millisecond, 5, nil)
 		sink.HotPhase(hotchunk.PhaseEvents, time.Millisecond, 3, nil)
 		sink.HotPhase(hotchunk.PhaseCommit, time.Millisecond, 0, errors.New("induced commit failure"))
 		sink.HotPhase(hotchunk.PhaseApply, time.Millisecond, 0, nil)
+		sink.HotLedger(6 * time.Millisecond)
 		sink.ColdIngest(dataTypeTxhash, time.Second, 100, nil)
-		sink.ColdChunkTotal(time.Second)
+		sink.ColdChunkTotal(time.Second, nil)
 		sink.ColdExtract(time.Millisecond, 3, nil)
 		sink.ColdExtract(time.Millisecond, 0, errors.New("induced extract failure"))
 		sink.IngestStage(dataTypeEvents, stageFinalize, time.Second, 0)
@@ -874,6 +893,106 @@ func TestPrometheusSink_Smoke(t *testing.T) {
 	require.NotEmpty(t, mfs)
 }
 
+// The phase label values are what dashboards and alerts select on: every phase
+// has a series from startup, under these names.
+func TestPrometheusSink_PhaseLabelValues(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	NewPrometheusSink(reg, "test")
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	var phases []string
+	for _, mf := range mfs {
+		if !strings.HasSuffix(mf.GetName(), "_phase_duration_seconds") {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			require.Len(t, m.GetLabel(), 1)
+			require.Equal(t, "phase", m.GetLabel()[0].GetName())
+			phases = append(phases, m.GetLabel()[0].GetValue())
+		}
+	}
+	slices.Sort(phases)
+	assert.Equal(t, "apply,commit,events,extract,ledger,txhashes", strings.Join(phases, ","))
+}
+
+// TestPrometheusSink_Metrics asserts the exported families: their names (no
+// error counter), the live items counter's data_type series (no series for the
+// phases that write no items), one ledger_duration sample per HotLedger, the
+// chunk items counter (work done: a failed writer's items count too), and the
+// chunk duration's status series.
+func TestPrometheusSink_Metrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	sink := NewPrometheusSink(reg, "test")
+	sink.HotPhase(hotchunk.PhaseExtract, time.Millisecond, 0, nil)
+	sink.HotPhase(hotchunk.PhaseLedgers, time.Millisecond, 1, nil)
+	sink.HotPhase(hotchunk.PhaseTxhash, time.Millisecond, 5, nil)
+	sink.HotPhase(hotchunk.PhaseEvents, time.Millisecond, 3, nil)
+	// Items on a phase with no data type are dropped, not a nil-counter panic.
+	sink.HotPhase(hotchunk.PhaseCommit, time.Millisecond, 7, errors.New("induced commit failure"))
+	sink.HotLedger(5 * time.Millisecond)
+	// Cold: the items counter is work done, so a failed writer's items count.
+	sink.ColdIngest(dataTypeTxhash, time.Second, 40, nil)
+	sink.ColdIngest(dataTypeEvents, time.Second, 100, errors.New("induced write failure"))
+	sink.ColdExtract(time.Millisecond, 0, errors.New("induced extract failure"))
+	sink.ColdChunkTotal(time.Second, nil)
+	sink.ColdChunkTotal(time.Second, nil)
+	sink.ColdChunkTotal(time.Second, errors.New("induced chunk failure"))
+	// A canceled attempt is fallout, not a failure: it lands on no status.
+	sink.ColdChunkTotal(time.Second, errors.Join(errors.New("drain"), context.Canceled))
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	names := make([]string, 0, len(mfs))
+	items := map[string]float64{}
+	chunkItems := map[string]float64{}
+	chunks := map[string]uint64{}
+	for _, mf := range mfs {
+		names = append(names, mf.GetName())
+		switch mf.GetName() {
+		case "test_ingest_items_total":
+			for _, m := range mf.GetMetric() {
+				require.Len(t, m.GetLabel(), 1)
+				require.Equal(t, "data_type", m.GetLabel()[0].GetName())
+				items[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
+			}
+		case "test_ingest_ledger_duration_seconds":
+			require.Len(t, mf.GetMetric(), 1)
+			h := mf.GetMetric()[0].GetHistogram()
+			assert.Equal(t, uint64(1), h.GetSampleCount())
+			// A ledger takes milliseconds: the buckets must resolve below 5ms.
+			assert.InDelta(t, 0.001, h.GetBucket()[0].GetUpperBound(), 1e-9)
+		case "test_ingest_phase_duration_seconds":
+			assert.Len(t, mf.GetMetric(), int(hotchunk.NumPhases), "one series per phase")
+		case "test_ingest_chunk_items_total":
+			for _, m := range mf.GetMetric() {
+				require.Len(t, m.GetLabel(), 1)
+				require.Equal(t, "data_type", m.GetLabel()[0].GetName())
+				chunkItems[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
+			}
+		case "test_ingest_chunk_duration_seconds":
+			for _, m := range mf.GetMetric() {
+				require.Len(t, m.GetLabel(), 1)
+				require.Equal(t, "status", m.GetLabel()[0].GetName())
+				chunks[m.GetLabel()[0].GetValue()] = m.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	assert.ElementsMatch(t, []string{
+		"test_ingest_items_total",
+		"test_ingest_ledger_duration_seconds",
+		"test_ingest_phase_duration_seconds",
+		"test_ingest_chunk_duration_seconds",
+		"test_ingest_chunk_writer_duration_seconds",
+		"test_ingest_chunk_items_total",
+		"test_ingest_chunk_stage_duration_seconds",
+		"test_ingest_chunk_extract_duration_seconds",
+	}, names)
+	assert.Equal(t, map[string]float64{"ledgers": 1, "txhashes": 5, "events": 3}, items)
+	assert.Equal(t, map[string]float64{"ledgers": 0, "txhashes": 40, "events": 100}, chunkItems)
+	assert.Equal(t, map[string]uint64{"ok": 2, "error": 1}, chunks, "each attempt lands on its own status")
+}
+
 // ───────────────────────── cold driver tests ─────────────────────────
 
 func TestWriteColdChunk_RoundTrip(t *testing.T) {
@@ -882,7 +1001,8 @@ func TestWriteColdChunk_RoundTrip(t *testing.T) {
 	stream := fullStream(t, chunkID, nil)
 
 	coldDir := t.TempDir()
-	logger := testLogger()
+	logger := supportlog.New()
+	endLogs := logger.StartTest(logrus.InfoLevel)
 	sink := &testSink{}
 
 	require.NoError(t, WriteColdChunk(
@@ -890,7 +1010,20 @@ func TestWriteColdChunk_RoundTrip(t *testing.T) {
 		coldDirsAt(coldDir, chunkID), sink, Config{Ledgers: true},
 	))
 
-	path := packPath(filepath.Join(coldDir, "ledgers"), chunkID)
+	// The completion log carries the item counts of the enabled writers only.
+	var written []logrus.Entry
+	for _, e := range endLogs() {
+		if e.Message == "cold chunk written" {
+			written = append(written, e)
+		}
+	}
+	require.Len(t, written, 1)
+	assert.Equal(t, int(last-first+1), written[0].Data["ledgers"])
+	assert.Equal(t, chunkID.String(), written[0].Data["chunk"])
+	assert.NotContains(t, written[0].Data, "events", "a disabled writer has no count")
+	require.Equal(t, []error{nil}, sink.coldChunkErrs)
+
+	path := packPath(filepath.Join(coldDir, dirLedgers), chunkID)
 	cr, err := ledger.OpenColdReader(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
@@ -992,7 +1125,7 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 		}
 	}
 	slices.SortFunc(wantEntries, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
-	gotEntries := rpcv2test.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
+	gotEntries := rpcv2test.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dirTxhash)))
 	require.Equal(t, wantEntries, gotEntries, "cold .bin must hold every resolvable hash, sorted and keyed")
 
 	// Reference #2 — events: PayloadsFromLedgerEvents with chunk-relative IDs
@@ -1019,7 +1152,7 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	require.NotEmpty(t, wantTermIDs, "sentinels must carry events")
 
 	ecr, err := event.OpenColdReader(
-		chunkID, sameDirs(filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())), event.ColdReaderOptions{})
+		chunkID, sameDirs(filepath.Join(coldDir, dirEvents, chunkID.BucketID())), event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ecr.Close()) }()
 
@@ -1056,7 +1189,7 @@ func TestWriteColdChunk_ShortStream_NoArtifact(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ended at")
 
-	path := packPath(filepath.Join(coldDir, "ledgers"), chunkID)
+	path := packPath(filepath.Join(coldDir, dirLedgers), chunkID)
 	_, statErr := os.Stat(path)
 	require.True(t, os.IsNotExist(statErr), "expected no cold artifact at %s, stat err: %v", path, statErr)
 }
@@ -1083,7 +1216,7 @@ func TestWriteColdChunk_TxhashCold_Bin(t *testing.T) {
 		coldDirsAt(coldDir, chunkID), nil, Config{Txhash: true, TxhashSecret: testTxhashSecretBytes()},
 	))
 
-	entries := rpcv2test.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dataTypeTxhash)))
+	entries := rpcv2test.ReadColdBin(t, txhashBinPath(filepath.Join(coldDir, dirTxhash)))
 	require.Len(t, entries, len(txSeqs))
 }
 
@@ -1157,7 +1290,7 @@ func TestWriteColdChunk_DrainStreamError_NoArtifact(t *testing.T) {
 	require.Contains(t, err.Error(), "stream for chunk", "error wraps the drained chunk")
 
 	// Finalize never ran → no finalized artifact; deferred Close dropped the partial.
-	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
+	path := packPath(filepath.Join(coldDir, dirLedgers), chunkID)
 	_, statErr := os.Stat(path)
 	require.True(t, os.IsNotExist(statErr), "expected no cold artifact at %s, stat err: %v", path, statErr)
 }
@@ -1232,12 +1365,14 @@ func TestHotService_FeeClassificationErrorFailsCommittedLedger(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	windows := feewindow.NewFeeWindows(10, 10)
-	svc := NewHotService(db, windows, &testSink{})
+	sink := &testSink{}
+	svc := NewHotService(db, windows, sink)
 	first := chunk.ID(0).FirstLedger()
 
 	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(rpcv2test.FeeTxLCMBytes(t, first, -1)))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "fees")
+	assert.Zero(t, sink.hotLedgers, "no whole-ledger sample when the fee append fails")
 
 	maxSeq, ok, err := db.MaxCommittedSeq()
 	require.NoError(t, err)
@@ -1259,8 +1394,10 @@ func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
 	svc := NewHotService(db, nil, sink)
 	first := chunk.ID(0).FirstLedger()
 	raw, _, _ := marshalLCMWithEvent(t, first) // one tx, one event
-	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(raw))
+	res, err := svc.Ingest(first, xdr.LedgerCloseMetaView(raw))
 	require.NoError(t, err)
+	assert.Equal(t, 1, res.Txhashes)
+	assert.Equal(t, 1, res.Events)
 
 	require.Len(t, sink.hotPhases, int(hotchunk.NumPhases), "every phase emitted once on success")
 	items := sink.hotPhaseItems()
@@ -1272,6 +1409,7 @@ func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
 	assert.Zero(t, items[hotchunk.PhaseApply], "apply carries no items")
 	_, hadErr := sink.hotPhaseErr()
 	assert.False(t, hadErr, "success path carries no phase error")
+	assert.Equal(t, 1, sink.hotLedgers, "one whole-ledger sample on success")
 }
 
 // TestHotService_CommitErrorLandsOnCommitPhase asserts a commit failure (a closed
@@ -1288,6 +1426,7 @@ func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
 	raw, _, _ := marshalLCMWithEvent(t, first)
 	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(raw))
 	require.Error(t, err)
+	assert.Zero(t, sink.hotLedgers, "no whole-ledger sample on failure")
 
 	phase, hadErr := sink.hotPhaseErr()
 	require.True(t, hadErr, "the failure must be reported on a phase")
@@ -1346,6 +1485,10 @@ func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
 	assert.NotEqual(t, hotchunk.PhaseExtract, phase, "a non-zero Failed proves it was assigned, not defaulted")
 	// Phases [extract, ledgers, txhash, events] emitted; commit/apply never ran.
 	assert.Len(t, sink.hotPhases, int(hotchunk.PhaseEvents)+1)
+	// The ledger had one tx and one event, but nothing committed: no items.
+	for p, n := range sink.hotPhaseItems() {
+		assert.Zero(t, n, "no items on the failure path (phase %v)", p)
+	}
 }
 
 // TestHotService_FailedPhaseCarriesPartialDuration asserts that a failed ledger ingest
@@ -1433,6 +1576,7 @@ func TestWriteColdChunk_CanceledContext(t *testing.T) {
 	)
 	require.ErrorIs(t, rerr, context.Canceled)
 	require.Equal(t, 1, sink.coldChunkTotals, "a canceled chunk attempt still emits one ColdChunkTotal")
+	assert.ErrorIs(t, sink.coldChunkErrs[0], context.Canceled, "the attempt's error reaches the sink")
 }
 
 // ───────────────────────── Config validate / guard negatives (P2-g) ─────────────────────────
@@ -1479,7 +1623,7 @@ func TestOpenColdChunk_RollbackOneBuilt(t *testing.T) {
 	// Plant a regular FILE where the txhash per-type directory must be
 	// created: the ledger writer opens first, then newTxhashCold fails its
 	// bucket-dir MkdirAll.
-	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dataTypeTxhash), []byte("not a dir"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dirTxhash), []byte("not a dir"), 0o644))
 
 	_, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
 		Config{Ledgers: true, Txhash: true, TxhashSecret: testTxhashSecretBytes()})
@@ -1502,7 +1646,7 @@ func TestOpenColdChunk_RollbackTwoBuilt(t *testing.T) {
 	// Plant a directory at the events.pack path: the ledger and txhash
 	// writers open first, then newEventsCold fails opening the pack over
 	// the directory.
-	packPath := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID(), event.EventsPackName(chunkID))
+	packPath := filepath.Join(coldDir, dirEvents, chunkID.BucketID(), event.EventsPackName(chunkID))
 	require.NoError(t, os.MkdirAll(packPath, 0o755))
 
 	_, err := openColdChunk(coldDirsAt(coldDir, chunkID), chunkID, sink,
@@ -1528,7 +1672,7 @@ func TestWriteColdChunk_ConstructorFailure_EmitsAggregate(t *testing.T) {
 	sink := &testSink{}
 
 	// Plant a regular file where the ledgers per-type subdir must be created.
-	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dataTypeLedgers), []byte("not a dir"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(coldDir, dirLedgers), []byte("not a dir"), 0o644))
 
 	err := WriteColdChunk(
 		context.Background(), logger, chunkID, rawChunk(fullStream(t, chunkID, nil), chunkID),
@@ -1636,19 +1780,19 @@ func TestColdChunk_Finalize_FirstErrorStopsRemaining(t *testing.T) {
 
 	// Plant a DIRECTORY at the .bin path: txhash's finalize (WriteColdBin's
 	// os.Create) fails after the ledgers finalize already ran.
-	binPath := txhashBinPath(filepath.Join(coldDir, dataTypeTxhash))
+	binPath := txhashBinPath(filepath.Join(coldDir, dirTxhash))
 	require.NoError(t, os.Mkdir(binPath, 0o755))
 
 	ferr := cc.finalize(context.Background())
 	require.Error(t, ferr, "finalize must surface the txhash failure")
 
 	// The earlier writer's already-committed pack REMAINS on disk.
-	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
+	path := packPath(filepath.Join(coldDir, dirLedgers), chunkID)
 	_, statErr := os.Stat(path)
 	require.NoError(t, statErr, "the earlier writer's published artifact stays on disk")
 
 	// The later (events) writer was never finalized: no index artifacts.
-	bucketDir := filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())
+	bucketDir := filepath.Join(coldDir, dirEvents, chunkID.BucketID())
 	_, statErr = os.Stat(filepath.Join(bucketDir, event.IndexPackName(chunkID)))
 	require.True(t, os.IsNotExist(statErr), "a later writer must NOT be finalized after a sibling failure")
 
@@ -1718,7 +1862,7 @@ func TestWriteColdChunk_LazySourceFirstReadError(t *testing.T) {
 	require.Contains(t, err.Error(), "stream for chunk", "the error surfaces from drain's stream pull")
 
 	// Finalize never committed → no finalized pack (Close dropped the partial).
-	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
+	path := packPath(filepath.Join(coldDir, dirLedgers), chunkID)
 	_, statErr := os.Stat(path)
 	require.True(t, os.IsNotExist(statErr), "expected no cold pack at %s, stat err: %v", path, statErr)
 	require.Equal(t, 1, sink.coldChunkTotals, "the failed attempt still emits its aggregate")
@@ -1740,7 +1884,7 @@ func TestWriteColdChunk_EmptyStream(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ended at", "the completeness check rejects the empty stream")
 
-	path := packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID)
+	path := packPath(filepath.Join(coldDir, dirLedgers), chunkID)
 	_, statErr := os.Stat(path)
 	require.True(t, os.IsNotExist(statErr), "expected no cold pack at %s, stat err: %v", path, statErr)
 	require.Equal(t, 1, sink.coldChunkTotals, "the failed attempt still emits its aggregate")

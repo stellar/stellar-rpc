@@ -36,9 +36,11 @@ const (
 	driverPaceLag      = "pace_lag"      // hot, paced runs: per-ledger lag behind the close schedule at commit
 )
 
-// Cold data-type and stage labels. They must equal the strings the ingest
-// engine emits through MetricSink, because they set the report order. A label
-// that drifts is still reported, after the known ones (see withUnknown).
+// Cold data-type and stage labels. They set the report's file names, row
+// names and order. They are the report's own names: coldType maps the ingest
+// engine's data-type label to them, so a metric label rename leaves the report
+// comparable across runs. A label that drifts is still reported, after the
+// known ones (see withUnknown).
 const (
 	coldTypeLedgers = "ledgers"
 	coldTypeTxhash  = "txhash"
@@ -48,6 +50,29 @@ const (
 	coldStageWrite     = "write"
 	coldStageFinalize  = "finalize"
 )
+
+// coldType maps the ingest engine's data-type label to the report's name. Only
+// the tx hash label differs ("txhashes" in the metrics).
+func coldType(dataType string) string {
+	if dataType == "txhashes" {
+		return coldTypeTxhash
+	}
+	return dataType
+}
+
+// hot.csv row labels, one per hotchunk.Phase. They are the report's own names,
+// not Phase.String (the metric label), so a metric rename leaves hot.csv
+// comparable across runs.
+//
+//nolint:gochecknoglobals // fixed report schema, read-only
+var hotRowLabels = [hotchunk.NumPhases]string{
+	hotchunk.PhaseExtract: "extract",
+	hotchunk.PhaseLedgers: coldTypeLedgers, // the write phases share the data-type names
+	hotchunk.PhaseTxhash:  coldTypeTxhash,
+	hotchunk.PhaseEvents:  coldTypeEvents,
+	hotchunk.PhaseCommit:  "commit",
+	hotchunk.PhaseApply:   "apply",
+}
 
 // fileSpec is one CSV file of the report: its basename (without .csv) and the
 // fixed top-to-bottom order of its rows.
@@ -66,10 +91,7 @@ var fileSpecs = func() []fileSpec {
 	coldTypes := []string{coldTypeLedgers, coldTypeTxhash, coldTypeEvents}
 	coldStages := []string{coldStageTermIndex, coldStageWrite, coldStageFinalize}
 
-	hotRows := make([]string, hotchunk.NumPhases)
-	for p := range hotchunk.NumPhases {
-		hotRows[p] = p.String()
-	}
+	hotRows := slices.Clone(hotRowLabels[:])
 
 	driverRows := make([]string, 0, len(coldTypes)+7)
 	driverRows = append(driverRows, driverBackfillWall, driverIndexRebuild, driverChunkTotal)
@@ -158,7 +180,7 @@ func newCSVSink() *csvSink {
 // ingest_total. Interleaved bursts from several goroutines are safe but sum
 // across ledgers.
 func (s *csvSink) HotPhase(phase hotchunk.Phase, d time.Duration, items int, _ error) {
-	s.observe(fileHot, phase.String(), d, items)
+	s.observe(fileHot, hotRowLabels[phase], d, items)
 
 	// Release mu before observe takes it again.
 	s.mu.Lock()
@@ -174,13 +196,16 @@ func (s *csvSink) HotPhase(phase hotchunk.Phase, d time.Duration, items int, _ e
 	}
 }
 
+// HotLedger is dropped: HotPhase already derives the per-ledger ingest_total.
+func (*csvSink) HotLedger(time.Duration) {}
+
 // ColdIngest records one cold ingester's per-chunk total.
 func (s *csvSink) ColdIngest(dataType string, d time.Duration, items int, _ error) {
-	s.observe(fileDriver, dataType+driverTotalSuffix, d, items)
+	s.observe(fileDriver, coldType(dataType)+driverTotalSuffix, d, items)
 }
 
 // ColdChunkTotal records the per-chunk aggregate wall-clock.
-func (s *csvSink) ColdChunkTotal(d time.Duration) {
+func (s *csvSink) ColdChunkTotal(d time.Duration, _ error) {
 	s.observe(fileDriver, driverChunkTotal, d, 0)
 }
 
@@ -192,7 +217,7 @@ func (s *csvSink) ColdExtract(d time.Duration, items int, _ error) {
 
 // IngestStage records one cold ingester's per-stage wall-clock.
 func (s *csvSink) IngestStage(dataType, stage string, d time.Duration, items int) {
-	s.observe(dataType, stage, d, items)
+	s.observe(coldType(dataType), stage, d, items)
 }
 
 // Freeze records one backfill pass's whole plan-and-execute wall-clock.

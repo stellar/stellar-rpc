@@ -48,6 +48,9 @@ func TestRunDaemon_ExposesProcessMetrics(t *testing.T) {
 	assert.Contains(t, body, "soroban_rpc_log_error_total 2")
 	assert.Contains(t, body, "go_goroutines ")
 	assert.Contains(t, body, "process_start_time_seconds ")
+	// The ingest sink registers under the stellar_rpc namespace.
+	assert.Contains(t, body, "stellar_rpc_ingest_ledger_duration_seconds_count ")
+	assert.Contains(t, body, `stellar_rpc_ingest_chunk_duration_seconds_count{status="error"} 0`)
 
 	cancel()
 	select {

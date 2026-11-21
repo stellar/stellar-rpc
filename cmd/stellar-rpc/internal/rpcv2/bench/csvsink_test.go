@@ -45,7 +45,7 @@ func TestCSVSinkExactOutput(t *testing.T) {
 		sink.ColdExtract(40, 4, nil)
 		sink.IngestStage("ledgers", "write", 5, 1)
 		sink.ColdIngest("events", 50, 20, nil)
-		sink.ColdChunkTotal(200)
+		sink.ColdChunkTotal(200, nil)
 		sink.Rebuild(40)
 		sink.HotPhase(hotchunk.PhaseCommit, 50, 0, nil)
 		sink.HotPhase(hotchunk.PhaseCommit, 60, 3, nil)
@@ -112,6 +112,13 @@ func TestCSVSinkHotIngestTotal(t *testing.T) {
 	outDir := t.TempDir()
 	_, err := sink.writeCSVs(outDir)
 	require.NoError(t, err)
+
+	// hot.csv keeps its own row names, whatever the metric labels are.
+	hot := readCSV(t, filepath.Join(outDir, "hot.csv"))
+	for _, row := range []string{"extract", coldTypeLedgers, coldTypeTxhash, coldTypeEvents, "commit", "apply"} {
+		assert.Contains(t, hot, row)
+	}
+	assert.Len(t, hot, 6)
 
 	driver := readCSV(t, filepath.Join(outDir, "driver.csv"))
 	require.Contains(t, driver, "ingest_total")
