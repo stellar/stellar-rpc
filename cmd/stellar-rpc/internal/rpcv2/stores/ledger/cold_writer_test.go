@@ -219,3 +219,20 @@ func TestColdWriterOptions_Plumbing(t *testing.T) {
 		assert.Equal(t, raws[i], got)
 	}
 }
+
+// A copying writer takes only checked frames, and a compressing writer
+// takes none.
+func TestColdWriter_PreCompressedTakesOnlyFrames(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.pack")
+	w, err := NewColdWriter(path, 2, ColdWriterOptions{PreCompressed: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
+	frame, err := newColdPackEncoder().Encode(nil, []byte("ledger"))
+	require.NoError(t, err)
+	require.NoError(t, w.AppendCompressedLedger(2, frame))
+	require.ErrorContains(t, w.AppendCompressedLedger(3, []byte("ledger")), "not a zstd frame")
+	require.ErrorContains(t, w.AppendLedger(3, []byte("ledger")), "PreCompressed")
+
+	raw, _ := newTestColdWriter(t, 2)
+	require.Error(t, raw.AppendCompressedLedger(2, frame))
+}
