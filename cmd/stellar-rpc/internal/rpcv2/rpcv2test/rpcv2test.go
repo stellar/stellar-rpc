@@ -7,7 +7,7 @@ package rpcv2test
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
+	"errors"
 	"io"
 	"iter"
 	"os"
@@ -25,11 +25,11 @@ import (
 	"github.com/stellar/go-stellar-sdk/network"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
+	"github.com/stellar/streamhash"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
@@ -238,30 +238,51 @@ func V2LCMBytes(
 }
 
 // WriteColdTxIndexFile builds a real cold tx-hash .idx at cov's layout path
-// from the given hash→seq entries, through the production WriteColdBin +
-// BuildColdIndex pipeline. Catalog state (freezing/frozen coverage keys) stays
-// the caller's to manage.
+// from the given hash→seq entries, through the production .bin format and
+// BuildColdIndex: one .bin for each chunk of cov that holds an entry, and one
+// for cov.Lo. Catalog state (freezing/frozen coverage keys) stays the
+// caller's to manage.
 func WriteColdTxIndexFile(
 	t *testing.T, cat *catalog.Catalog, cov geometry.TxHashIndexCoverage, entries map[xdr.Hash]uint32,
 ) {
 	t.Helper()
 	master := cat.Secret()
 	secret := txhash.ColdIndexSecret(master[:], uint32(cov.Index))
-	cold := make([]txhash.ColdEntry, 0, len(entries))
+	base := cat.TxHashIndexLayout().FirstChunk(cov.Index).FirstLedger()
+	byChunk := map[chunk.ID][]txhash.ColdEntry{cov.Lo: nil}
 	for h, seq := range entries {
-		var e txhash.ColdEntry
-		e.Key = stores.BlindKey(secret, h[:txhash.ColdKeySize])
-		e.Seq = seq
-		cold = append(cold, e)
+		c := chunk.IDFromLedger(seq)
+		byChunk[c] = append(byChunk[c], txhash.ColdEntry{Key: txhash.RoutingKey(secret, h), Seq: seq})
 	}
-	slices.SortFunc(cold, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
-	bin := filepath.Join(t.TempDir(), txhash.ColdBinName(cov.Lo))
-	require.NoError(t, txhash.WriteColdBin(bin, secret, cold))
+	dir := t.TempDir()
+	bins := make([]string, 0, len(byChunk))
+	for c, cold := range byChunk {
+		bin := filepath.Join(dir, txhash.ColdBinName(c))
+		WriteColdBin(t, bin, txhash.ColdBin{Secret: secret, Base: base, Chunk: c}, cold)
+		bins = append(bins, bin)
+	}
 
 	idxPath := cat.Layout().TxHashIndexFilePath(cov)
 	require.NoError(t, os.MkdirAll(filepath.Dir(idxPath), 0o755))
 	require.NoError(t, txhash.BuildColdIndex(
-		context.Background(), []string{bin}, idxPath, cov.Lo.FirstLedger(), cov.Hi.LastLedger()))
+		context.Background(), bins, idxPath, base, cov.Hi.LastLedger()))
+}
+
+// WriteColdBin writes entries, in any order, as a cold txhash .bin at path
+// with bin in its header, through the production sorted-file writer.
+func WriteColdBin(t *testing.T, path string, bin txhash.ColdBin, entries []txhash.ColdEntry) {
+	t.Helper()
+	sorted := slices.Clone(entries)
+	slices.SortFunc(sorted, func(a, b txhash.ColdEntry) int { return bytes.Compare(a.Key[:], b.Key[:]) })
+	w, err := streamhash.NewSortedFileWriter(path, bin.SortedFileConfig(0))
+	require.NoError(t, err)
+	defer w.Close()
+	for _, e := range sorted {
+		payload, err := bin.Payload(e.Seq)
+		require.NoError(t, err)
+		require.NoError(t, w.Add(e.Key[:], payload))
+	}
+	require.NoError(t, w.Finish())
 }
 
 // EventLCMBytes returns the marshaled bytes of a single-transaction
@@ -360,45 +381,25 @@ func FeeTxLCMBytes(t *testing.T, seq uint32, feeCharged int64) []byte {
 	return V2LCMBytes(t, seq, 0, []xdr.TransactionEnvelope{envelope}, processing)
 }
 
-// ReadColdBin reads back a cold txhash .bin file written by
-// txhash.WriteColdBin, verifying the header count against the file size.
-// Test-side mirror of the on-disk contract (production consumes .bin files
-// via the index builder's streaming scan, never a full read-back).
-func ReadColdBin(t *testing.T, path string) []txhash.ColdEntry {
+// ReadColdBin reads back a cold txhash .bin, checking its header and its
+// records' order, and returns each record with its ledger, counted from
+// base, the payload base the .bin was written with. Production reads
+// .bin files only through the index build, never record by record.
+func ReadColdBin(t *testing.T, path string, base uint32) []txhash.ColdEntry {
 	t.Helper()
-	f, err := os.Open(path)
+	_, err := txhash.ReadColdBinHeader(path)
 	require.NoError(t, err)
-	defer f.Close()
-
-	// Prelude (magic "SBIN", version, 3 reserved) + uint64-LE count + secret.
-	const preludeSize = 8
-	const headerSize = preludeSize + 8 + stores.SecretLen
-	entrySize := txhash.ColdKeySize + 4
-
-	var header [headerSize]byte
-	_, err = io.ReadFull(f, header[:])
+	r, err := streamhash.OpenSortedFile(path)
 	require.NoError(t, err)
-	require.Equal(t, []byte("SBIN"), header[:4], "cold .bin magic")
-	require.Equal(t, byte(1), header[4], "cold .bin version")
-	count := binary.LittleEndian.Uint64(header[preludeSize : preludeSize+8])
-
-	info, err := f.Stat()
-	require.NoError(t, err)
-	// Divide the trusted size rather than multiplying the untrusted
-	// count (mirrors production's overflow-safe coldBinCount check).
-	body := info.Size() - headerSize
-	require.GreaterOrEqual(t, body, int64(0), "cold .bin shorter than its header")
-	require.Zero(t, body%int64(entrySize), "cold .bin body is not whole entries")
-	require.EqualValues(t, count, body/int64(entrySize),
-		"cold .bin size must match its declared entry count")
-
-	entries := make([]txhash.ColdEntry, count)
-	buf := make([]byte, entrySize)
-	for i := range entries {
-		_, err = io.ReadFull(f, buf)
+	defer r.Close()
+	var entries []txhash.ColdEntry
+	for {
+		key, payload, err := r.Next()
+		if errors.Is(err, io.EOF) {
+			return entries
+		}
 		require.NoError(t, err)
-		copy(entries[i].Key[:], buf[:txhash.ColdKeySize])
-		entries[i].Seq = binary.LittleEndian.Uint32(buf[txhash.ColdKeySize:])
+		seq := base + uint32(payload) //nolint:gosec // a 3-byte payload
+		entries = append(entries, txhash.ColdEntry{Key: key, Seq: seq})
 	}
-	return entries
 }

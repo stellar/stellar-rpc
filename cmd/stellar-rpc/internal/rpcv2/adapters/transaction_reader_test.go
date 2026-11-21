@@ -152,12 +152,9 @@ func TestGetTransaction_ColdIndexHit(t *testing.T) {
 	assert.True(t, got.Successful)
 }
 
-func TestGetTransaction_ColdFingerprintFalsePositiveIsCleanMiss(t *testing.T) {
+func TestGetTransaction_ColdAbsentHashIsCleanMiss(t *testing.T) {
 	ctx, reader, txs, _ := coldFixture(t)
 
-	// The cold index keys on the hash's first 16 bytes, so mutating a tail byte
-	// still hits the real transaction's entry; only ledger verification can
-	// reject the candidate.
 	mutated := txs[0].hash
 	mutated[20] ^= 0xff
 	_, err := reader.GetTransaction(ctx, mutated)
