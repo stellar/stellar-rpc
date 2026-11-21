@@ -355,7 +355,7 @@ func (r *Registry) publishReadyHandles(liveChunk chunk.ID, logger *supportlog.En
 			continue
 		}
 		db, err := hotchunk.OpenReadyWrite(
-			geometry.HotReady, r.catalog.Layout().HotChunkPath(c), c, r.catalog.Secret(), logger)
+			geometry.HotReady, r.catalog.Layout().HotChunkPath(c), c, r.catalog, logger)
 		if err != nil {
 			return fmt.Errorf("bootstrap: open hot chunk %s: %w", c, err)
 		}
