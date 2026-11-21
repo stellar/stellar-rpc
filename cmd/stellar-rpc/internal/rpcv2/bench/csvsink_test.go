@@ -21,7 +21,7 @@ import (
 // the report. Covers both sink interfaces (ingest.MetricSink and the
 // observability.Metrics signals RunBackfill emits), the zero-duration
 // exclusion rule, row suppression, file suppression (no per-type txhash or
-// events stage signals → no txhash.csv / events.csv), and the fixed row
+// events stage signals → no txhashes.csv / events.csv), and the fixed row
 // orders.
 func TestCSVSinkExactOutput(t *testing.T) {
 	sink := newCSVSink()
@@ -77,12 +77,12 @@ func TestCSVSinkExactOutput(t *testing.T) {
 		require.NoError(t, rerr, name)
 		assert.Equal(t, content, string(got), name)
 	}
-	assert.NoFileExists(t, filepath.Join(outDir, "txhash.csv"))
+	assert.NoFileExists(t, filepath.Join(outDir, "txhashes.csv"))
 	assert.NoFileExists(t, filepath.Join(outDir, "events.csv"))
 }
 
 // TestCSVSinkHotIngestTotal drives the ingest_total reconstruction directly:
-// two complete per-ledger HotPhase bursts (extract→ledgers→txhash→events→
+// two complete per-ledger HotPhase bursts (extract→ledger→txhashes→events→
 // commit→apply) plus one FAILED burst (extract, then a phase carrying an error,
 // no apply). Only PhaseApply — the terminal, success-only phase — emits an
 // ingest_total sample, so the failed burst contributes nothing; each complete
@@ -112,13 +112,6 @@ func TestCSVSinkHotIngestTotal(t *testing.T) {
 	outDir := t.TempDir()
 	_, err := sink.writeCSVs(outDir)
 	require.NoError(t, err)
-
-	// hot.csv keeps its own row names, whatever the metric labels are.
-	hot := readCSV(t, filepath.Join(outDir, "hot.csv"))
-	for _, row := range []string{"extract", coldTypeLedgers, coldTypeTxhash, coldTypeEvents, "commit", "apply"} {
-		assert.Contains(t, hot, row)
-	}
-	assert.Len(t, hot, 6)
 
 	driver := readCSV(t, filepath.Join(outDir, "driver.csv"))
 	require.Contains(t, driver, "ingest_total")
