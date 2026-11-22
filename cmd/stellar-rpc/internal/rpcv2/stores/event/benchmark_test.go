@@ -69,14 +69,14 @@ func buildIndex10M(b *testing.B, idx *hotIndex) {
 
 	rng := rand.New(rand.NewSource(42))
 
-	contractKeys := make([]TermKey, numContracts)
-	for i := range contractKeys {
-		contractKeys[i] = ComputeTermKey(fmt.Appendf(nil, "contract-%d", i), FieldContractID)
+	contractTerms := make([]Term, numContracts)
+	for i := range contractTerms {
+		contractTerms[i] = NewTerm(FieldContractID, fmt.Appendf(nil, "contract-%d", i))
 	}
 
-	topicKeys := make([]TermKey, numTopicVals)
-	for i := range topicKeys {
-		topicKeys[i] = ComputeTermKey(fmt.Appendf(nil, "topic-%d", i), Field(1+i%4))
+	topicTerms := make([]Term, numTopicVals)
+	for i := range topicTerms {
+		topicTerms[i] = NewTerm(Field(1+i%4), fmt.Appendf(nil, "topic-%d", i))
 	}
 
 	zipf := rand.NewZipf(rng, 1.01, 1.0, uint64(numTopicVals-1))
@@ -87,26 +87,27 @@ func buildIndex10M(b *testing.B, idx *hotIndex) {
 	// including the empty-topic and overflow ones, since how that family
 	// partitions decides whether it is cheap or not.
 	const systemEventEvery = 100_000
-	contractType := EventTypeTermKey(xdr.ContractEventTypeContract)
-	systemType := EventTypeTermKey(xdr.ContractEventTypeSystem)
+	contractType := EventTypeTerm(xdr.ContractEventTypeContract)
+	systemType := EventTypeTerm(xdr.ContractEventTypeSystem)
+	topicCounts := TopicCountTermsAtLeast(0)
 
-	ledger := make([][]TermKey, 0, eventsPerLedger)
+	ledger := make([][]Term, 0, eventsPerLedger)
 	for eventID := range uint32(totalEvents) {
-		keys := make([]TermKey, 0, maxTermsPerEvent)
-		keys = append(keys, contractKeys[eventID%uint32(numContracts)])
+		terms := make([]Term, 0, maxTermsPerEvent)
+		terms = append(terms, contractTerms[eventID%uint32(numContracts)])
 		numTopics := rng.Intn(protocol.MaxTopicCount + 2)
 		for range min(numTopics, protocol.MaxTopicCount) {
-			keys = append(keys, topicKeys[zipf.Uint64()])
+			terms = append(terms, topicTerms[zipf.Uint64()])
 		}
 		if eventID%systemEventEvery == 0 {
-			keys = append(keys, systemType)
+			terms = append(terms, systemType)
 		} else {
-			keys = append(keys, contractType)
+			terms = append(terms, contractType)
 		}
-		keys = append(keys, TopicCountTermKey(numTopics))
-		ledger = append(ledger, keys)
+		terms = append(terms, topicCounts[numTopics])
+		ledger = append(ledger, terms)
 		if len(ledger) == eventsPerLedger {
-			require.NoError(b, idx.add(eventID+1-eventsPerLedger, routedTerms(idx.secret, ledger)))
+			require.NoError(b, idx.add(eventID+1-eventsPerLedger, keyedTerms(idx.secret, ledger)))
 			ledger = ledger[:0]
 		}
 	}

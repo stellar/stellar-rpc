@@ -183,28 +183,28 @@ func (f *shapedFixture) build(tb testing.TB) *shapedFixture {
 	tb.Helper()
 	const n = shapedCorpusSize
 	raws := make(map[slabShape][]byte)
-	keys := make(map[slabShape][]TermKey)
+	terms := make(map[slabShape][]Term)
 	c := &diffCorpus{
 		raw:   make([][]byte, n),
-		index: NewBitmaps(),
+		index: termBitmaps{},
 	}
-	idsByKey := make(map[TermKey][]uint32)
+	idsByTerm := make(map[Term][]uint32)
 	for id := range n {
 		sh := f.shapeFor(id)
 		raw, ok := raws[sh]
 		if !ok {
 			raw = f.marshalShape(tb, sh)
-			ks, err := TermsForBytes(raw)
+			ts, err := TermsForBytes(raw)
 			require.NoError(tb, err)
-			raws[sh], keys[sh] = raw, ks
+			raws[sh], terms[sh] = raw, ts
 		}
 		c.raw[id] = raw
-		for _, k := range keys[sh] {
-			idsByKey[k] = append(idsByKey[k], id)
+		for _, term := range terms[sh] {
+			idsByTerm[term] = append(idsByTerm[term], id)
 		}
 	}
-	for k, ids := range idsByKey {
-		c.index.AddTo(k, ids...)
+	for term, ids := range idsByTerm {
+		c.index.add(term, ids...)
 	}
 	f.corpus = c
 	return f
@@ -492,9 +492,9 @@ func TestMatches_ShapedFixtureIsWhatItClaims(t *testing.T) {
 		"the wide union must span the corpus")
 
 	// Both sides of the overlap must be chunk-sized.
-	fat, _, err := r.LookupKeys(ctx, []TermKey{
-		ComputeTermKey(f.vocab.contracts[0], FieldContractID),
-		ComputeTermKey(f.vocab.topicRaw[1], topicField(0)),
+	fat, _, err := r.LookupTerms(ctx, []Term{
+		NewTerm(FieldContractID, f.vocab.contracts[0]),
+		NewTerm(topicField(0), f.vocab.topicRaw[1]),
 	}, everyID)
 	require.NoError(t, err)
 	for i, bm := range fat {
@@ -670,7 +670,7 @@ func pageFloor(limit, answer int) int {
 
 // ───────────────────────── the planning step ─────────────────────────
 
-// termBitmap is a materialized term, the shape LookupKeys hands the planner.
+// termBitmap is a materialized term, the shape LookupTerms hands the planner.
 func termBitmap(ids ...uint32) *roaring.Bitmap {
 	bm := roaring.New()
 	bm.AddMany(ids)
@@ -711,11 +711,11 @@ func TestResolveSlabPlans(t *testing.T) {
 func TestPlanIndexTermsSplitsRanges(t *testing.T) {
 	cid := []byte{0xAB}
 	ranged := Filter{ContractID: cid, TopicCount: TopicCountFilter{Count: 2}}
-	plans, keys, matchAll := planIndexTerms([]Filter{ranged, ranged, {ContractID: cid}})
+	plans, terms, matchAll := planIndexTerms([]Filter{ranged, ranged, {ContractID: cid}})
 	require.False(t, matchAll)
-	buckets := len(TopicCountTermKeysAtLeast(2))
+	buckets := len(TopicCountTermsAtLeast(2))
 	require.Len(t, plans, buckets+1)
-	assert.Len(t, keys, buckets+1)
+	assert.Len(t, terms, buckets+1)
 	for _, p := range plans[:buckets] {
 		assert.Equal(t, 0, p[0], "the contract slot leads every plan of the range")
 		assert.Len(t, p, 2)
@@ -882,11 +882,11 @@ type lookupCountingReader struct {
 	lookups int
 }
 
-func (c *lookupCountingReader) LookupKeys(
-	ctx context.Context, keys []TermKey, window IDRange,
+func (c *lookupCountingReader) LookupTerms(
+	ctx context.Context, terms []Term, window IDRange,
 ) ([]*roaring.Bitmap, Coverage, error) {
 	c.lookups++
-	bms, _, err := c.Reader.LookupKeys(ctx, keys, window)
+	bms, _, err := c.Reader.LookupTerms(ctx, terms, window)
 	return bms, Coverage{IDRange: IDRange{End: math.MaxUint32}}, err
 }
 
@@ -920,7 +920,7 @@ func TestMatches_DeadPlanEndsTheWalk(t *testing.T) {
 	r := &countingReader{Reader: diffReader{f.corpus}}
 	assert.Empty(t, drainMatches(t, Matches(context.Background(), r,
 		f.filterAbsentGroupLeading(), IDRange{0, shapedCorpusSize}, false, 0), 0))
-	assert.Equal(t, 1, r.lookupKeysCalls, "a dead plan must not ask for a second stage")
+	assert.Equal(t, 1, r.lookupTermsCalls, "a dead plan must not ask for a second stage")
 }
 
 // TestMatches_LaterStagesAreBounded pins what stageSlabs buys: a walk that runs
@@ -949,10 +949,10 @@ type wholeTermsReader struct {
 	maxIDs uint64
 }
 
-func (r wholeTermsReader) LookupKeys(
-	ctx context.Context, keys []TermKey, window IDRange,
+func (r wholeTermsReader) LookupTerms(
+	ctx context.Context, terms []Term, window IDRange,
 ) ([]*roaring.Bitmap, Coverage, error) {
-	bms, covered, err := r.Reader.LookupKeys(ctx, keys, window)
+	bms, covered, err := r.Reader.LookupTerms(ctx, terms, window)
 	covered.Whole = make([]bool, len(bms))
 	for i, bm := range bms {
 		covered.Whole[i] = bm == nil || bm.GetCardinality() <= r.maxIDs
@@ -979,7 +979,7 @@ func TestMatches_SkipsSlabsAWholeTermRulesOut(t *testing.T) {
 			name: "rare AND dense", filters: filters, window: IDRange{0, shapedCorpusSize}, desc: desc,
 		})
 		assert.Equal(t, want, r.windows, "desc=%v", desc)
-		assert.Equal(t, 5, r.totalKeys, "only stage 1 asks for the whole and absent terms")
+		assert.Equal(t, 5, r.totalTerms, "only stage 1 asks for the whole and absent terms")
 	}
 }
 
@@ -998,7 +998,7 @@ func TestMatches_LaterStagesSkipTermsOfPlansThatCannotMatch(t *testing.T) {
 	requireStream(t, r, matchingEvents(t, f.corpus, filters), queryCase{
 		name: "rare OR (absent AND dense)", filters: filters, window: IDRange{0, shapedCorpusSize},
 	})
-	assert.Equal(t, 3, r.totalKeys, "only stage 1 asks for the dense topic")
+	assert.Equal(t, 3, r.totalTerms, "only stage 1 asks for the dense topic")
 }
 
 // TestMatches_TwoInterleavedWholeTermsFindTheirSharedID pins a plan whose two
@@ -1029,15 +1029,15 @@ func TestMatches_TwoInterleavedWholeTermsFindTheirSharedID(t *testing.T) {
 	}
 }
 
-// underCoveringReader breaks Reader.LookupKeys' contract the one way the walk
+// underCoveringReader breaks Reader.LookupTerms' contract the one way the walk
 // cannot survive: it answers for less than it was asked, so a stage walks
 // nothing and the remainder never shrinks.
 type underCoveringReader struct{ Reader }
 
-func (r underCoveringReader) LookupKeys(
-	ctx context.Context, keys []TermKey, window IDRange,
+func (r underCoveringReader) LookupTerms(
+	ctx context.Context, terms []Term, window IDRange,
 ) ([]*roaring.Bitmap, Coverage, error) {
-	bms, _, err := r.Reader.LookupKeys(ctx, keys, window)
+	bms, _, err := r.Reader.LookupTerms(ctx, terms, window)
 	return bms, Coverage{IDRange: IDRange{Start: window.Start + 1, End: window.End}}, err
 }
 
@@ -1054,7 +1054,7 @@ func TestMatches_UnderCoveringLookupIsAnError(t *testing.T) {
 	require.ErrorContains(t, err, "covered")
 }
 
-// windowFuzzReader is the caller's half of Reader.LookupKeys' contract: a
+// windowFuzzReader is the caller's half of Reader.LookupTerms' contract: a
 // result answers for the ids in the range the lookup reported it covered —
 // which contains the window it was asked for — and for no others. Wrapping
 // any Reader with it — the hot store and this package's test doubles alike —
@@ -1075,10 +1075,10 @@ type windowFuzzReader struct {
 	span uint32
 }
 
-func (r windowFuzzReader) LookupKeys(
-	ctx context.Context, keys []TermKey, window IDRange,
+func (r windowFuzzReader) LookupTerms(
+	ctx context.Context, terms []Term, window IDRange,
 ) ([]*roaring.Bitmap, Coverage, error) {
-	bms, covered, err := r.Reader.LookupKeys(ctx, keys, window)
+	bms, covered, err := r.Reader.LookupTerms(ctx, terms, window)
 	if err != nil {
 		return nil, Coverage{}, err
 	}

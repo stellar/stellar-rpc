@@ -13,7 +13,7 @@ package event
 // asks the term bitmaps where the next candidate can be and jumps there (see
 // the bound helpers below).
 //
-// The term bitmaps come from the Reader.LookupKeys call this stage was looked
+// The term bitmaps come from the Reader.LookupTerms call this stage was looked
 // up by and are held for its walk. They answer for the stage's ids, which is
 // why the stepper's window is the stage: the bounds it proves from them die
 // with it. They are read-only. FastAnd reads its arguments and returns fresh

@@ -1,13 +1,7 @@
 package event
 
-// Byte-level goldens for the term-key derivation. The term keys are on-disk
-// format: they are the identities every frozen index.pack/index.hash is built
-// over, so any change to the hash function, the field-byte prefix, or a
-// field's value encoding silently invalidates every existing index. These
-// fixtures make such a change fail CI with "bytes changed: bump
-// TermSchemaVersion (and the artifact format) or revert" instead of relying
-// on review to notice. (The shared blinding primitives are pinned at their
-// own level, in stores/blind_test.go.)
+// Byte-level goldens for the term keys under the fixed test secret. The keys
+// are on-disk format: a change here means bump TermSchemaVersion, or revert.
 
 import (
 	"encoding/hex"
@@ -24,41 +18,41 @@ func hexKey(t *testing.T, k TermKey) string {
 	return hex.EncodeToString(k[:])
 }
 
-func TestComputeTermKey_Golden(t *testing.T) {
+func TestTermKey_Golden(t *testing.T) {
 	val := []byte("stellar-rpc-term-golden")
 	want := map[Field]string{
-		FieldContractID: "68828a4d63340ec7a182c7bacec54f0a",
-		FieldTopic0:     "fe2646f2447419a4c3b5899d18f19517",
-		FieldTopic1:     "5d3c6660724f4267f75f0314a8bd99bc",
-		FieldTopic2:     "924913135dfd660d50dd75352d8b4bb8",
-		FieldTopic3:     "9a981d29f52a36df9c3d9fa2d19ffc91",
-		FieldEventType:  "b8cba0b1d3c82ec9ba18a11d780d0d23",
-		FieldTopicCount: "8188dbfd6145c54e6cb442dc02b3c324",
+		FieldContractID: "25d1fc0d0be846045b47c7e4e1cb7130",
+		FieldTopic0:     "d4ae2f1e1317b65b14e7117899ffbbd3",
+		FieldTopic1:     "db67c52c51441a8df08e7c4ca38af2ff",
+		FieldTopic2:     "c9cec2fb9cb2a6fd2ac34334697a6f9d",
+		FieldTopic3:     "488208b25e5badb441083b73dfd3b184",
+		FieldEventType:  "e11fa5b83906e7a157297d990d1d34a1",
+		FieldTopicCount: "104581f4da1b727bf11507a0aef29287",
 	}
 	require.Len(t, want, len(allFields), "extend the golden map when adding a Field")
 	for _, f := range allFields {
 		w, pinned := want[f]
 		require.True(t, pinned, "field %d has no golden pin; add one when adding a Field", f)
-		assert.Equal(t, w, hexKey(t, ComputeTermKey(val, f)), "field %d", f)
+		assert.Equal(t, w, hexKey(t, NewTerm(f, val).Key(testIndexSecret)), "field %d", f)
 	}
 }
 
 func TestFieldTermKeys_Golden(t *testing.T) {
-	assert.Equal(t, "092967d65ec25b057c6a54e627dec4e6",
-		hexKey(t, EventTypeTermKey(xdr.ContractEventTypeContract)))
+	assert.Equal(t, "79be05c26f39249bb53e27ad703e2547",
+		hexKey(t, EventTypeTerm(xdr.ContractEventTypeContract).Key(testIndexSecret)))
 
 	wantCounts := []string{
-		"5a21d2e3bd688e548ac939e4babaeb9b",
-		"8e389795ce9351bb0abbe6c00fff6052",
-		"a68396e0abe112008816c89412c9113b",
-		"291796ea36f7a80a1d7515faf2a22ec7",
-		"db3d5df76fa2f6cd611dde2b96f16401",
-		"70c2b104db4b2ba115eeb4954daac675", // the overflow bucket
+		"3a9d24f15cb6d30e39d854b4c1cd0183",
+		"51f37bb33de8a2be7914b5f7d36acc5f",
+		"9cfc15110981972872a04fcaa48b21b6",
+		"d6f277a0ddf565a8832c8112915adf1f",
+		"4d0a53430a32c3b298e94759486add79",
+		"541d1a45bee7502a70bf40bdb606bdfd", // the overflow bucket
 	}
 	for n, w := range wantCounts {
-		assert.Equal(t, w, hexKey(t, TopicCountTermKey(n)), "topic count %d", n)
+		assert.Equal(t, w, hexKey(t, TopicCountTerm(n).Key(testIndexSecret)), "topic count %d", n)
 	}
-	assert.Equal(t, TopicCountTermKey(topicCountOverflowBucket), TopicCountTermKey(99),
+	assert.Equal(t, TopicCountTerm(topicCountOverflowBucket), TopicCountTerm(99),
 		"counts past the overflow bucket clamp into it")
 }
 
@@ -95,25 +89,25 @@ func goldenContractEventBytes(t *testing.T) []byte {
 }
 
 // TestTermsForBytes_Golden pins the full derivation from a marshaled event:
-// not just the hash and field prefix (TestComputeTermKey_Golden's job) but
+// not just the hash and field prefix (TestTermKey_Golden's job) but
 // the value encoding of every field TermsForBytes extracts, so a change to
 // how a contract ID or topic becomes hash input cannot pass unnoticed.
 // Cross-anchors: key 0 equals the eventType(contract) golden and key 2 the
 // topicCount(4) golden above.
 func TestTermsForBytes_Golden(t *testing.T) {
-	keys, err := TermsForBytes(goldenContractEventBytes(t))
+	terms, err := TermsForBytes(goldenContractEventBytes(t))
 	require.NoError(t, err)
 	want := []string{
-		"092967d65ec25b057c6a54e627dec4e6", // event type (contract)
-		"f96521b095e9249b0af1546bfbd9a80f", // contract ID 0..31
-		"db3d5df76fa2f6cd611dde2b96f16401", // topic count 4
-		"8b9390866f0062b43022a0896fe6b606", // topic 0: symbol "transfer"
-		"de4348720f97c94df5621c5cc5304a3d", // topic 1: u32 7
-		"9ea0933498a23b8f6c3d867631e945c8", // topic 2: symbol "to"
-		"dacc6ffd833f6932052ef2cd55f75844", // topic 3: u32 9
+		"79be05c26f39249bb53e27ad703e2547", // event type (contract)
+		"3e338c99eca417d8bedb899eda51b346", // contract ID 0..31
+		"4d0a53430a32c3b298e94759486add79", // topic count 4
+		"4d3a94c9d897819e375e2ce31b46173c", // topic 0: symbol "transfer"
+		"3db0bc0cf1012b296c09670dd89f461a", // topic 1: u32 7
+		"6ac66407822877be0bff3d89b4c9ffbd", // topic 2: symbol "to"
+		"65515cacf29c2fa9ec988f7a75e28850", // topic 3: u32 9
 	}
-	require.Len(t, keys, len(want))
-	for i, k := range keys {
-		assert.Equal(t, want[i], hex.EncodeToString(k[:]), "key %d", i)
+	require.Len(t, terms, len(want))
+	for i, term := range terms {
+		assert.Equal(t, want[i], hexKey(t, term.Key(testIndexSecret)), "key %d", i)
 	}
 }

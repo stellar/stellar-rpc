@@ -1,7 +1,7 @@
 package event
 
 // roaring_contract_test.go pins the roaring properties the match path rests
-// on. The bitmaps Reader.LookupKeys returns are read-only, and the walk hands
+// on. The bitmaps Reader.LookupTerms returns are read-only, and the walk hands
 // them to FastAnd, NextValue and PreviousValue. That is sound only while
 // FastAnd reads its arguments and returns containers that share no storage
 // with them, and the searches are read-only, inclusive of the target, and

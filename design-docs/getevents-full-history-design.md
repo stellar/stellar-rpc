@@ -130,7 +130,7 @@ For each unique value seen in an indexed field, the system stores a roaring bitm
 (topic0, 0x7b2c...)      → {0, 1, 5, 12, 13, 14, 98, 102, ...}
 ```
 
-Each term is identified by a 16-byte key: `hash(value bytes || field byte)`, where the field byte encodes the field type (contractId, topic0–3). Including the field byte in the hash input ensures uniqueness across fields. The resulting 16-byte key is used directly as a lookup key in the in-memory index and can be fed into the MPHF without re-hashing.
+Each term is its field byte, which encodes the field type (contractId, topic0–3), followed by the value bytes, so the same value in two fields is two terms. A chunk files a term under a 16-byte key: the whole term hashed with SipHash-2-4-128 under the chunk's secret (`stores.BlindKey`). The key is used directly as the lookup key in the in-memory index and is fed into the MPHF without re-hashing. Because the key covers the whole term and the secret stays on the node, nobody without the secret can make two terms share a key, so an attacker cannot add their events to another term's bitmap.
 
 Roaring bitmaps are used because term density varies widely across the data. Most terms match very few events while common terms like "transfer" can match millions. Roaring bitmaps handle this efficiently across the full range: array containers for sparse terms (where a full bitmap would be mostly empty) and compressed bitmap containers for dense terms (where a sorted array would be too large).
 
@@ -150,7 +150,7 @@ Event IDs are cut into **slabs** of 65,536. The index handles one slab at a time
 - **Sealing.** When a slab is full, its postings are grouped by term, each term's event IDs are serialized as one bitmap, and the slab is written as one sorted file of (slab ‖ term) → bitmap and loaded into the index column family. This runs in the background while the next slab fills.
 - **Bound.** The writer waits for the previous seal before starting another, so at most two slabs are in memory.
 - **Lookups.** A sealed slab is read from the column family. A slab still in memory is read without a lock: postings that share the leading 16 bits of their key form a chain, and a lookup walks one chain.
-- **Keys.** Each term is filed under its routed key, the term key blinded under the chunk secret, as in the cold index (Section 9.2).
+- **Keys.** Each term is filed under its key under the chunk secret, the key the cold index uses (Section 9.2).
 
 After a restart, the events after the last sealed slab (at most about two slabs) are indexed again from the events data column family.
 
@@ -256,9 +256,9 @@ At open, the entry count must equal the MPHF's key count plus D × (C − 1), an
 
 **Term Lookup:**
 
-1. Blind the term key under the chunk secret to get its routed key, and query the MPHF in `index.hash` with it to obtain the slot s.
+1. Key the term with the chunk secret `index.hash` stores, and query the MPHF with the key to obtain the slot s.
 2. Binary-search the rows for r, the number of split slots below s. The term's entry, or its slab-0 entry, is at position s + r × (C − 1).
-3. If s is not split, read that entry. If its fingerprint matches streamhash's fingerprint of the routed key (`streamhash.Fingerprint`), deserialize the bitmap; otherwise the term is not present.
+3. If s is not split, read that entry. If its fingerprint matches streamhash's fingerprint of the key (`streamhash.Fingerprint`), deserialize the bitmap; otherwise the term is not present.
 4. If s is split, compare the fingerprint with the row's; on a mismatch the term is not present and nothing is read. Otherwise read each slab x the query window reaches, at the position plus x. A zero-length slab entry is not decoded, and a non-empty one must hold only IDs of slab x, which catches a wrong slab.
 5. One read pass serves every term. A split term's slabs are adjacent entries, so a window of them is one contiguous read, and they are OR-ed back together in slab order.
 
@@ -329,8 +329,9 @@ The cold segment read path follows the same workflow as the hot segment (steps 2
 
 ```
 1. Load bitmaps from the immutable index files instead of the hot index:
-   * Hash the term key, query the MPHF in index.hash to get a slot, and
-     find the slot's position in index.pack from the app data's rows (§9.2).
+   * Key the term with the chunk secret, query the MPHF in index.hash to
+     get a slot, and find the slot's position in index.pack from the app
+     data's rows (§9.2).
    * Read the entry at that position, or for a split term the slab entries
      the query window reaches.
    * Check the 4-byte fingerprint, the entry's own or the split term's row.
@@ -348,13 +349,13 @@ The cold segment read path follows the same workflow as the hot segment (steps 2
 
 ### 11.4 Windowed Lookup
 
-`LookupKeys(ctx, keys, window)` returns one bitmap per key, the ID range the answer covers, and which terms are whole.
+`LookupTerms(ctx, terms, window)` returns one bitmap per term, the ID range the answer covers, and which terms are whole.
 
 * `nil` means the term is absent from the chunk. A present term with nothing in the window is a non-nil empty bitmap, since a `nil` would read as absent and drop that filter's plan for the rest of the query.
 * Every returned bitmap agrees with the index on every ID in the covered range, and the covered range always contains the window. A whole term's bitmap agrees on every ID. Elsewhere IDs may be present or absent, and callers must not depend on them, neither as matches nor as the answer to a `NextValue` or `PreviousValue` that leaves it.
 * The cold reader reads a split term's slab entries whole and reports their span, up to the top of the ID space when they reach the chunk's last slab, past which the index holds no ID. Every split term shares the chunk's slabs, so one range serves the whole lookup. A cold lookup that reached no split term reports the whole ID space. The hot store reads only the slabs the window touches and reports their span, with no term whole; it never returns `nil` for a term, since it has not looked at the other slabs.
 
-**Stages.** A query materializes its window in stages, each one `LookupKeys` walked as far as that lookup says it covered. Stage 1 is the leading 4 slabs in the walk's direction (the trailing 4 when descending), and every later stage the next 16, each run only if the consumer is still pulling when the previous one runs out and no earlier lookup already covered it, and each starting where the walk stopped, so no slab is read twice. So a first page reads 4 slab entries of a split term, the common page makes one lookup, and a query never holds more than 16 slabs of a split term at once: at most one container per slab, so 128 KiB per split term whatever the chunk's density, under 2 MiB for queryEvents' 15-term budget (getEvents v1 has no term budget). Bitmaps, and bounds proved from them, do not carry across a stage; the cursor and the emitted count do. A whole term's bounds are the exception: its bitmap is exact on every ID. When every plan that can still match has a whole term, each later stage runs from the first to the last ID in its 16 slabs where some plan's sparsest whole term has an event, and the walk ends when none has one left. So a wallet's query, a popular contract and the account's address, reads only the slabs near the account's events.
+**Stages.** A query materializes its window in stages, each one `LookupTerms` walked as far as that lookup says it covered. Stage 1 is the leading 4 slabs in the walk's direction (the trailing 4 when descending), and every later stage the next 16, each run only if the consumer is still pulling when the previous one runs out and no earlier lookup already covered it, and each starting where the walk stopped, so no slab is read twice. So a first page reads 4 slab entries of a split term, the common page makes one lookup, and a query never holds more than 16 slabs of a split term at once: at most one container per slab, so 128 KiB per split term whatever the chunk's density, under 2 MiB for queryEvents' 15-term budget (getEvents v1 has no term budget). Bitmaps, and bounds proved from them, do not carry across a stage; the cursor and the emitted count do. A whole term's bounds are the exception: its bitmap is exact on every ID. When every plan that can still match has a whole term, each later stage runs from the first to the last ID in its 16 slabs where some plan's sparsest whole term has an event, and the walk ends when none has one left. So a wallet's query, a popular contract and the account's address, reads only the slabs near the account's events.
 
 ## 12. Startup Procedure
 

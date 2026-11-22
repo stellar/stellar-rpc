@@ -164,8 +164,7 @@ type hotIndex struct {
 	store *rocksdb.Store
 	view  atomic.Pointer[hotIndexView]
 
-	// secret is the chunk's cold index secret. Every term is filed under
-	// routedKey(secret, term), so callers cannot pick a term's bucket.
+	// secret keys every term, so callers cannot pick a term's bucket.
 	secret [stores.SecretLen]byte
 
 	sealer sealer
@@ -254,7 +253,6 @@ func (x *hotIndex) seal(s *hotSlab) error {
 }
 
 // sealedBitmap reads a term's event ids in a sealed slab, nil if it has none.
-// k is the term's routed key.
 func (x *hotIndex) sealedBitmap(slab uint32, k TermKey) (*roaring.Bitmap, error) {
 	val, found, err := x.store.Get(IndexCF, hotIndexKey(slab, k))
 	if err != nil || !found {
@@ -268,8 +266,7 @@ func (x *hotIndex) sealedBitmap(slab uint32, k TermKey) (*roaring.Bitmap, error)
 }
 
 // slabBitmap returns a term's event ids in one slab, nil if it has none:
-// from memory while v holds the slab, from IndexCF once it is sealed. k is
-// the term's routed key.
+// from memory while v holds the slab, from IndexCF once it is sealed.
 func (x *hotIndex) slabBitmap(v *hotIndexView, slab uint32, k TermKey) (*roaring.Bitmap, error) {
 	switch {
 	case slab == v.live.slab:
@@ -280,59 +277,71 @@ func (x *hotIndex) slabBitmap(v *hotIndexView, slab uint32, k TermKey) (*roaring
 	return x.sealedBitmap(slab, k)
 }
 
-// ledgerTerms are consecutive events' term keys, event i's at
-// keys[ends[i-1]:ends[i]].
+// ledgerTerms are consecutive events' terms, event i's at
+// terms[ends[i-1]:ends[i]], with their keys at the same positions.
 type ledgerTerms struct {
-	keys []TermKey
-	ends []uint32
-	// routed closes once routeAsync's routing is done.
-	routed chan struct{}
+	terms Terms
+	keys  []TermKey
+	ends  []uint32
+	// keyed closes once keyAsync's keying is done.
+	keyed chan struct{}
 }
 
-// reset empties t once the last routeAsync is done.
+// reset empties t once the last keyAsync is done.
 func (t *ledgerTerms) reset() {
-	t.waitRouted()
+	t.waitKeyed()
+	t.terms.Reset()
 	t.keys, t.ends = t.keys[:0], t.ends[:0]
 }
 
 // appendEvent appends the next event's terms.
 func (t *ledgerTerms) appendEvent(eventBytes []byte) error {
-	keys, err := AppendTermsForBytes(t.keys, eventBytes)
-	if err != nil {
+	if err := t.terms.AppendEvent(eventBytes); err != nil {
 		return err
 	}
-	t.keys = keys
-	t.ends = append(t.ends, uint32(len(keys))) //nolint:gosec // a ledger's postings fit in uint32
+	t.ends = append(t.ends, uint32(t.terms.Len())) //nolint:gosec // a ledger's postings fit in uint32
 	return nil
 }
 
-// route replaces every key with the key the index files it under.
-func (t *ledgerTerms) route(secret [stores.SecretLen]byte) {
-	for i := range t.keys {
-		t.keys[i] = routedKey(secret, t.keys[i])
+// appendKeyed appends the next event's keys without keeping its terms.
+func (t *ledgerTerms) appendKeyed(eventBytes []byte, secret [stores.SecretLen]byte) error {
+	t.terms.Reset()
+	if err := t.terms.AppendEvent(eventBytes); err != nil {
+		return err
+	}
+	for i := range t.terms.Len() {
+		t.keys = append(t.keys, t.terms.Key(i, secret))
+	}
+	t.ends = append(t.ends, uint32(len(t.keys))) //nolint:gosec // two slabs' postings fit in uint32
+	return nil
+}
+
+func (t *ledgerTerms) key(secret [stores.SecretLen]byte) {
+	t.keys = slices.Grow(t.keys[:0], t.terms.Len())
+	for i := range t.terms.Len() {
+		t.keys = append(t.keys, t.terms.Key(i, secret))
 	}
 }
 
-// routeAsync routes the terms on another goroutine; waitRouted waits for it.
-func (t *ledgerTerms) routeAsync(secret [stores.SecretLen]byte) {
-	routed := make(chan struct{})
-	t.routed = routed
+// keyAsync keys the terms on another goroutine; waitKeyed waits for it.
+func (t *ledgerTerms) keyAsync(secret [stores.SecretLen]byte) {
+	keyed := make(chan struct{})
+	t.keyed = keyed
 	go func() {
-		defer close(routed)
-		t.route(secret)
+		defer close(keyed)
+		t.key(secret)
 	}()
 }
 
-// waitRouted waits until the last routeAsync is done.
-func (t *ledgerTerms) waitRouted() {
-	if t.routed != nil {
-		<-t.routed
-		t.routed = nil
+func (t *ledgerTerms) waitKeyed() {
+	if t.keyed != nil {
+		<-t.keyed
+		t.keyed = nil
 	}
 }
 
 // add indexes committed events, the first of which has id startID, from
-// their routed terms. Only the ingest goroutine calls it. It fails once a
+// their terms' keys. Only the ingest goroutine calls it. It fails once a
 // seal has failed; the unsealed slabs stay readable from memory, and the
 // next open indexes them again.
 func (x *hotIndex) add(startID uint32, t *ledgerTerms) error {
@@ -379,10 +388,10 @@ func (x *hotIndex) rotate(full *hotSlab) (*hotSlab, error) {
 // settle waits for the seal in flight, if any, and returns its outcome.
 func (x *hotIndex) settle() error { return x.sealer.wait() }
 
-// lookup returns each key's event ids in the slabs the window touches, and
+// lookup returns each term's event ids in the slabs the window touches, and
 // the id range those slabs span.
-func (x *hotIndex) lookup(ctx context.Context, keys []TermKey, window IDRange) ([]*roaring.Bitmap, IDRange, error) {
-	out := make([]*roaring.Bitmap, len(keys))
+func (x *hotIndex) lookup(ctx context.Context, terms []Term, window IDRange) ([]*roaring.Bitmap, IDRange, error) {
+	out := make([]*roaring.Bitmap, len(terms))
 	for i := range out {
 		out[i] = roaring.New()
 	}
@@ -395,16 +404,13 @@ func (x *hotIndex) lookup(ctx context.Context, keys []TermKey, window IDRange) (
 		covered.End = (last + 1) << indexSlabShift
 	}
 
-	routed := make([]TermKey, len(keys))
-	for i, k := range keys {
-		routed[i] = routedKey(x.secret, k)
-	}
+	keys := keysUnder(x.secret, terms)
 	v := x.view.Load()
 	for slab := first; slab <= min(last, v.live.slab); slab++ {
 		if err := ctx.Err(); err != nil {
 			return nil, IDRange{}, err
 		}
-		for i, k := range routed {
+		for i, k := range keys {
 			bm, err := x.slabBitmap(v, slab, k)
 			if err != nil {
 				return nil, IDRange{}, err

@@ -88,7 +88,7 @@ func openRawHotChunkForTest(t *testing.T, dir string, chunkID chunk.ID) *rocksdb
 	return raw
 }
 
-func makePayload(symbol string) (Payload, []TermKey) {
+func makePayload(symbol string) (Payload, []Term) {
 	var cid xdr.ContractId
 	cid[0] = 0xab
 	sym := xdr.ScSymbol(symbol)
@@ -107,7 +107,7 @@ func makePayload(symbol string) (Payload, []TermKey) {
 	if err != nil {
 		panic(err) // hardcoded test fixture; an error here is a test bug
 	}
-	keys, err := TermsForBytes(evBytes)
+	terms, err := TermsForBytes(evBytes)
 	if err != nil {
 		panic(err)
 	}
@@ -116,7 +116,7 @@ func makePayload(symbol string) (Payload, []TermKey) {
 		TxIdx:              1,
 		ContractEventBytes: evBytes,
 	}
-	return p, keys
+	return p, terms
 }
 
 // eventOf decodes a Payload's ContractEventBytes back into the struct for
@@ -151,7 +151,7 @@ func TestHotStore_IngestLedgerWritesDataAndOffsets(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 
-	p, keys := makePayload("transfer")
+	p, terms := makePayload("transfer")
 	require.NoError(t, ingestLedgerEvents(h.store, 2, []Payload{p}))
 
 	// events_data row exists.
@@ -174,11 +174,11 @@ func TestHotStore_IngestLedgerWritesDataAndOffsets(t *testing.T) {
 	assert.Equal(t, uint32(1), binary.BigEndian.Uint32(offVal))
 
 	// The index sees the term.
-	bm := lookupOne(t, h.store, keys[0])
+	bm := lookupOne(t, h.store, terms[0])
 	require.NotNil(t, bm)
 	assert.True(t, bm.Contains(0))
 	// A lookup covers the slabs its window touches.
-	_, covered, err := h.store.LookupKeys(context.Background(), keys[:1], IDRange{Start: 0, End: 1})
+	_, covered, err := h.store.LookupTerms(context.Background(), terms[:1], IDRange{Start: 0, End: 1})
 	require.NoError(t, err)
 	assert.Equal(t, IDRange{Start: 0, End: 1 << indexSlabShift}, covered.IDRange)
 
@@ -218,26 +218,26 @@ func TestHotStore_EmptyLedgerStillWritesOffsetsAndState(t *testing.T) {
 }
 
 func TestHotStore_LookupResultOutlivesLaterIngest(t *testing.T) {
-	// HotStore.LookupKeys builds each bitmap for its caller. A later
+	// HotStore.LookupTerms builds each bitmap for its caller. A later
 	// IngestLedgerEvents must NOT affect a previously-returned bitmap —
 	// callers can safely retain it across writes.
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 
-	p, keys := makePayload("snapshot")
+	p, terms := makePayload("snapshot")
 	require.NoError(t, ingestLedgerEvents(h.store, 2, []Payload{p}))
 
-	first := lookupOne(t, h.store, keys[0])
+	first := lookupOne(t, h.store, terms[0])
 	cardBefore := first.GetCardinality()
 
 	require.NoError(t, ingestLedgerEvents(h.store, 3, []Payload{p}))
 
 	assert.Equal(t, cardBefore, first.GetCardinality(),
-		"a later IngestLedgerEvents must not change a prior LookupKeys result")
+		"a later IngestLedgerEvents must not change a prior LookupTerms result")
 
-	second := lookupOne(t, h.store, keys[0])
+	second := lookupOne(t, h.store, terms[0])
 	assert.Equal(t, cardBefore+1, second.GetCardinality(),
-		"a later LookupKeys must observe the new event")
+		"a later LookupTerms must observe the new event")
 }
 
 func TestHotStore_FetchEventsRoundTrip(t *testing.T) {
@@ -382,12 +382,12 @@ func TestHotStore_PostCloseReadsError(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 
-	p, keys := makePayload("seed")
+	p, terms := makePayload("seed")
 	require.NoError(t, ingestLedgerEvents(h.store, chunkID.FirstLedger(), []Payload{p}))
 	require.NoError(t, h.raw.Close())
 
-	// LookupKeys must error rather than silently returning cached bitmaps.
-	bms, _, err := h.store.LookupKeys(context.Background(), []TermKey{keys[0]}, everyID)
+	// LookupTerms must error rather than silently returning cached bitmaps.
+	bms, _, err := h.store.LookupTerms(context.Background(), []Term{terms[0]}, everyID)
 	assert.Nil(t, bms)
 	require.ErrorIs(t, err, stores.ErrStoreClosed)
 
@@ -441,7 +441,7 @@ func TestHotStore_IngestLedgerEvents_DuplicateLedgerErrors(t *testing.T) {
 	// The rejected payload must not reach the index. makePayload shares
 	// its contract ID, type and topic count across symbols, so topic0 is
 	// the term that tells the two payloads apart.
-	assert.True(t, lookupOne(t, h.store, topic0TermKey(t, p2)).IsEmpty(),
+	assert.True(t, lookupOne(t, h.store, topic0Term(t, p2)).IsEmpty(),
 		"the rejected payload's topic0 term must not appear in the index")
 }
 
@@ -536,13 +536,13 @@ func firstIterError(seq iter.Seq2[Payload, error]) error {
 }
 
 // lookupOne resolves a single term over the whole chunk through the batched
-// LookupKeys API and returns its bitmap. Shared by the hot/cold/query tests
-// that assert on one term at a time. It requires LookupKeys to succeed, so
-// closed/corrupt-path tests must call LookupKeys directly and assert on the
+// LookupTerms API and returns its bitmap. Shared by the hot/cold/query tests
+// that assert on one term at a time. It requires LookupTerms to succeed, so
+// closed/corrupt-path tests must call LookupTerms directly and assert on the
 // error.
-func lookupOne(t *testing.T, r Reader, key TermKey) *roaring.Bitmap {
+func lookupOne(t *testing.T, r Reader, term Term) *roaring.Bitmap {
 	t.Helper()
-	bms, _, err := r.LookupKeys(context.Background(), []TermKey{key}, everyID)
+	bms, _, err := r.LookupTerms(context.Background(), []Term{term}, everyID)
 	require.NoError(t, err)
 	require.Len(t, bms, 1)
 	return bms[0]
@@ -642,10 +642,10 @@ func mustOffsets(t *testing.T, r Reader) *LedgerOffsets {
 
 // addPostings injects postings into the slab being filled, the way a term
 // hash collision would. No ingest may run beside it.
-func addPostings(h *HotStore, key TermKey, ids ...uint32) {
+func addPostings(h *HotStore, term Term, ids ...uint32) {
 	live := h.index.view.Load().live
 	for _, id := range ids {
-		live.add(routedKey(h.index.secret, key), id)
+		live.add(term.Key(h.index.secret), id)
 	}
 }
 

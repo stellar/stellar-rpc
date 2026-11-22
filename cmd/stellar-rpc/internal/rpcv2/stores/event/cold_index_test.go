@@ -36,7 +36,7 @@ func indexFixture(t *testing.T, n int) Bitmaps {
 	idx := NewBitmaps()
 	for i := range n {
 		v := fmt.Sprintf("term-%d", i)
-		idx.AddTo(ComputeTermKey([]byte(v), FieldContractID),
+		idx.AddTo(NewTerm(FieldContractID, []byte(v)).Key(testIndexSecret),
 			uint32(i*10), uint32(i*10+1))
 	}
 	return idx
@@ -120,17 +120,14 @@ func TestWriteIndex_RoundTripsBitmapsPerTerm(t *testing.T) {
 	// fingerprint and verify the deserialized bitmap matches the
 	// original.
 	for i := range n {
-		term := ComputeTermKey(
-			fmt.Appendf(nil, "term-%d", i),
-			FieldContractID,
-		)
+		term := NewTerm(FieldContractID, fmt.Appendf(nil, "term-%d", i)).Key(testIndexSecret)
 		slot, _, err := m.Lookup(term)
 		require.NoError(t, err, "lookup term-%d", i)
 
 		record := records[slot]
 		require.GreaterOrEqual(t, len(record), IndexRecordFingerprintLen, "record at slot %d too short", slot)
 
-		assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen],
+		assert.Equal(t, keyFP(term), record[:IndexRecordFingerprintLen],
 			"fingerprint mismatch at slot %d", slot)
 
 		// Deserialize bitmap.
@@ -157,15 +154,12 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 	// Probe a batch of unseen terms. For each, the MPHF either
 	// fast-no-matches (ErrKeyNotFound — already covered by mphf_test)
 	// or returns a slot whose fingerprint does NOT match the unseen
-	// term's routed key. The latter is the case index.pack's
+	// term's key. The latter is the case index.pack's
 	// fingerprint check screens. 2000 probes keep P(zero collisions)
 	// negligible.
 	var collisions, mismatches int
 	for i := range 2000 {
-		unseen := ComputeTermKey(
-			fmt.Appendf(nil, "never-seen-%d", i),
-			FieldTopic0,
-		)
+		unseen := NewTerm(FieldTopic0, fmt.Appendf(nil, "never-seen-%d", i)).Key(testIndexSecret)
 		slot, _, err := m.Lookup(unseen)
 		if errors.Is(err, ErrKeyNotFound) {
 			continue
@@ -174,7 +168,7 @@ func TestWriteIndex_UnseenTermFingerprintMismatches(t *testing.T) {
 		collisions++
 
 		recordFP := records[slot][:IndexRecordFingerprintLen]
-		if string(recordFP) != string(routedFP(unseen)) {
+		if string(recordFP) != string(keyFP(unseen)) {
 			mismatches++
 		}
 	}
@@ -226,7 +220,7 @@ func TestWriteIndex_ZeroTerms_WritesEmptyIndex(t *testing.T) {
 	m, err := openMPHF(filepath.Join(dir, IndexHashName(indexTestChunkID)))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
-	_, _, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
+	_, _, lerr := m.Lookup(NewTerm(FieldContractID, []byte("anything")).Key(testIndexSecret))
 	assert.ErrorIs(t, lerr, ErrKeyNotFound)
 }
 
@@ -265,10 +259,7 @@ func TestWriteIndex_SlotsAreDense(t *testing.T) {
 
 			seen := make(map[uint32]struct{}, n)
 			for i := range n {
-				term := ComputeTermKey(
-					fmt.Appendf(nil, "term-%d", i),
-					FieldContractID,
-				)
+				term := NewTerm(FieldContractID, fmt.Appendf(nil, "term-%d", i)).Key(testIndexSecret)
 				slot, _, err := m.Lookup(term)
 				require.NoError(t, err)
 				assert.Less(t, slot, uint32(n))
@@ -298,13 +289,10 @@ func TestWriteIndex_LargeIndex(t *testing.T) {
 
 	// Spot-check a sample of terms.
 	for _, i := range []int{0, 1, 7, n / 2, n - 1} {
-		term := ComputeTermKey(
-			fmt.Appendf(nil, "term-%d", i),
-			FieldContractID,
-		)
+		term := NewTerm(FieldContractID, fmt.Appendf(nil, "term-%d", i)).Key(testIndexSecret)
 		slot, _, err := m.Lookup(term)
 		require.NoError(t, err)
-		assert.Equal(t, routedFP(term), records[slot][:IndexRecordFingerprintLen])
+		assert.Equal(t, keyFP(term), records[slot][:IndexRecordFingerprintLen])
 	}
 }
 
@@ -314,7 +302,7 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	// silently, this test fails.
 	dir := t.TempDir()
 	idx := NewBitmaps()
-	idx.AddTo(ComputeTermKey([]byte("only"), FieldContractID), 42)
+	idx.AddTo(NewTerm(FieldContractID, []byte("only")).Key(testIndexSecret), 42)
 
 	require.NoError(t, WriteColdIndex(context.Background(), indexTestChunkID, idx, dir, testIndexSecret))
 
@@ -324,8 +312,8 @@ func TestWriteIndex_RecordEncoding(t *testing.T) {
 	record := records[0]
 	require.Greater(t, len(record), IndexRecordFingerprintLen)
 
-	term := ComputeTermKey([]byte("only"), FieldContractID)
-	assert.Equal(t, routedFP(term), record[:IndexRecordFingerprintLen])
+	term := NewTerm(FieldContractID, []byte("only")).Key(testIndexSecret)
+	assert.Equal(t, keyFP(term), record[:IndexRecordFingerprintLen])
 
 	bm := roaring.New()
 	require.NoError(t, bm.UnmarshalBinary(record[IndexRecordFingerprintLen:]))
@@ -362,10 +350,9 @@ func TestWriteColdIndex_Stamp(t *testing.T) {
 	require.ErrorContains(t, err, "unsupported version")
 }
 
-// routedFP is the fingerprint the writer stores for term.
-func routedFP(term TermKey) []byte {
-	rk := routedKey(testIndexSecret, term)
-	v, _ := streamhash.Fingerprint(rk[:])
+// keyFP is the fingerprint the writer stores for key.
+func keyFP(key TermKey) []byte {
+	v, _ := streamhash.Fingerprint(key[:])
 	return binary.LittleEndian.AppendUint32(nil, v)
 }
 
@@ -397,7 +384,7 @@ func TestIndexPack_IndexCostsAtMostFourBytesPerRecord(t *testing.T) {
 			for i := range 2_000 {
 				bm := base.Clone()
 				bm.AddMany(more[:i%500])
-				b[ComputeTermKey(fmt.Appendf(nil, "term-%d", i), FieldContractID)] = bm
+				b[NewTerm(FieldContractID, fmt.Appendf(nil, "term-%d", i)).Key(testIndexSecret)] = bm
 			}
 			return b
 		}},
