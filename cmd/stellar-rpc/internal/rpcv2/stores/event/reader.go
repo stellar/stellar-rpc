@@ -17,7 +17,7 @@ import (
 )
 
 // Closed-store lifecycle: HotStore and ColdReader read methods
-// (LookupKeys, FetchEvents, All, EventCount, Offsets) return
+// (LookupTerms, FetchEvents, All, EventCount, Offsets) return
 // stores.ErrStoreClosed after Close, per the stores
 // translation contract. ChunkID is the one exception — it returns
 // its constructor-supplied value unchanged after Close.
@@ -90,11 +90,12 @@ type Reader interface {
 	// Returns (nil, stores.ErrStoreClosed) after Close.
 	Offsets() (*LedgerOffsets, error)
 
-	// LookupKeys returns bitmaps for each key, aligned positionally
-	// with the input slice (result[i] corresponds to keys[i]).
-	// result[i] is nil only when the reader knows keys[i] has no
+	// LookupTerms returns bitmaps for each term, aligned positionally
+	// with the input slice (result[i] corresponds to terms[i]). Each
+	// reader looks a term up by its key under the chunk's secret.
+	// result[i] is nil only when the reader knows terms[i] has no
 	// events anywhere in this chunk; otherwise it is a bitmap, empty
-	// included, that answers for the covered range. A per-key miss
+	// included, that answers for the covered range. A per-term miss
 	// is not an error.
 	//
 	// window is the id range to answer for. The second result says where
@@ -115,7 +116,7 @@ type Reader interface {
 	// ctx cancels in-flight I/O on the cold path (MPHF load,
 	// index.pack ReadAt); hot side checks ctx as a fast guard before
 	// touching the index.
-	LookupKeys(ctx context.Context, keys []TermKey, window IDRange) ([]*roaring.Bitmap, Coverage, error)
+	LookupTerms(ctx context.Context, terms []Term, window IDRange) ([]*roaring.Bitmap, Coverage, error)
 
 	// FetchEvents decodes events for the supplied chunk-relative
 	// eventIDs and returns them positionally aligned with the input
@@ -131,7 +132,7 @@ type Reader interface {
 	// scattered-read batches, the hot path before each BatchMultiGet.
 	//
 	// A missing row is an error: every caller passes ids that name
-	// stored events (bitmap ids come from LookupKeys; the pager's
+	// stored events (bitmap ids come from LookupTerms; the pager's
 	// resume ordinal is bounds-checked against its ledger's ID range
 	// first), so a miss signals corruption or a writer/reader
 	// mismatch, not a normal not-found case.

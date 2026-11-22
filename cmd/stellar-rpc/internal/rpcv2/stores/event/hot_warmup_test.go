@@ -21,7 +21,7 @@ func TestWarmup_FreshChunkProducesEmptyStateViaNewWithStore(t *testing.T) {
 
 	// A fresh index is empty: probing any term is a clean miss, an empty
 	// bitmap rather than nil.
-	bm := lookupOne(t, h.store, ComputeTermKey([]byte("any"), FieldContractID))
+	bm := lookupOne(t, h.store, NewTerm(FieldContractID, []byte("any")))
 	require.NotNil(t, bm)
 	assert.True(t, bm.IsEmpty())
 	assert.Zero(t, h.store.offsets.LedgerCount())

@@ -172,7 +172,7 @@ func TestIngestLedger_AllCFsAdvanceTogether(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first+1, seqB)
 	// events CFs.
-	bms, _, err := db.Events().LookupKeys(context.Background(), []event.TermKey{termA}, termWindow)
+	bms, _, err := db.Events().LookupTerms(context.Background(), []event.Term{termA}, termWindow)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	assert.Equal(t, uint64(2), bms[0].GetCardinality(), "both ledgers share the event term")
@@ -212,7 +212,7 @@ func TestIngestLedger_RejectedLedgerPersistsNothingAcrossAnyCF(t *testing.T) {
 	_, gerr = db.Txhash().Get(hash)
 	require.ErrorIs(t, gerr, stores.ErrNotFound)
 	// events CFs — no term indexed, no event committed (clean miss = empty bitmap).
-	bms, _, lerr := db.Events().LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
+	bms, _, lerr := db.Events().LookupTerms(context.Background(), []event.Term{term}, termWindow)
 	require.NoError(t, lerr)
 	require.True(t, bms[0].IsEmpty())
 	assert.Equal(t, uint32(0), eventCount(t, db.Events()))
@@ -392,7 +392,7 @@ func TestIngestLedger_WritesEveryHotType(t *testing.T) {
 	seq, err := db.Txhash().Get(hash)
 	require.NoError(t, err)
 	assert.Equal(t, first, seq)
-	bms, _, err := db.Events().LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
+	bms, _, err := db.Events().LookupTerms(context.Background(), []event.Term{term}, termWindow)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	assert.Equal(t, uint64(1), bms[0].GetCardinality())
@@ -619,8 +619,8 @@ func TestIngestLedger_ClosedDBFails(t *testing.T) {
 
 // lcmWithEvent builds a V2 LCM with one transaction carrying one contract event
 // (topic="hotchunk_test"). Returns the wire bytes, the tx hash, and the event's
-// term key.
-func lcmWithEvent(t *testing.T, seq uint32) ([]byte, [32]byte, event.TermKey) {
+// first term.
+func lcmWithEvent(t *testing.T, seq uint32) ([]byte, [32]byte, event.Term) {
 	t.Helper()
 	ev := buildContractEvent("hotchunk_test")
 	meta := xdr.TransactionMeta{
@@ -633,10 +633,10 @@ func lcmWithEvent(t *testing.T, seq uint32) ([]byte, [32]byte, event.TermKey) {
 
 	evBytes, err := ev.MarshalBinary()
 	require.NoError(t, err)
-	keys, err := event.TermsForBytes(evBytes)
+	terms, err := event.TermsForBytes(evBytes)
 	require.NoError(t, err)
-	require.NotEmpty(t, keys)
-	return raw, hash, keys[0]
+	require.NotEmpty(t, terms)
+	return raw, hash, terms[0]
 }
 
 func zeroTxLCM(t *testing.T, seq uint32) []byte {

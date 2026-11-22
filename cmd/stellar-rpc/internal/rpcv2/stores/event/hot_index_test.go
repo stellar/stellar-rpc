@@ -26,6 +26,12 @@ func randomTermKey(rng *rand.Rand) TermKey {
 	return k
 }
 
+func randomTerm(rng *rand.Rand) Term {
+	b := make([]byte, 16)
+	rng.Read(b)
+	return Term(b)
+}
+
 // A slab filled to capacity: every event carries maxTermsPerEvent terms.
 func TestHotSlab_BitmapAndTerms(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
@@ -95,42 +101,44 @@ func TestHotSlab_BitmapAndTerms(t *testing.T) {
 // term on every event, a few shared ones, and one unique to each event.
 type indexFeed struct {
 	rng       *rand.Rand
-	every     TermKey
-	shared    []TermKey
-	want      Bitmaps
+	every     Term
+	shared    []Term
+	want      termBitmaps
 	committed uint32
 }
 
 func newIndexFeed() *indexFeed {
-	f := &indexFeed{rng: rand.New(rand.NewSource(7)), want: NewBitmaps()}
-	f.every = randomTermKey(f.rng)
+	f := &indexFeed{rng: rand.New(rand.NewSource(7)), want: termBitmaps{}}
+	f.every = randomTerm(f.rng)
 	for range 16 {
-		f.shared = append(f.shared, randomTermKey(f.rng))
+		f.shared = append(f.shared, randomTerm(f.rng))
 	}
 	return f
 }
 
 func (f *indexFeed) add(t *testing.T, x *hotIndex, events int) {
 	t.Helper()
-	termKeys := make([][]TermKey, events)
-	for i := range termKeys {
-		termKeys[i] = []TermKey{f.every, f.shared[f.rng.Intn(len(f.shared))], randomTermKey(f.rng)}
-		for _, k := range termKeys[i] {
-			f.want.AddTo(k, f.committed+uint32(i))
+	terms := make([][]Term, events)
+	for i := range terms {
+		terms[i] = []Term{f.every, f.shared[f.rng.Intn(len(f.shared))], randomTerm(f.rng)}
+		for _, term := range terms[i] {
+			f.want.add(term, f.committed+uint32(i))
 		}
 	}
-	require.NoError(t, x.add(f.committed, routedTerms(x.secret, termKeys)))
+	require.NoError(t, x.add(f.committed, keyedTerms(x.secret, terms)))
 	f.committed += uint32(events)
 }
 
-// routedTerms is termKeys as consecutive events' routed terms.
-func routedTerms(secret [stores.SecretLen]byte, termKeys [][]TermKey) *ledgerTerms {
+func keyedTerms(secret [stores.SecretLen]byte, terms [][]Term) *ledgerTerms {
 	var t ledgerTerms
-	for _, keys := range termKeys {
-		t.keys = append(t.keys, keys...)
-		t.ends = append(t.ends, uint32(len(t.keys)))
+	for _, event := range terms {
+		for _, term := range event {
+			t.terms.buf = append(t.terms.buf, term...)
+			t.terms.ends = append(t.terms.ends, uint32(len(t.terms.buf)))
+		}
+		t.ends = append(t.ends, uint32(t.terms.Len()))
 	}
-	t.route(secret)
+	t.key(secret)
 	return &t
 }
 
@@ -159,12 +167,12 @@ func TestHotIndex_AnswersAcrossSealedAndLiveSlabs(t *testing.T) {
 	requireSealedSlabs(t, store, 3)
 	require.Nil(t, x.view.Load().prev, "a sealed slab leaves memory")
 
-	keys := append([]TermKey{f.every, randomTermKey(f.rng)}, f.shared...)
-	for k := range f.want {
-		if len(keys) == 64 {
+	terms := append([]Term{f.every, randomTerm(f.rng)}, f.shared...)
+	for term := range f.want {
+		if len(terms) == 64 {
 			break
 		}
-		keys = append(keys, k)
+		terms = append(terms, term)
 	}
 
 	const slab = hotSlabEvents
@@ -185,14 +193,14 @@ func TestHotIndex_AnswersAcrossSealedAndLiveSlabs(t *testing.T) {
 	}
 	for _, w := range windows {
 		t.Run(w.name, func(t *testing.T) {
-			got, covered, err := x.lookup(context.Background(), keys, w.window)
+			got, covered, err := x.lookup(context.Background(), terms, w.window)
 			require.NoError(t, err)
 			require.Equal(t, w.covered, covered)
 			inCovered := freshRange(uint64(covered.Start), uint64(covered.End))
-			for i, k := range keys {
+			for i, term := range terms {
 				want := roaring.New()
-				if f.want[k] != nil {
-					want = roaring.And(f.want[k], inCovered)
+				if f.want[term] != nil {
+					want = roaring.And(f.want[term], inCovered)
 				}
 				require.True(t, want.Equals(got[i]), "term %d", i)
 			}
@@ -212,16 +220,16 @@ func TestHotIndex_LookupReportsUnreadableSlabs(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, err := x.lookup(ctx, []TermKey{f.every}, window)
+	_, _, err := x.lookup(ctx, []Term{f.every}, window)
 	require.ErrorIs(t, err, context.Canceled)
 
-	garbled := randomTermKey(f.rng)
-	require.NoError(t, store.Put(IndexCF, hotIndexKey(0, routedKey(x.secret, garbled)), []byte("not a bitmap")))
-	_, _, err = x.lookup(context.Background(), []TermKey{garbled}, window)
+	garbled := randomTerm(f.rng)
+	require.NoError(t, store.Put(IndexCF, hotIndexKey(0, garbled.Key(x.secret)), []byte("not a bitmap")))
+	_, _, err = x.lookup(context.Background(), []Term{garbled}, window)
 	require.ErrorContains(t, err, "decode events_index slab 0")
 
 	require.NoError(t, store.Close())
-	_, _, err = x.lookup(context.Background(), []TermKey{f.every}, window)
+	_, _, err = x.lookup(context.Background(), []Term{f.every}, window)
 	require.ErrorIs(t, err, rocksdb.ErrStoreClosed)
 }
 
@@ -246,7 +254,7 @@ func TestHotIndex_ConcurrentLookupsDuringSealing(t *testing.T) {
 				if end == 0 {
 					continue
 				}
-				got, _, err := x.lookup(context.Background(), []TermKey{f.every}, IDRange{0, end})
+				got, _, err := x.lookup(context.Background(), []Term{f.every}, IDRange{0, end})
 				if err != nil {
 					t.Errorf("lookup: %v", err)
 					return
@@ -284,8 +292,8 @@ func ingestCorpus(t *testing.T, h *HotStore, c *diffCorpus, upTo uint32) {
 func requireIndexed(t *testing.T, h *HotStore, c *diffCorpus) {
 	t.Helper()
 	committed := freshRange(0, uint64(mustEventCount(t, h)))
-	for k, want := range c.index {
-		require.True(t, roaring.And(want, committed).Equals(lookupOne(t, h, k)))
+	for term, want := range c.index {
+		require.True(t, roaring.And(want, committed).Equals(lookupOne(t, h, term)))
 	}
 }
 
@@ -311,9 +319,7 @@ func TestHotStore_ReopenKeepsSealedSlabsAndIndexesTheRestAgain(t *testing.T) {
 	requireIndexed(t, hot, corpus)
 }
 
-// The hot index files each term under its cold key for the chunk,
-// routedKey(ColdIndexSecret(catalogSecret, chunkID), term): every sealed key
-// is one, and lookups still find every term in the sealed and live slabs.
+// Every sealed key is the term's cold key for the chunk, and lookups find every term.
 func TestHotStore_IndexKeysAreTheColdKeys(t *testing.T) {
 	const chunkID = chunk.ID(5)
 	hot, raw := openHotStoreForTestAt(t, t.TempDir(), chunkID)
@@ -324,9 +330,9 @@ func TestHotStore_IndexKeysAreTheColdKeys(t *testing.T) {
 
 	secret := ColdIndexSecret(testCatalogSecret[:], chunkID)
 	want := map[string]bool{}
-	for k, ids := range corpus.index {
+	for term, ids := range corpus.index {
 		if ids.Minimum() < hotSlabEvents {
-			want[string(hotIndexKey(0, routedKey(secret, k)))] = true
+			want[string(hotIndexKey(0, term.Key(secret)))] = true
 		}
 	}
 	got := map[string]bool{}

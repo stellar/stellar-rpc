@@ -44,25 +44,25 @@ func Query(ctx context.Context, r Reader, filters []Filter, opts QueryOptions) (
 	return out, nil
 }
 
-// countingReader wraps a Reader and counts LookupKeys traffic so a
+// countingReader wraps a Reader and counts LookupTerms traffic so a
 // test can pin the engine's term-dedupe behavior. Without a wrapper
 // the best we can do is assert correctness, not the number of unique
 // keys handed to the storage layer.
 type countingReader struct {
 	Reader
 
-	lookupKeysCalls int
-	totalKeys       int
-	windows         []IDRange
+	lookupTermsCalls int
+	totalTerms       int
+	windows          []IDRange
 }
 
-func (c *countingReader) LookupKeys(
-	ctx context.Context, keys []TermKey, window IDRange,
+func (c *countingReader) LookupTerms(
+	ctx context.Context, terms []Term, window IDRange,
 ) ([]*roaring.Bitmap, Coverage, error) {
-	c.lookupKeysCalls++
-	c.totalKeys += len(keys)
+	c.lookupTermsCalls++
+	c.totalTerms += len(terms)
 	c.windows = append(c.windows, window)
-	return c.Reader.LookupKeys(ctx, keys, window)
+	return c.Reader.LookupTerms(ctx, terms, window)
 }
 
 // queryFixture seeds a hot chunk with a small, hand-crafted event set
@@ -283,7 +283,7 @@ func TestQuery_DuplicateTermsAcrossFiltersDedupedInLookup(t *testing.T) {
 	fx := newQueryFixture(t)
 	// Both filters reference the same topic0=alpha term. The
 	// implementation must collapse it to a single unique key in the
-	// LookupKeys call — pinned via countingReader. Filters carry
+	// LookupTerms call, pinned via countingReader. Filters carry
 	// 4 candidate terms total (contractA + topic0a + contractB +
 	// topic0a) but only 3 unique (topic0a is shared).
 	cr := &countingReader{Reader: fx.store}
@@ -295,8 +295,8 @@ func TestQuery_DuplicateTermsAcrossFiltersDedupedInLookup(t *testing.T) {
 	// A∩topic0=alpha → ids 0,1; B∩topic0=alpha → ids 2,3. Union → all four.
 	assert.Equal(t, []string{evtAAB, "evt-a-ac", "evt-b-ab", "evt-b-a"},
 		dataSyms(t, got))
-	assert.Equal(t, 1, cr.lookupKeysCalls, "Query must batch all terms into one LookupKeys call")
-	assert.Equal(t, 3, cr.totalKeys, "Query must dedupe the shared topic0=alpha term")
+	assert.Equal(t, 1, cr.lookupTermsCalls, "Query must batch all terms into one LookupTerms call")
+	assert.Equal(t, 3, cr.totalTerms, "Query must dedupe the shared topic0=alpha term")
 }
 
 func TestQuery_CanceledContextReturnsError(t *testing.T) {
@@ -556,8 +556,8 @@ func TestQuery_MixedSuccessFilterList(t *testing.T) {
 	missingRaw, err := missingTopic.MarshalBinary()
 	require.NoError(t, err)
 	// Sanity check: this term really isn't in the index.
-	missingKey := ComputeTermKey(missingRaw, FieldTopic0)
-	require.True(t, lookupOne(t, fx.store, missingKey).IsEmpty(),
+	missing := NewTerm(FieldTopic0, missingRaw)
+	require.True(t, lookupOne(t, fx.store, missing).IsEmpty(),
 		"fixture sanity: 'nonexistent' must not be indexed")
 
 	got, err := Query(context.Background(), fx.store, []Filter{
@@ -897,7 +897,7 @@ func TestQuery_TypeAndCountIndexTerms(t *testing.T) {
 	for name, tc := range map[string]struct {
 		filter    Filter
 		wantCalls int
-		wantKeys  int
+		wantTerms int
 	}{
 		"wildcard count stays match-all": {Filter{}, 0, 0},
 		"type alone":                     {Filter{EventType: &system}, 1, 1},
@@ -938,8 +938,8 @@ func TestQuery_TypeAndCountIndexTerms(t *testing.T) {
 			_, err := Query(context.Background(), cr, []Filter{tc.filter},
 				QueryOptions{Range: wholeChunk(t, fx.store)})
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantCalls, cr.lookupKeysCalls)
-			assert.Equal(t, tc.wantKeys, cr.totalKeys)
+			assert.Equal(t, tc.wantCalls, cr.lookupTermsCalls)
+			assert.Equal(t, tc.wantTerms, cr.totalTerms)
 		})
 	}
 }
@@ -1122,13 +1122,13 @@ func TestQuery_InvalidFilterRejected(t *testing.T) {
 // hot tests against it.
 //
 // Coverage choices: we don't replay every hot test — once the engine
-// is shown to go through both readers' LookupKeys/FetchEvents/FetchRange
+// is shown to go through both readers' LookupTerms/FetchEvents/FetchRange
 // surfaces correctly, additional scenarios add little. The selected
 // subset hits each major code path through Matches:
 //
 //   - match-all asc                  → streamRange + cold FetchRange
 //   - match-all desc + cap           → streamRange top-down, slices.Backward
-//   - single-filter (contractID)     → one LookupKeys term, then the
+//   - single-filter (contractID)     → one LookupTerms term, then the
 //                                      ascending slab walk
 //   - multi-term filter (AND)        → one FastAnd per plan over cold bitmaps
 //   - cross-filter (OR)              → the in-place Or across plans
@@ -1194,10 +1194,10 @@ func freezeFixtureToColdReader(t *testing.T, hot *HotStore, chunkID chunk.ID) *C
 			require.NoError(t, err)
 			p.ContractEventBytes = bytes.Clone(p.ContractEventBytes)
 			require.NoError(t, cw.Append(p))
-			keys, err := TermsForBytes(p.ContractEventBytes)
+			terms, err := TermsForBytes(p.ContractEventBytes)
 			require.NoError(t, err)
-			for _, k := range keys {
-				idx.AddTo(k, eventID)
+			for _, term := range terms {
+				idx.AddTo(term.Key(testIndexSecret), eventID)
 			}
 			eventID++
 		}
@@ -1345,7 +1345,7 @@ func TestQuery_ColdReaderParity_FilterWithUnknownContract(t *testing.T) {
 	hotFx := newQueryFixture(t)
 	cr := freezeFixtureToColdReader(t, hotFx.store, chunk.ID(0))
 
-	// Cold path: LookupKeys returns nil for the missing term (no panic,
+	// Cold path: LookupTerms returns nil for the missing term (no panic,
 	// no error — same as hot). The filter contributes nothing, union is
 	// empty, Query returns (nil, nil).
 	var missing xdr.ContractId
@@ -1563,9 +1563,9 @@ func TestMatches_DropsAreInvisible(t *testing.T) {
 	// topic1 == gamma legitimately matches id 1 only. Inject ids 2, 3,
 	// and 4 as false positives, so the candidate set is {1, 2, 3, 4}
 	// and every candidate after the true match drops.
-	gammaKey := ComputeTermKey(fx.t0cRaw, FieldTopic1)
+	gamma := NewTerm(FieldTopic1, fx.t0cRaw)
 	for _, fp := range []uint32{2, 3, 4} {
-		addPostings(fx.store, gammaKey, fp)
+		addPostings(fx.store, gamma, fp)
 	}
 	filters := []Filter{{Topics: [protocol.MaxTopicCount][]byte{nil, fx.t0cRaw}}}
 
@@ -1612,10 +1612,7 @@ func TestMatches_EmptyStreams(t *testing.T) {
 // TestQuery_PostFilterRejectsTermHashCollision pins the defensive
 // post-filter: if a bitmap entry survives the index lookup but the
 // underlying event's bytes don't actually match the filter clause,
-// Query must drop it. TermKey is xxh3_128(field || value), a
-// non-cryptographic hash on attacker-controllable values; a
-// collision (or a corrupt index) could otherwise leak the wrong
-// event through Query.
+// Query must drop it.
 //
 // We force the case by injecting a false-positive posting directly
 // into the hot index for the "topic1 == gamma" term, equivalent to
@@ -1626,8 +1623,8 @@ func TestQuery_PostFilterRejectsTermHashCollision(t *testing.T) {
 	// gamma's term legitimately matches id=1 only (evt-a-ac with
 	// topic1=gamma). Inject id=4 (evt-a-b: topic0=beta only,
 	// no topic1) into the same bitmap to simulate a collision.
-	gammaKey := ComputeTermKey(fx.t0cRaw, FieldTopic1)
-	before := lookupOne(t, fx.store, gammaKey)
+	gamma := NewTerm(FieldTopic1, fx.t0cRaw)
+	before := lookupOne(t, fx.store, gamma)
 	require.True(t, before.Contains(1), "fixture sanity: id=1 indexes topic1=gamma")
 	require.False(t, before.Contains(4), "fixture sanity: id=4 not yet in topic1=gamma bitmap")
 
@@ -1637,9 +1634,9 @@ func TestQuery_PostFilterRejectsTermHashCollision(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, want, 1, "fixture sanity: exactly one true match before injection")
 
-	addPostings(fx.store, gammaKey, 4)
+	addPostings(fx.store, gamma, 4)
 
-	after := lookupOne(t, fx.store, gammaKey)
+	after := lookupOne(t, fx.store, gamma)
 	require.True(t, after.Contains(4), "fixture sanity: collision id=4 is now in the bitmap")
 
 	// Query with the colliding term: the result must be invariant under
@@ -1656,7 +1653,7 @@ func TestQuery_PostFilterRejectsTermHashCollision(t *testing.T) {
 // match carries its own ordinal when a dropped candidate is at a
 // LOWER ordinal in the same batch. Survivor-index alignment (the
 // natural rewrite mistake, ids[len(out)] instead of ids[i]) would hand
-// the dropped candidate's ordinal to the true match. A genuine xxh3
+// the dropped candidate's ordinal to the true match. A genuine
 // collision can sit at any ordinal, so the alignment is load-bearing.
 func TestPostFilter_OrdinalAlignmentWithLeadingDrop(t *testing.T) {
 	var cid xdr.ContractId

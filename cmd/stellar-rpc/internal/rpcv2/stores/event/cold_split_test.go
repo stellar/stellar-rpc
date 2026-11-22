@@ -31,8 +31,12 @@ type splitFixture struct {
 	oracle  map[string]*roaring.Bitmap
 }
 
+func (f *splitFixture) term(name string) Term {
+	return NewTerm(FieldContractID, []byte(name))
+}
+
 func (f *splitFixture) key(name string) TermKey {
-	return ComputeTermKey([]byte(name), FieldContractID)
+	return f.term(name).Key(testIndexSecret)
 }
 
 func (f *splitFixture) add(name string, ids ...uint32) {
@@ -125,15 +129,15 @@ func TestColdReader_WindowedLookupsMatchTheirTerms(t *testing.T) {
 
 	// Two names twice: equal keys share their entries' reads.
 	names := append(slices.Sorted(maps.Keys(f.oracle)), "never-added", "dense", "single-7")
-	keys := make([]TermKey, len(names))
+	terms := make([]Term, len(names))
 	for i, name := range names {
-		keys[i] = f.key(name)
+		terms[i] = f.term(name)
 	}
 	lookup := func(t *testing.T, window IDRange) IDRange {
 		t.Helper()
-		got, covered, err := cr.LookupKeys(context.Background(), keys, window)
+		got, covered, err := cr.LookupTerms(context.Background(), terms, window)
 		require.NoError(t, err)
-		require.Len(t, got, len(keys))
+		require.Len(t, got, len(terms))
 		require.LessOrEqual(t, covered.Start, window.Start, "the covered range must contain %v", window)
 		require.GreaterOrEqual(t, covered.End, window.End, "the covered range must contain %v", window)
 		clip := freshRange(uint64(covered.Start), uint64(covered.End))
@@ -176,21 +180,21 @@ func TestColdReader_WindowedLookupsMatchTheirTerms(t *testing.T) {
 		lookup(t, IDRange{start, start + uint32(rng.Intn(60*slab-int(start))+1)})
 	}
 
-	_, _, err := cr.LookupKeys(context.Background(), keys, IDRange{Start: 500, End: 5})
+	_, _, err := cr.LookupTerms(context.Background(), terms, IDRange{Start: 500, End: 5})
 	require.ErrorContains(t, err, "must be >=")
 }
 
 func TestColdReader_UnseenKeyOnASplitSlotMisses(t *testing.T) {
 	f := newSplitFixture()
 	cr, onSplitSlot := openSplitFixture(t, f)
-	var unseen []TermKey
+	var unseen []Term
 	for i := 0; len(unseen) < 3 && i < 100_000; i++ {
-		if key := ComputeTermKey(fmt.Appendf(nil, "unseen-%d", i), FieldTopic0); onSplitSlot(key) {
-			unseen = append(unseen, key)
+		if term := NewTerm(FieldTopic0, fmt.Appendf(nil, "unseen-%d", i)); onSplitSlot(term.Key(testIndexSecret)) {
+			unseen = append(unseen, term)
 		}
 	}
 	require.Len(t, unseen, 3)
-	got, covered, err := cr.LookupKeys(context.Background(), append(unseen, f.key("mid")), IDRange{Start: 5, End: 6})
+	got, covered, err := cr.LookupTerms(context.Background(), append(unseen, f.term("mid")), IDRange{Start: 5, End: 6})
 	require.NoError(t, err)
 	assert.Equal(t, []*roaring.Bitmap{nil, nil, nil}, got[:3])
 	// No split term was reached, so the lookup covers every id.
@@ -222,7 +226,7 @@ func TestWriteColdIndex_SplitsAtTheThreshold(t *testing.T) {
 
 	split := slot("eight")
 	assert.Equal(t, uint32(slabs), layout.slabs)
-	assert.Equal(t, splitRows(append(binary.BigEndian.AppendUint32(nil, split), routedFP(f.key("eight"))...)), layout.rows)
+	assert.Equal(t, splitRows(append(binary.BigEndian.AppendUint32(nil, split), keyFP(f.key("eight"))...)), layout.rows)
 	entries := pack.entries
 	require.Len(t, entries, len(f.oracle)+slabs-1)
 
@@ -233,7 +237,7 @@ func TestWriteColdIndex_SplitsAtTheThreshold(t *testing.T) {
 		}
 		if name != "eight" {
 			entry := entries[pos]
-			require.Equal(t, routedFP(f.key(name)), entry[:IndexRecordFingerprintLen], "%s at %d", name, pos)
+			require.Equal(t, keyFP(f.key(name)), entry[:IndexRecordFingerprintLen], "%s at %d", name, pos)
 			got := roaring.New()
 			require.NoError(t, got.UnmarshalBinary(entry[IndexRecordFingerprintLen:]))
 			assert.True(t, want.Equals(got), "%s at %d", name, pos)
@@ -316,7 +320,7 @@ func TestColdReader_CorruptSplitIndexIsCorrupt(t *testing.T) {
 		return cr
 	}
 	lookup := func(cr *ColdReader, window IDRange) error {
-		_, _, err := cr.LookupKeys(context.Background(), []TermKey{f.key("dense"), f.key("mid")}, window)
+		_, _, err := cr.LookupTerms(context.Background(), []Term{f.term("dense"), f.term("mid")}, window)
 		return err
 	}
 
@@ -464,8 +468,8 @@ func writeSplitChunk(t *testing.T) splitChunk {
 			TxHash: xdr.Hash{0xab}, LedgerSequence: first, TxIdx: id, LedgerClosedAt: 1_700_000_000,
 			ContractEventBytes: payloads[[2]string{string(cid[:]), topic}],
 		}))
-		idx.AddTo(ComputeTermKey(cid[:], FieldContractID), id)
-		idx.AddTo(ComputeTermKey(c.topics[topic], FieldTopic0), id)
+		idx.AddTo(NewTerm(FieldContractID, cid[:]).Key(testIndexSecret), id)
+		idx.AddTo(NewTerm(FieldTopic0, c.topics[topic]).Key(testIndexSecret), id)
 	}
 	offsets := NewLedgerOffsets(first)
 	require.NoError(t, offsets.Append(first, splitChunkEvents))
@@ -531,5 +535,5 @@ func (c splitChunk) run(t *testing.T, q splitQuery, w IDRange, desc bool, limit 
 			break
 		}
 	}
-	return got, counter.lookupKeysCalls
+	return got, counter.lookupTermsCalls
 }

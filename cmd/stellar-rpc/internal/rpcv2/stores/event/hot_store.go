@@ -31,8 +31,8 @@ const (
 //     typically 2-3× on XDR) and read in batches via
 //     BatchedMultiGetCF. Larger blocks give zstd more context per
 //     compression unit and align with batch-fetch shapes.
-//   - IndexCF holds one sorted file per sealed slab, of (slab || routed
-//     term) -> bitmap entries (see hotIndex). Auto compaction is off: the
+//   - IndexCF holds one sorted file per sealed slab, of (slab || term
+//     key) -> bitmap entries (see hotIndex). Auto compaction is off: the
 //     files never overlap. Index and filter blocks sit in the block cache:
 //     a chunk has many files, and the cache bounds their memory. The bloom
 //     filter answers a slab that lacks a term without a block read, and a
@@ -99,7 +99,7 @@ var ErrLedgerOutOfOrder = errors.New("events: ledger out of order")
 // Concurrency:
 //
 //   - Writes (IngestLedgerToBatch) are single-writer (one goroutine per chunk).
-//   - Reads (LookupKeys, FetchEvents, All) take NO HotStore-level lock — they guard
+//   - Reads (LookupTerms, FetchEvents, All) take NO HotStore-level lock; they guard
 //     via chunkStore.IsClosed() and rely on the index's lock-free reads and
 //     RocksDB's thread-safety.
 //   - Metadata split after the caller-owned store is closed: ChunkID is
@@ -110,7 +110,7 @@ type HotStore struct {
 	chunkID    chunk.ID
 	index      *hotIndex
 	offsets    *ConcurrentLedgerOffsets
-	// terms are the last ingested ledger's, routed on another goroutine
+	// terms are the last ingested ledger's, keyed on another goroutine
 	// while the ledger commits.
 	terms ledgerTerms
 }
@@ -181,15 +181,15 @@ func (h *HotStore) Offsets() (*LedgerOffsets, error) {
 	return h.offsets.View(), nil
 }
 
-// LookupKeys returns each key's event ids in the slabs the window touches,
+// LookupTerms returns each term's event ids in the slabs the window touches,
 // aligned positionally with the input slice, and the id range those slabs
-// span. See Reader.LookupKeys for the semantics.
+// span. See Reader.LookupTerms for the semantics.
 //
-// A key with no events in the covered range gets an empty bitmap, never
+// A term with no events in the covered range gets an empty bitmap, never
 // nil: nil would promise the chunk has none, and the lookup read only the
 // window's slabs. Every bitmap is built for the caller.
-func (h *HotStore) LookupKeys(
-	ctx context.Context, keys []TermKey, window IDRange,
+func (h *HotStore) LookupTerms(
+	ctx context.Context, terms []Term, window IDRange,
 ) ([]*roaring.Bitmap, Coverage, error) {
 	if h.chunkStore.IsClosed() {
 		return nil, Coverage{}, stores.ErrStoreClosed
@@ -197,15 +197,15 @@ func (h *HotStore) LookupKeys(
 	if err := ctx.Err(); err != nil {
 		return nil, Coverage{}, err
 	}
-	if len(keys) == 0 {
+	if len(terms) == 0 {
 		return nil, Coverage{IDRange: window}, nil
 	}
-	results, covered, err := h.index.lookup(ctx, keys, window)
+	results, covered, err := h.index.lookup(ctx, terms, window)
 	if errors.Is(err, rocksdb.ErrStoreClosed) {
 		return nil, Coverage{}, stores.ErrStoreClosed
 	}
 	if err != nil {
-		return nil, Coverage{}, fmt.Errorf("events: LookupKeys for chunk %s: %w", h.chunkID, err)
+		return nil, Coverage{}, fmt.Errorf("events: LookupTerms for chunk %s: %w", h.chunkID, err)
 	}
 	return results, Coverage{IDRange: covered}, nil
 }
@@ -384,8 +384,8 @@ func (h *HotStore) All(ctx context.Context) iter.Seq2[Payload, error] {
 //
 // payloads is produced by PayloadsFromLedgerEvents, which emits each ledger's
 // events in ascending getEvents cursor order — write order here IS the cursor
-// contract (event IDs are assigned by arrival position). Terms are derived via
-// TermsForBytes on each payload's ContractEventBytes.
+// contract (event IDs are assigned by arrival position). Terms are derived
+// from each payload's ContractEventBytes (Terms.AppendEvent).
 //
 // Sequence validation, before any Put or index mutation:
 //
@@ -415,8 +415,8 @@ func (h *HotStore) IngestLedgerToBatch(
 			ErrLedgerOutOfOrder, expected, ledgerSeq)
 	}
 
-	// Derive term keys per payload up front (a TermsForBytes error rejects the
-	// ledger without any Put) and retain them for the post-commit index update.
+	// Derive terms per payload up front (an error rejects the ledger without
+	// any Put) and retain them for the post-commit index update.
 	h.terms.reset()
 	for i := range payloads {
 		if err := h.terms.appendEvent(payloads[i].ContractEventBytes); err != nil {
@@ -430,7 +430,7 @@ func (h *HotStore) IngestLedgerToBatch(
 			h.chunkID, ledgerSeq)
 	}
 
-	h.terms.routeAsync(h.index.secret)
+	h.terms.keyAsync(h.index.secret)
 
 	// Marshal + queue each event directly into b. BatchWriter.Put copies
 	// synchronously, so ONE reused scratch buffer and key serve every event —
@@ -453,7 +453,7 @@ func (h *HotStore) IngestLedgerToBatch(
 	b.Put(OffsetsCF, encodeOffsetKey(ledgerSeq), encodeLedgerEventCount(uint32(len(payloads))))
 
 	return func() error {
-		h.terms.waitRouted()
+		h.terms.keying.Wait()
 		return h.applyLedger(startID, &h.terms)
 	}, nil
 }
@@ -519,7 +519,7 @@ func replayUnsealed(chunkStore *rocksdb.Store, index *hotIndex, from, total uint
 	if from == total {
 		return nil
 	}
-	// Collect the terms first and index them after the scan: indexing can
+	// Collect the keys first and index them after the scan: indexing can
 	// seal, and a seal takes the lifecycle lock the scan holds.
 	var terms ledgerTerms
 	for entry, err := range chunkStore.IterateRange(DataCF, encodeDataKey(from), encodeDataKey(total-1)) {
@@ -534,14 +534,13 @@ func replayUnsealed(chunkStore *rocksdb.Store, index *hotIndex, from, total uint
 		if err := p.Unmarshal(entry.Value); err != nil {
 			return fmt.Errorf("events: warmup decode event %d: %w", id, err)
 		}
-		if err := terms.appendEvent(p.ContractEventBytes); err != nil {
+		if err := terms.appendKeyed(p.ContractEventBytes, index.secret); err != nil {
 			return fmt.Errorf("events: warmup derive terms for event %d: %w", id, err)
 		}
 	}
 	if found := len(terms.ends); found != int(total-from) {
 		return fmt.Errorf("events: corrupt chunk: %s holds %d of the %d committed events", DataCF, int(from)+found, total)
 	}
-	terms.route(index.secret)
 	if err := index.add(from, &terms); err != nil {
 		return err
 	}

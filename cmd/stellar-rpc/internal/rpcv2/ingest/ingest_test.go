@@ -293,9 +293,9 @@ const eventTopic = "ingest_test"
 
 // marshalLCMWithEvent builds a V2 LCM carrying one transaction with one
 // operation-level contract event (topic=eventTopic). It returns the wire bytes,
-// the transaction hash (for txhash lookups), and the event's term key (for event
-// index lookups).
-func marshalLCMWithEvent(t *testing.T, seq uint32) ([]byte, [32]byte, event.TermKey) {
+// the transaction hash (for txhash lookups), and the event's first term (for
+// event index lookups).
+func marshalLCMWithEvent(t *testing.T, seq uint32) ([]byte, [32]byte, event.Term) {
 	t.Helper()
 	ev := buildContractEvent(eventTopic)
 	meta := xdr.TransactionMeta{
@@ -308,10 +308,10 @@ func marshalLCMWithEvent(t *testing.T, seq uint32) ([]byte, [32]byte, event.Term
 
 	evBytes, err := ev.MarshalBinary()
 	require.NoError(t, err)
-	keys, err := event.TermsForBytes(evBytes)
+	terms, err := event.TermsForBytes(evBytes)
 	require.NoError(t, err)
-	require.NotEmpty(t, keys)
-	return rawBytes, hash, keys[0]
+	require.NotEmpty(t, terms)
+	return rawBytes, hash, terms[0]
 }
 
 // buildContractEvent returns a contract ContractEvent with a single symbol
@@ -556,7 +556,7 @@ func TestEventsColdWriter_Readback(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
-	var term event.TermKey
+	var term event.Term
 	for _, seq := range []uint32{first, first + 1} {
 		raw, _, tk := marshalLCMWithEvent(t, seq)
 		term = tk
@@ -572,7 +572,7 @@ func TestEventsColdWriter_Readback(t *testing.T) {
 	cnt, err := cr.EventCount()
 	require.NoError(t, err)
 	require.Equal(t, uint32(2), cnt)
-	bms, _, err := cr.LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
+	bms, _, err := cr.LookupTerms(context.Background(), []event.Term{term}, termWindow)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	require.Equal(t, uint64(2), bms[0].GetCardinality())
@@ -628,7 +628,7 @@ func TestEventsColdWriter_V0KeepsOffsetsContiguous(t *testing.T) {
 	require.Equal(t, uint32(1), evEnd)
 
 	// And the event is queryable by its term.
-	bms, _, err := cr.LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
+	bms, _, err := cr.LookupTerms(context.Background(), []event.Term{term}, termWindow)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	require.Equal(t, uint64(1), bms[0].GetCardinality())
@@ -673,8 +673,8 @@ func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 	cnt, err := cr.EventCount()
 	require.NoError(t, err)
 	require.Zero(t, cnt)
-	anyKey := event.ComputeTermKey([]byte("any"), event.FieldContractID)
-	bms, _, lerr := cr.LookupKeys(context.Background(), []event.TermKey{anyKey}, termWindow)
+	anyTerm := event.NewTerm(event.FieldContractID, []byte("any"))
+	bms, _, lerr := cr.LookupTerms(context.Background(), []event.Term{anyTerm}, termWindow)
 	require.NoError(t, lerr)
 	require.Nil(t, bms[0], "a term with no matching events misses cleanly (nil bitmap)")
 
@@ -703,7 +703,7 @@ func TestColdChunk_Success(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cc.close()) }()
 
-	var term event.TermKey
+	var term event.Term
 	for _, seq := range []uint32{first, first + 1} {
 		raw, _, tk := marshalLCMWithEvent(t, seq)
 		term = tk
@@ -728,7 +728,7 @@ func TestColdChunk_Success(t *testing.T) {
 		chunkID, sameDirs(filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())), event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ecr.Close()) }()
-	bms, _, err := ecr.LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
+	bms, _, err := ecr.LookupTerms(context.Background(), []event.Term{term}, termWindow)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), bms[0].GetCardinality())
 
@@ -999,8 +999,8 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	require.Equal(t, wantEntries, gotEntries, "cold .bin must hold every resolvable hash, sorted and keyed")
 
 	// Reference #2 — events: PayloadsFromLedgerEvents with chunk-relative IDs
-	// assigned in ingest (ascending-seq) order, mapped to their term keys.
-	wantTermIDs := map[event.TermKey][]uint32{}
+	// assigned in ingest (ascending-seq) order, mapped to their terms.
+	wantTermIDs := map[event.Term][]uint32{}
 	var nextID uint32
 	for _, seq := range sentinels {
 		view := xdr.LedgerCloseMetaView(raws[seq])
@@ -1011,10 +1011,10 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 		payloads, err := event.PayloadsFromLedgerEvents(txParts, seq, closedAt)
 		require.NoError(t, err)
 		for i := range payloads {
-			keys, kerr := event.TermsForBytes(payloads[i].ContractEventBytes)
+			terms, kerr := event.TermsForBytes(payloads[i].ContractEventBytes)
 			require.NoError(t, kerr)
-			for _, k := range keys {
-				wantTermIDs[k] = append(wantTermIDs[k], nextID)
+			for _, term := range terms {
+				wantTermIDs[term] = append(wantTermIDs[term], nextID)
 			}
 			nextID++
 		}
@@ -1030,11 +1030,11 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, nextID, cnt, "cold event count must match the reference payload count")
 
-	terms := make([]event.TermKey, 0, len(wantTermIDs))
+	terms := make([]event.Term, 0, len(wantTermIDs))
 	for k := range wantTermIDs {
 		terms = append(terms, k)
 	}
-	bms, _, err := ecr.LookupKeys(context.Background(), terms, termWindow)
+	bms, _, err := ecr.LookupTerms(context.Background(), terms, termWindow)
 	require.NoError(t, err)
 	for i, k := range terms {
 		require.NotNil(t, bms[i], "term %d present in reference must resolve", i)
@@ -1099,7 +1099,7 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 	logger := testLogger()
 
 	evSeqs := map[uint32]bool{first: true, first + 1: true}
-	var term event.TermKey
+	var term event.Term
 	gen := func(tt *testing.T, seq uint32) []byte {
 		if evSeqs[seq] {
 			raw, _, tk := marshalLCMWithEvent(tt, seq)
@@ -1122,7 +1122,7 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 	cnt, err := cr.EventCount()
 	require.NoError(t, err)
 	require.Equal(t, uint32(len(evSeqs)), cnt)
-	bms, _, err := cr.LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
+	bms, _, err := cr.LookupTerms(context.Background(), []event.Term{term}, termWindow)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	require.Equal(t, uint64(len(evSeqs)), bms[0].GetCardinality())

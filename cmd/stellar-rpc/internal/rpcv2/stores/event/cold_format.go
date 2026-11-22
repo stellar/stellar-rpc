@@ -78,8 +78,8 @@ const (
 	// records. The Format value identifies the on-disk codec; readers
 	// dispatch on it to select a matching RecordDecoder.
 	eventsPackFormat packfile.Format = 0xFE1E000C // "Fellow Events 0xC" (zstd)
-	// Bumped from 0xFE1E000B when the record fingerprint moved to the routed
-	// key, so an older index.pack is rejected instead of missing every lookup.
+	// Bumped from 0xFE1E000B when the record fingerprint changed, so an older
+	// index.pack is rejected instead of missing every lookup.
 	indexPackFormat packfile.Format = 0xFE1E000D // "Fellow Events 0xD"
 )
 
@@ -420,29 +420,13 @@ func decodeLedgerOffsets(data []byte) (*LedgerOffsets, error) {
 // ──────────────────────────────────────────────────────────────────
 // MPHF wrapper around github.com/stellar/streamhash.
 //
-// The MPHF maps each TermKey (16 bytes of xxh3-128 over
-// `field || value`) to a unique slot in [0, N), where N is the
-// number of unique terms in a Chunk. index.pack holds each slot's
-// bitmap, in slot order. The cold reader looks up a TermKey via
-// LookupBatch, reads the slot's bitmap, and MUST verify the 4-byte
-// fingerprint index.pack stores for the slot before trusting it: an
-// MPHF returns a slot for every input, including keys never added
-// at build time. False positives are screened by the fingerprint
-// check; the bitmap intersection / post-filter logic downstream
-// handles the residual single-event false-positive rate.
+// The MPHF maps each TermKey to a slot in [0, N), and index.pack holds the
+// slots' bitmaps in slot order. An MPHF returns a slot for any input, so a
+// reader must check the slot's 4-byte fingerprint before trusting it.
 //
-// Hash compatibility: streamhash's AddKey/Query do not re-hash the
-// supplied key — they take the first 16 bytes as the routing
-// identity. TermKey is already a uniformly distributed 16-byte
-// xxh3-128 value (produced by ComputeTermKey via
-// streamhash.PreHashInPlace), but xxh3 is unkeyed, so an attacker
-// could grind terms into one streamhash block and abort the build
-// (see stores/blind.go). The wrapper therefore feeds
-// streamhash stores.BlindKey(secret, TermKey) at both build and
-// query, with the deterministic per-chunk secret (ColdIndexSecret)
-// stored in index.hash's user metadata. The 4-byte app fingerprint in index.pack
-// comes from the routed key too; the downstream post-filter stays on the
-// ORIGINAL TermKey bytes.
+// streamhash routes on a key's first 16 bytes without rehashing. The keys are
+// made with the chunk's secret, kept in index.hash's metadata, so no one
+// without it can grind terms into one block and abort the build.
 // ──────────────────────────────────────────────────────────────────
 
 // index.hash user-metadata wire format (streamhash WithMetadata):
@@ -517,10 +501,10 @@ type mphf struct {
 // ctx between keys so cancellation surfaces promptly on large
 // inputs.
 //
-// secret is the chunk's deterministic routing secret (ColdIndexSecret),
-// stored in metadata so readers route identically. Because it is fixed
-// per chunk, an ErrBlockOverflow is non-retryable: a rebuild routes the
-// same keys to the same blocks.
+// secret is the chunk's secret (ColdIndexSecret), which the keys were made
+// with, stored in metadata so readers key query terms the same way.
+// Because it is fixed per chunk, an ErrBlockOverflow is non-retryable: a
+// rebuild makes the same keys, which route to the same blocks.
 //
 //nolint:nonamedreturns // named err carries through to the deferred builder.Close
 func buildMPHF(
@@ -554,8 +538,7 @@ func buildMPHF(
 		if err = ctx.Err(); err != nil {
 			return nil, fmt.Errorf("events: build MPHF canceled after %d keys: %w", i, err)
 		}
-		rk := routedKey(secret, key)
-		if err = builder.AddKey(rk[:], 0); err != nil {
+		if err = builder.AddKey(key[:], 0); err != nil {
 			return nil, fmt.Errorf("events: add key %d: %w", i, err)
 		}
 		i++
@@ -589,11 +572,6 @@ func openMPHF(path string) (*mphf, error) {
 	return &mphf{idx: idx, secret: secret}, nil
 }
 
-// routedKey is term blinded under the chunk secret, the key the MPHF uses.
-func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
-	return TermKey(stores.BlindKey(secret, term[:]))
-}
-
 // Lookup returns the dense slot in [0, N) that key maps to, and the
 // fingerprint that index.pack must store for that slot.
 //
@@ -605,9 +583,8 @@ func routedKey(secret [stores.SecretLen]byte, term TermKey) TermKey {
 // map an unseen key to a valid build-set slot, and only the
 // fingerprint catches that residual collision.
 func (m *mphf) Lookup(key TermKey) (uint32, [IndexRecordFingerprintLen]byte, error) {
-	rk := routedKey(m.secret, key)
-	slot, err := slotOf(m.idx.QueryRank(rk[:]))
-	return slot, fingerprintOf(rk), err
+	slot, err := slotOf(m.idx.QueryRank(key[:]))
+	return slot, fingerprintOf(key), err
 }
 
 // slotLookup is one key's answer from LookupBatch, as Lookup returns it.
@@ -622,13 +599,11 @@ type slotLookup struct {
 // page cache the lookups cost about one round of reads instead of one per
 // key. results[i] answers keys[i].
 func (m *mphf) LookupBatch(keys []TermKey) []slotLookup {
-	routed := make([]TermKey, len(keys))
 	queries := make([][]byte, len(keys))
 	results := make([]slotLookup, len(keys))
-	for i, key := range keys {
-		routed[i] = routedKey(m.secret, key)
-		queries[i] = routed[i][:]
-		results[i].fp = fingerprintOf(routed[i])
+	for i := range keys {
+		queries[i] = keys[i][:]
+		results[i].fp = fingerprintOf(keys[i])
 	}
 	for i, r := range m.idx.QueryBatch(queries) {
 		results[i].slot, results[i].err = slotOf(r.Rank, r.Err)
@@ -636,10 +611,10 @@ func (m *mphf) LookupBatch(keys []TermKey) []slotLookup {
 	return results
 }
 
-// fingerprintOf is the fingerprint index.pack stores for the term routed to rk.
-func fingerprintOf(rk TermKey) [IndexRecordFingerprintLen]byte {
+// fingerprintOf is the fingerprint index.pack stores for key k.
+func fingerprintOf(k TermKey) [IndexRecordFingerprintLen]byte {
 	var fp [IndexRecordFingerprintLen]byte
-	v, _ := streamhash.Fingerprint(rk[:]) // rk is 16 bytes, so this cannot fail
+	v, _ := streamhash.Fingerprint(k[:]) // k is 16 bytes, so this cannot fail
 	binary.LittleEndian.PutUint32(fp[:], v)
 	return fp
 }

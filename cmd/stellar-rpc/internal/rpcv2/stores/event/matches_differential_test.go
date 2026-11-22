@@ -1,7 +1,7 @@
 package event
 
 // The in-memory chunk the match-path tests run against, served through
-// LookupKeys, and the concurrent-ingest gate that checks a hot store
+// LookupTerms, and the concurrent-ingest gate that checks a hot store
 // against it.
 
 import (
@@ -24,10 +24,22 @@ import (
 // diffCorpus is an in-memory chunk with one distinct event per id.
 type diffCorpus struct {
 	raw   [][]byte
-	index Bitmaps
+	index termBitmaps
 }
 
-// diffReader serves the corpus through LookupKeys, the seam Matches reads the
+// termBitmaps is a corpus's index: each term's event ids.
+type termBitmaps map[Term]*roaring.Bitmap
+
+func (b termBitmaps) add(t Term, ids ...uint32) {
+	bm, ok := b[t]
+	if !ok {
+		bm = roaring.New()
+		b[t] = bm
+	}
+	bm.AddMany(ids)
+}
+
+// diffReader serves the corpus through LookupTerms, the seam Matches reads the
 // index by.
 type diffReader struct{ c *diffCorpus }
 
@@ -40,12 +52,12 @@ func (r diffReader) Offsets() (*LedgerOffsets, error) {
 
 // The bitmaps are whole terms; covering only the window, and marking none
 // whole, makes the walk stage as it would over split terms.
-func (r diffReader) LookupKeys(
-	_ context.Context, keys []TermKey, window IDRange,
+func (r diffReader) LookupTerms(
+	_ context.Context, terms []Term, window IDRange,
 ) ([]*roaring.Bitmap, Coverage, error) {
-	out := make([]*roaring.Bitmap, len(keys))
-	for i, k := range keys {
-		out[i] = r.c.index[k]
+	out := make([]*roaring.Bitmap, len(terms))
+	for i, term := range terms {
+		out[i] = r.c.index[term]
 	}
 	return out, Coverage{IDRange: window}, nil
 }
@@ -115,7 +127,7 @@ func newDiffVocab(tb testing.TB) *diffVocab {
 
 func newDiffCorpus(t *testing.T, rng *rand.Rand, v *diffVocab, n int) *diffCorpus {
 	t.Helper()
-	c := &diffCorpus{index: NewBitmaps()}
+	c := &diffCorpus{index: termBitmaps{}}
 	for id := range n {
 		var cid xdr.ContractId
 		copy(cid[:], v.contracts[rng.Intn(len(v.contracts))])
@@ -139,10 +151,10 @@ func newDiffCorpus(t *testing.T, rng *rand.Rand, v *diffVocab, n int) *diffCorpu
 		raw, err := ev.MarshalBinary()
 		require.NoError(t, err)
 		c.raw = append(c.raw, raw)
-		keys, err := TermsForBytes(raw)
+		terms, err := TermsForBytes(raw)
 		require.NoError(t, err)
-		for _, k := range keys {
-			c.index.AddTo(k, uint32(id))
+		for _, term := range terms {
+			c.index.add(term, uint32(id))
 		}
 	}
 	return c

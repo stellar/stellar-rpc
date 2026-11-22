@@ -134,14 +134,9 @@ var testIndexSecret = [stores.SecretLen]byte{
 	0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf,
 }
 
-// keyFor returns the TermKey ComputeTermKey produces for the i'th
-// test value — useful for verifying Lookup against the same value
-// the test loaded into the Bitmaps.
+// keyFor returns the i'th test value's key under the test secret.
 func keyFor(i int) TermKey {
-	return ComputeTermKey(
-		fmt.Appendf(nil, "key-%d", i),
-		FieldContractID,
-	)
+	return NewTerm(FieldContractID, fmt.Appendf(nil, "key-%d", i)).Key(testIndexSecret)
 }
 
 // buildIndex returns a populated Bitmaps of n distinct terms,
@@ -155,7 +150,7 @@ func buildIndex(t *testing.T, n int) Bitmaps {
 	idx := NewBitmaps()
 	for i := range n {
 		idx.AddTo(
-			ComputeTermKey(fmt.Appendf(nil, "key-%d", i), FieldContractID),
+			NewTerm(FieldContractID, fmt.Appendf(nil, "key-%d", i)).Key(testIndexSecret),
 			uint32(i),
 		)
 	}
@@ -219,10 +214,7 @@ func TestLookup_UnseenKeyBehavior(t *testing.T) {
 		collidedSlot int
 	)
 	for i := range 2000 {
-		unseen := ComputeTermKey(
-			fmt.Appendf(nil, "never-added-%d", i),
-			FieldTopic0,
-		)
+		unseen := NewTerm(FieldTopic0, fmt.Appendf(nil, "never-added-%d", i)).Key(testIndexSecret)
 		slot, _, err := m.Lookup(unseen)
 		switch {
 		case errors.Is(err, ErrKeyNotFound):
@@ -252,7 +244,7 @@ func TestLookupBatch_MatchesLookup(t *testing.T) {
 
 	keys := make([]TermKey, 0, 2*n)
 	for i := range n {
-		keys = append(keys, keyFor(i), ComputeTermKey(fmt.Appendf(nil, "never-added-%d", i), FieldTopic0))
+		keys = append(keys, keyFor(i), NewTerm(FieldTopic0, fmt.Appendf(nil, "never-added-%d", i)).Key(testIndexSecret))
 	}
 	hits := m.LookupBatch(keys)
 	require.Len(t, hits, len(keys))
@@ -269,7 +261,7 @@ func TestBuild_EmptyIndexSucceeds(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
 	assert.True(t, m.isEmpty())
-	_, _, lerr := m.Lookup(ComputeTermKey([]byte("anything"), FieldContractID))
+	_, _, lerr := m.Lookup(NewTerm(FieldContractID, []byte("anything")).Key(testIndexSecret))
 	assert.ErrorIs(t, lerr, ErrKeyNotFound)
 }
 
@@ -368,8 +360,7 @@ func TestEventsMeta_DecodeRejectsBadInput(t *testing.T) {
 }
 
 func TestBuild_WritesKeyedRoutingMetadata(t *testing.T) {
-	// A fresh build must carry v1 metadata and route every term key
-	// through stores.BlindKey under the stored secret.
+	// The build records the secret its keys were made with.
 	const n = 64
 	path := filepath.Join(t.TempDir(), "index.hash")
 	m, err := buildMPHF(context.Background(), buildIndex(t, n), path, testIndexSecret)
@@ -390,13 +381,12 @@ func TestBuild_WritesKeyedRoutingMetadata(t *testing.T) {
 	assert.Equal(t, testIndexSecret, secret, "stored secret must be the one the build was given")
 
 	for i := range n {
-		k := keyFor(i)
-		rk := stores.BlindKey(secret, k[:])
-		want, err := raw.QueryRank(rk[:])
-		require.NoError(t, err, "routed key %d must be in the build set", i)
+		k := NewTerm(FieldContractID, fmt.Appendf(nil, "key-%d", i)).Key(secret)
+		want, err := raw.QueryRank(k[:])
+		require.NoError(t, err, "term %d keyed with the stored secret must be in the build set", i)
 		got, _, err := m.Lookup(k)
 		require.NoError(t, err)
-		assert.Equal(t, uint32(want), got, "Lookup must equal QueryRank over the routed key")
+		assert.Equal(t, uint32(want), got, "Lookup must equal QueryRank over the key")
 	}
 }
 

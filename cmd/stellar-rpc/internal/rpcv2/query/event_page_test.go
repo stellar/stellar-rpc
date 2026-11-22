@@ -980,7 +980,7 @@ type fakeEventReader struct {
 	chunkID  chunk.ID
 	ofs      *event.LedgerOffsets
 	payloads []event.Payload // indexed by ordinal
-	bitmaps  map[event.TermKey]*roaring.Bitmap
+	bitmaps  map[event.Term]*roaring.Bitmap
 }
 
 func (f *fakeEventReader) ChunkID() chunk.ID { return f.chunkID }
@@ -993,12 +993,12 @@ func (f *fakeEventReader) Offsets() (*event.LedgerOffsets, error) { return f.ofs
 
 // The bitmaps are whole terms; covering only the window makes the walk stage
 // as it would over a windowed reader.
-func (f *fakeEventReader) LookupKeys(
-	_ context.Context, keys []event.TermKey, window event.IDRange,
+func (f *fakeEventReader) LookupTerms(
+	_ context.Context, terms []event.Term, window event.IDRange,
 ) ([]*roaring.Bitmap, event.Coverage, error) {
-	out := make([]*roaring.Bitmap, len(keys))
-	for i, k := range keys {
-		out[i] = f.bitmaps[k]
+	out := make([]*roaring.Bitmap, len(terms))
+	for i, term := range terms {
+		out[i] = f.bitmaps[term]
 	}
 	return out, event.Coverage{IDRange: window}, nil
 }
@@ -1039,7 +1039,7 @@ func TestEventScan_DropsDoNotStallTheChunk(t *testing.T) {
 	require.NoError(t, ofs.Append(f, total))
 	fake := &fakeEventReader{
 		chunkID: c, ofs: ofs,
-		bitmaps: map[event.TermKey]*roaring.Bitmap{},
+		bitmaps: map[event.Term]*roaring.Bitmap{},
 	}
 	for i := range total {
 		label := fmt.Sprintf("noise%d", i)
@@ -1059,7 +1059,7 @@ func TestEventScan_DropsDoNotStallTheChunk(t *testing.T) {
 	// are collision-style false positives the post-filter must drop.
 	all := roaring.New()
 	all.AddRange(0, total)
-	fake.bitmaps[event.ComputeTermKey(cidA[:], event.FieldContractID)] = all
+	fake.bitmaps[event.NewTerm(event.FieldContractID, cidA[:])] = all
 
 	got, err := scanChunk(context.Background(),
 		eventPart{Chunk: c, Reader: fake, From: f, To: f},
