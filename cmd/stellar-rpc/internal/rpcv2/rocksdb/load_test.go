@@ -277,6 +277,28 @@ func TestStore_NoBlockCache_KeepsReadsOutOfTheBlockCache(t *testing.T) {
 	require.Greater(t, s.cache.GetUsage(), loaded)
 }
 
+// With RibbonFilter, a file's filter takes clearly less memory than Bloom's at the same bits per key.
+func TestStore_RibbonFilter_TakesLessMemoryThanBloom(t *testing.T) {
+	const bloom, ribbon = "bloom", "ribbon"
+	s, err := New(Config{
+		Path:           t.TempDir(),
+		ColumnFamilies: []string{bloom, ribbon},
+		Logger:         silentLogger(),
+		PerCFOptions: map[string]CFOptions{
+			bloom:  {BloomFilterBitsPerKey: 10},
+			ribbon: {BloomFilterBitsPerKey: 10, RibbonFilter: true},
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	for _, cf := range []string{bloom, ribbon} {
+		require.NoError(t, s.LoadSorted(cf, numbered(100_000, []byte("v"))))
+	}
+	const heap = "rocksdb.estimate-table-readers-mem"
+	require.Less(t, 10*uintProperty(t, s, ribbon, heap), 9*uintProperty(t, s, bloom, heap))
+}
+
 // Files a stopped process was still building are removed by the next open
 // that takes the DB lock, and by no other open.
 func TestNew_RemovesUnfinishedLoadFiles(t *testing.T) {

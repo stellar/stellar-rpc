@@ -216,7 +216,7 @@ A **routing-key collision between two distinct in-retention transactions** has t
 
 ### 8.3 Hot lookup
 
-Chunks above `hi` are probed in their hot DBs: the hash's routing key is searched for in the window's rows, newest first, and on a miss looked up with one point get in `txhash`, which RocksDB answers from the sealed files newest first through their bloom filters. A miss here is a real miss, with none of the cold tier's fingerprint screening (the fetch-and-verify still runs, since the response needs the transaction anyway). In steady state this tier is just the live chunk, plus briefly the one chunk in the freeze-to-coverage gap. After catch-up or a crash it can be several chunks, shrinking as rebuilds advance `hi`.
+Chunks above `hi` are probed in their hot DBs: the hash's routing key is searched for in the window's rows, newest first, and on a miss looked up with one point get in `txhash`, which RocksDB answers from the sealed files newest first through their filters. A miss here is a real miss, with none of the cold tier's fingerprint screening (the fetch-and-verify still runs, since the response needs the transaction anyway). In steady state this tier is just the live chunk, plus briefly the one chunk in the freeze-to-coverage gap. After catch-up or a crash it can be several chunks, shrinking as rebuilds advance `hi`.
 
 ---
 
@@ -228,7 +228,7 @@ Per dense chunk (~4.5M transactions, from pubnet window 6, which averaged 4.45M 
 
 | Structure | Unit cost | Dense chunk | Dense window | Lifetime |
 |---|---|---|---|---|
-| hot `txhash` CF | ~31 B/tx of sealed files (20 raw, the rest bloom, index and block overhead) | ~140 MB | — (per-chunk) | chunk ingestion → index coverage |
+| hot `txhash` CF | ~31 B/tx of sealed files (20 raw, the rest filter, index and block overhead) | ~140 MB | — (per-chunk) | chunk ingestion → index coverage |
 | `.bin` sorted run | 19 B/tx | ~85 MB | ~85 GB | chunk freeze → window finalization, or retention floor |
 | `.idx` | ≈4.2 B/tx (3-byte payload) | — (per-window) | ~19 GB | build → superseded next boundary, or retention |
 
@@ -240,7 +240,7 @@ Transient peaks: ~2.55× the index size in the window dir during each rebuild (~
 - **Ingest, cold**: sorted runs of 2²⁰ entries merged into the `.bin`, negligible against the chunk's streaming pass; the `.bin` write is sequential.
 - **Rebuild**: a full dense window builds a ~19 GB `.idx` from ~85 GB of sorted `.bin` files in about a minute and a half (~200 MB/s write burst) on 8 build workers: streamhash's sorted-file build runs at about 6M keys/s per worker, up to what the disk reads. A build gets `[backfill] index_workers` workers, half of `GOMAXPROCS` by default. From a gp3 volume at the baseline 125 MiB/s, reading the `.bin` files takes about 11 minutes. Mid-window rebuilds scale with `hi − lo`. Against a ~14-hour boundary cadence at mainnet rates, the rebuild is about a 0.2% duty cycle from NVMe, and about 1.3% at a window's end with the `.bin` files on a baseline gp3 volume.
 - **Lookup, cold**: one MPHF probe per in-retention window — fingerprint screen, then fetch-and-verify on a hit. The hash is in at most one window, so at most one fetch confirms; fingerprint false positives (~1/256 per window, §6.2) are rejected by the full-hash verify. Probe ordering, parallelism, and the resulting latency/throughput are the query-routing design's concern (§8.1).
-- **Lookup, hot**: a binary search of each of the window's rows (at most 512), then one RocksDB point get across the sealed files' bloom filters, then the same ledger fetch.
+- **Lookup, hot**: a binary search of each of the window's rows (at most 512), then one RocksDB point get across the sealed files' filters, then the same ledger fetch.
 
 ---
 

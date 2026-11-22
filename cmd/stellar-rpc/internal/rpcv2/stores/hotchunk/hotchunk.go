@@ -70,9 +70,8 @@ func dbTuning() rocksdb.Tuning {
 		MaxBackgroundJobs: 8,
 		MaxOpenFiles:      10_000,
 
-		// 512 MB block cache — txhash bloom-filter blocks are the hot
-		// working set; the cache needs to hold recently-touched bloom
-		// blocks at scale.
+		// One cache per hot DB, sized so the indexes' filter and index blocks fit its high-priority half
+		// at sac-9000, the densest profile it is sized for, where they measured 227 of its 256 MiB.
 		BlockCacheMB: 512,
 
 		// 1 GB WAL cap. Graceful Close auto-Flushes (see

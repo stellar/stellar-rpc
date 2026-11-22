@@ -92,6 +92,7 @@ func TestConfig_PerCFOptionRouting(t *testing.T) {
 	assert.True(t, perCF[txhashCF].CacheIndexAndFilterBlocks,
 		"txhash CF keeps its files' index blocks in the block cache")
 	assert.True(t, perCF[txhashCF].DisableAutoCompactions, "txhash CF keeps compaction off")
+	assert.True(t, perCF[txhashCF].RibbonFilter, "txhash CF builds Ribbon filters")
 
 	ledgerCF := ledger.CFNames()[0]
 	assert.Zero(t, perCF[ledgerCF].BloomFilterBitsPerKey, "ledger CF gets no bloom")
@@ -108,6 +109,7 @@ func TestConfig_PerCFOptionRouting(t *testing.T) {
 		"events index CF keeps its files' index blocks in the block cache")
 	assert.True(t, perCF[event.IndexCF].DisableAutoCompactions, "events index CF keeps compaction off")
 	assert.Equal(t, 10, perCF[event.IndexCF].BloomFilterBitsPerKey, "events index CF keeps its bloom")
+	assert.True(t, perCF[event.IndexCF].RibbonFilter, "events index CF builds Ribbon filters")
 }
 
 func TestConfig_DBWideTuningStaysShared(t *testing.T) {
