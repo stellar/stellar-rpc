@@ -853,16 +853,17 @@ func applyDBTuning(opts *grocksdb.Options, t Tuning) {
 
 // applySharedTableOptions builds one BBTO per CF, referencing the
 // DB-wide block cache (when set, unless the CF sets NoBlockCache), a
-// fresh per-CF bloom filter (when that CF sets BloomFilterBitsPerKey),
-// and the per-CF BlockSize override (when set). The Store retains every
-// BBTO and the cache; Close destroys them after opts/cfOpts.
+// fresh per-CF Bloom or Ribbon filter (when that CF sets
+// BloomFilterBitsPerKey), and the per-CF BlockSize override (when set).
+// The Store retains every BBTO and the cache; Close destroys them after
+// opts/cfOpts.
 //
 // Every CF gets an explicit BBTO, tuned or not, so the on-disk table
 // format stays pinned (pinnedTableFormatVersion) instead of riding
 // grocksdb's default; restoring a skip-when-untuned path would
 // silently unpin it.
 //
-// The bloom filter is built per CF because SetFilterPolicy MOVES the
+// The filter is built per CF because SetFilterPolicy MOVES the
 // policy into the BBTO (it nils the source pointer), so a single
 // shared filter would install on the first CF only and every later
 // CF would silently get none.
@@ -880,8 +881,12 @@ func (s *Store) applySharedTableOptions(cfNames []string, cfOpts []*grocksdb.Opt
 		case s.cache != nil:
 			bbto.SetBlockCache(s.cache)
 		}
-		if override.BloomFilterBitsPerKey > 0 {
-			bbto.SetFilterPolicy(grocksdb.NewBloomFilter(float64(override.BloomFilterBitsPerKey)))
+		if bits := float64(override.BloomFilterBitsPerKey); bits > 0 {
+			if override.RibbonFilter {
+				bbto.SetFilterPolicy(grocksdb.NewRibbonFilterPolicy(bits))
+			} else {
+				bbto.SetFilterPolicy(grocksdb.NewBloomFilter(bits))
+			}
 		}
 		if override.BlockSize > 0 {
 			bbto.SetBlockSize(override.BlockSize)

@@ -35,7 +35,7 @@ const (
 //   - IndexCF holds one sorted file per sealed slab, of (slab || term
 //     key) -> bitmap entries (see hotIndex). Auto compaction is off: the
 //     files never overlap. Index and filter blocks sit in the block cache:
-//     a chunk has many files, and the cache bounds their memory. The bloom
+//     a chunk has many files, and the cache bounds their memory. The
 //     filter answers a slab that lacks a term without a block read, and a
 //     lookup probes every sealed slab in its window.
 //   - OffsetsCF stores 8-byte (ledger_seq -> event_count) rows in
@@ -57,6 +57,7 @@ func hotStoreCFOptions() map[string]rocksdb.CFOptions {
 		IndexCF: {
 			BlockSize:                 indexCFBlockSize,
 			BloomFilterBitsPerKey:     10,
+			RibbonFilter:              true,
 			CacheIndexAndFilterBlocks: true,
 			DisableAutoCompactions:    true,
 		},

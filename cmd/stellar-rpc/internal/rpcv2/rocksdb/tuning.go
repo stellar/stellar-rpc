@@ -54,6 +54,9 @@ type CFOptions struct {
 	// right for a CF never probed for keys it may not hold.
 	BloomFilterBitsPerKey int
 
+	// RibbonFilter makes that filter a Ribbon filter: smaller, slower to build.
+	RibbonFilter bool
+
 	// CacheIndexAndFilterBlocks keeps each SST's index and filter blocks in
 	// the block cache instead of on the heap for as long as the file is
 	// open. For a CF that accumulates many files, it bounds their memory by
