@@ -1,12 +1,9 @@
 package event
 
 import (
-	"bytes"
-	"cmp"
 	"context"
 	"encoding/binary"
 	"fmt"
-	"iter"
 	"math"
 	"slices"
 	"sync"
@@ -18,142 +15,14 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
-const (
-	// hotSlabEvents is how many event ids a slab spans.
-	hotSlabEvents = 1 << indexSlabShift
-
-	// hotSlabPostings is the most postings a slab holds: every one of its
-	// events carrying maxTermsPerEvent terms.
-	hotSlabPostings = hotSlabEvents * maxTermsPerEvent
-
-	// hotIndexKeyLen is an IndexCF key: slab (2 BE) || term key.
-	hotIndexKeyLen = 2 + len(TermKey{})
-)
+// hotIndexKeyLen is an IndexCF key: slab (2 BE) || term key.
+const hotIndexKeyLen = 2 + len(TermKey{})
 
 func hotIndexKey(slab uint32, k TermKey) []byte {
 	key := make([]byte, hotIndexKeyLen)
 	binary.BigEndian.PutUint16(key, uint16(slab)) //nolint:gosec // a chunk has at most 1<<16 slabs
 	copy(key[2:], k[:])
 	return key
-}
-
-// Compile-time check that indexSlabShift is 16: a posting's id within its
-// slab, the slab number in an IndexCF key and a hash bucket each take 16 bits.
-const (
-	_ uint = indexSlabShift - 16
-	_ uint = 16 - indexSlabShift
-)
-
-type hotPosting struct {
-	key  TermKey
-	next uint32 // 1 + position of the bucket's previous posting; 0 ends the chain
-	id   uint16 // the event id within the slab
-}
-
-// hotSlab holds the postings of one slab of event ids in arrival order. The
-// postings of a hash bucket form a chain, newest first. One goroutine
-// appends; any number read while it does.
-type hotSlab struct {
-	slab  uint32
-	n     uint32
-	posts []hotPosting
-	// heads holds, per bucket, 1 + the position of its newest posting, or 0.
-	// A bucket is a key's leading 16 bits, so bucket order is key order.
-	heads []atomic.Uint32
-}
-
-func newHotSlab(slab uint32) *hotSlab {
-	return &hotSlab{
-		slab:  slab,
-		posts: make([]hotPosting, hotSlabPostings),
-		heads: make([]atomic.Uint32, hotSlabEvents),
-	}
-}
-
-// bucketOf is k's hash bucket, its leading 16 bits.
-func bucketOf(k TermKey) int { return int(binary.BigEndian.Uint16(k[:])) }
-
-func (s *hotSlab) head(k TermKey) *atomic.Uint32 { return &s.heads[bucketOf(k)] }
-
-// chain yields bucket b's postings, newest first.
-func (s *hotSlab) chain(b int) iter.Seq[*hotPosting] {
-	return func(yield func(*hotPosting) bool) {
-		for p := s.heads[b].Load(); p != 0; p = s.posts[p-1].next {
-			if !yield(&s.posts[p-1]) {
-				return
-			}
-		}
-	}
-}
-
-// add appends one posting. The head is stored last: a reader that loads it
-// finds the posting, and everything it links to, already written.
-func (s *hotSlab) add(k TermKey, id uint32) {
-	head := s.head(k)
-	s.posts[s.n] = hotPosting{key: k, next: head.Load(), id: uint16(id)} //nolint:gosec // the id within the slab
-	s.n++
-	head.Store(s.n)
-}
-
-// bitmap returns the term's event ids in this slab, nil if it has none.
-func (s *hotSlab) bitmap(k TermKey) *roaring.Bitmap {
-	var bits [hotSlabEvents / 64]uint64
-	found := false
-	for e := range s.chain(bucketOf(k)) {
-		if e.key == k {
-			bits[e.id>>6] |= 1 << (e.id & 63)
-			found = true
-		}
-	}
-	if !found {
-		return nil
-	}
-	bm := roaring.New()
-	bm.FromDense(bits[:], true)
-	return roaring.AddOffset64(bm, int64(s.slab)<<indexSlabShift)
-}
-
-// terms yields every term of the slab in ascending key order with its event
-// ids as a serialized bitmap, which is valid until the next step.
-func (s *hotSlab) terms() iter.Seq2[TermKey, []byte] {
-	type entry struct {
-		key TermKey
-		id  uint32
-	}
-	return func(yield func(TermKey, []byte) bool) {
-		var (
-			entries []entry
-			ids     []uint32
-			buf     bytes.Buffer
-		)
-		bm := roaring.New()
-		base := s.slab << indexSlabShift
-		for b := range s.heads {
-			entries = entries[:0]
-			for e := range s.chain(b) {
-				entries = append(entries, entry{e.key, base | uint32(e.id)})
-			}
-			slices.SortFunc(entries, func(x, y entry) int {
-				return cmp.Or(bytes.Compare(x.key[:], y.key[:]), cmp.Compare(x.id, y.id))
-			})
-			for i := 0; i < len(entries); {
-				k := entries[i].key
-				ids = ids[:0]
-				for ; i < len(entries) && entries[i].key == k; i++ {
-					ids = append(ids, entries[i].id)
-				}
-				bm.Clear()
-				bm.AddMany(ids)
-				bm.RunOptimize()
-				buf.Reset()
-				// A bytes.Buffer write cannot fail.
-				_, _ = bm.WriteTo(&buf)
-				if !yield(k, buf.Bytes()) {
-					return
-				}
-			}
-		}
-	}
 }
 
 // hotIndex is a hot chunk's term index. The slab being filled lives in
