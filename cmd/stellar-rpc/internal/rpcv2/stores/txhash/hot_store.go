@@ -42,7 +42,7 @@ func Open(store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte)
 func open(
 	store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte, maxKeys, maxLedgers int,
 ) (*HotStore, error) {
-	if err := checkSecret(store, secret, chunkID); err != nil {
+	if err := checkSecret(store, secret, chunkID, true); err != nil {
 		return nil, err
 	}
 	lastSealed, sealedKeys, err := readMarker(store)
@@ -135,22 +135,22 @@ func (h *HotStore) Get(hash [32]byte) (uint32, error) {
 
 // secretKey, in the default CF, records the chunk ID and the secret the
 // chunk's hot keys are blinded with: they cannot be blinded again, so a store
-// given another secret must fail rather than miss every key.
+// or a freeze given another secret must fail rather than miss every key.
 const secretKey = "txhash:secret"
 
-// checkSecret compares chunkID and secret with the ones store records. A
-// store that records none and holds no ledgers yet records them.
-func checkSecret(store *rocksdb.Store, secret [stores.SecretLen]byte, chunkID chunk.ID) error {
+// checkSecret compares chunkID and secret with the ones store records. With
+// adopt, a store that records none and holds no ledgers yet records them.
+func checkSecret(store *rocksdb.Store, secret [stores.SecretLen]byte, chunkID chunk.ID, adopt bool) error {
 	want := append(binary.BigEndian.AppendUint32(nil, uint32(chunkID)), secret[:]...)
 	v, found, err := store.Get("", []byte(secretKey))
 	var hasLedgers bool
-	if err == nil && !found {
+	if err == nil && !found && adopt {
 		_, hasLedgers, err = store.LastKey(ledger.LedgersCF)
 	}
 	switch {
 	case err != nil:
 		return err
-	case !found && !hasLedgers:
+	case !found && adopt && !hasLedgers:
 		return store.Put("", []byte(secretKey), want)
 	case !found || !bytes.Equal(v, want):
 		return errors.New("txhash: the chunk's hot keys are not blinded with this secret; re-ingest the chunk")
@@ -161,7 +161,10 @@ func checkSecret(store *rocksdb.Store, secret [stores.SecretLen]byte, chunkID ch
 // readMarker returns the last sealed ledger and how many keys the seals
 // hold, zeros when nothing is sealed.
 func readMarker(store *rocksdb.Store) (uint32, uint64, error) {
-	v, found, err := store.Get(txhashCF, []byte(markerKey))
+	return decodeMarker(store.Get(txhashCF, []byte(markerKey)))
+}
+
+func decodeMarker(v []byte, found bool, err error) (uint32, uint64, error) {
 	if err != nil || !found {
 		return 0, 0, err
 	}
