@@ -18,11 +18,10 @@ import (
 // chunk on a local sequence counter, then verifies the full [first,last] range
 // was consumed — this runs before finalize, so a short stream never finalizes a
 // truncated artifact. The in-order contract is enforced at the SOURCE
-// (packStream reads positionally by key; hotLedgerStream key-checks its own
-// keyspace; the SDK backends validate their own output), so drain trusts the
-// counter rather than re-parsing every view's sequence. Cancellation is the
-// iterator's job (RawLedgers errors on a canceled ctx), so there is no ctx poll
-// here.
+// (packStream reads positionally by key; the SDK backends validate their own
+// output), so drain trusts the counter rather than re-parsing every view's
+// sequence. Cancellation is the iterator's job (RawLedgers errors on a
+// canceled ctx), so there is no ctx poll here.
 func drain(ledgers iter.Seq2[[]byte, error], chunkID chunk.ID, cc *coldChunk) error {
 	first, last := chunkID.FirstLedger(), chunkID.LastLedger()
 	seq := first

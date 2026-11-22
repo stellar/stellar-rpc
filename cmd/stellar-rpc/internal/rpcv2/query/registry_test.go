@@ -2,14 +2,12 @@ package query
 
 import (
 	"bytes"
-	"context"
 	"testing"
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
@@ -317,15 +315,13 @@ func TestTryCloseHandle_BusyRetainsThenRetryDrains(t *testing.T) {
 	rpcv2test.IngestLedger(t, db, c.FirstLedger(), rpcv2test.ZeroTxLCMBytes(t, c.FirstLedger()))
 	r.PublishHandle(c, db)
 
-	// Park a reader inside the ledger stream so the store's read-lock stays held,
+	// Park a reader inside a ledger scan so the store's read-lock stays held,
 	// which makes CloseIfIdle (under TryCloseHandle) report busy.
 	parked, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
 		first := true
-		for _, ierr := range db.Source().RawLedgers(
-			context.Background(), ledgerbackend.BoundedRange(c.FirstLedger(), c.FirstLedger()),
-		) {
+		for _, ierr := range db.Ledgers().IterateLedgers(c.FirstLedger(), c.FirstLedger()) {
 			if ierr != nil {
 				return
 			}
