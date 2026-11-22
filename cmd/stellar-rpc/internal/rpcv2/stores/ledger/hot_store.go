@@ -24,6 +24,11 @@ const LedgersCF = "ledgers"
 // facade exports CFNames()).
 func CFNames() []string { return []string{LedgersCF} }
 
+// CFOptions keeps ledgers out of the block cache, where they would evict the indexes' filters.
+func CFOptions() map[string]rocksdb.CFOptions {
+	return map[string]rocksdb.CFOptions{LedgersCF: {NoBlockCache: true}}
+}
+
 // Entry — one (sequence, uncompressed ledger bytes) pair. Compression is
 // internal to the store, so callers pass and receive raw bytes here.
 type Entry struct {

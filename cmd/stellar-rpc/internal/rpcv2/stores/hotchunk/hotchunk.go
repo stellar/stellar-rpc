@@ -90,10 +90,10 @@ func dbTuning() rocksdb.Tuning {
 }
 
 // config builds the shared store's rocksdb.Config: the DB-wide dbTuning plus
-// the per-CF options merged from every facade — each CF keeps its
-// pre-unification standalone tuning; the ledgers CF rides on RocksDB defaults.
+// the per-CF options merged from every facade.
 func config(path string, logger *supportlog.Entry, readOnly, mustExist bool) rocksdb.Config {
-	perCF := event.CFOptions()
+	perCF := ledger.CFOptions()
+	maps.Copy(perCF, event.CFOptions())
 	maps.Copy(perCF, txhash.CFOptions())
 	return rocksdb.Config{
 		Path:           path,

@@ -59,6 +59,9 @@ type CFOptions struct {
 	// open. For a CF that accumulates many files, it bounds their memory by
 	// the cache size.
 	CacheIndexAndFilterBlocks bool
+
+	// NoBlockCache keeps this CF out of the block cache, so it evicts no other CF's blocks.
+	NoBlockCache bool
 }
 
 // Tuning — DB-wide RocksDB knobs shared across every CF of one store. Zero
