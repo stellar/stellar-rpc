@@ -852,10 +852,10 @@ func applyDBTuning(opts *grocksdb.Options, t Tuning) {
 }
 
 // applySharedTableOptions builds one BBTO per CF, referencing the
-// DB-wide block cache (when set), a fresh per-CF bloom filter (when
-// that CF sets BloomFilterBitsPerKey), and the per-CF BlockSize
-// override (when set). The Store retains every BBTO and the cache;
-// Close destroys them after opts/cfOpts.
+// DB-wide block cache (when set, unless the CF sets NoBlockCache), a
+// fresh per-CF bloom filter (when that CF sets BloomFilterBitsPerKey),
+// and the per-CF BlockSize override (when set). The Store retains every
+// BBTO and the cache; Close destroys them after opts/cfOpts.
 //
 // Every CF gets an explicit BBTO, tuned or not, so the on-disk table
 // format stays pinned (pinnedTableFormatVersion) instead of riding
@@ -874,7 +874,10 @@ func (s *Store) applySharedTableOptions(cfNames []string, cfOpts []*grocksdb.Opt
 		override := s.cfg.PerCFOptions[cfNames[i]]
 		bbto := grocksdb.NewDefaultBlockBasedTableOptions()
 		bbto.SetFormatVersion(pinnedTableFormatVersion)
-		if s.cache != nil {
+		switch {
+		case override.NoBlockCache:
+			bbto.SetNoBlockCache(true)
+		case s.cache != nil:
 			bbto.SetBlockCache(s.cache)
 		}
 		if override.BloomFilterBitsPerKey > 0 {

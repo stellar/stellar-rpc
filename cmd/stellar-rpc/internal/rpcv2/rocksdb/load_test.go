@@ -248,6 +248,35 @@ func TestStore_CacheIndexAndFilterBlocks_KeepsThemOffTheHeap(t *testing.T) {
 	require.Less(t, 4*uintProperty(t, s, cached, heap), uintProperty(t, s, plain, heap))
 }
 
+// With NoBlockCache, a column family's reads leave the block cache as it was.
+func TestStore_NoBlockCache_KeepsReadsOutOfTheBlockCache(t *testing.T) {
+	const cached, nocache = "cached", "nocache"
+	s, err := New(Config{
+		Path:           t.TempDir(),
+		ColumnFamilies: []string{cached, nocache},
+		Logger:         silentLogger(),
+		Tuning:         Tuning{BlockCacheMB: 4},
+		PerCFOptions:   map[string]CFOptions{nocache: {NoBlockCache: true}},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	const n = 2000
+	for _, cf := range []string{cached, nocache} {
+		require.NoError(t, s.LoadSorted(cf, numbered(n, []byte("v"))))
+	}
+	readAll := func(cf string) {
+		for i := range n {
+			requireValue(t, s, cf, fmt.Sprintf("key-%08d", i), "v")
+		}
+	}
+	loaded := s.cache.GetUsage()
+	readAll(nocache)
+	require.Equal(t, loaded, s.cache.GetUsage())
+	readAll(cached)
+	require.Greater(t, s.cache.GetUsage(), loaded)
+}
+
 // Files a stopped process was still building are removed by the next open
 // that takes the DB lock, and by no other open.
 func TestNew_RemovesUnfinishedLoadFiles(t *testing.T) {

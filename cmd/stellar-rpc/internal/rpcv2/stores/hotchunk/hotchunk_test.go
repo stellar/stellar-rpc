@@ -97,6 +97,7 @@ func TestConfig_PerCFOptionRouting(t *testing.T) {
 	assert.Zero(t, perCF[ledgerCF].BloomFilterBitsPerKey, "ledger CF gets no bloom")
 	assert.Zero(t, perCF[ledgerCF].WriteBufferMB, "ledger CF rides on RocksDB defaults")
 	assert.False(t, perCF[ledgerCF].DisableAutoCompactions, "ledger CF keeps auto-compaction")
+	assert.True(t, perCF[ledgerCF].NoBlockCache, "ledger CF bypasses the block cache")
 
 	assert.Equal(t, grocksdb.ZSTDCompression, perCF[event.DataCF].Compression,
 		"events data CF keeps its ZSTD override")
