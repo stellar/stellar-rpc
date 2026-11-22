@@ -482,6 +482,21 @@ func (s *Store) IterateUncached(cf string, prefix []byte) iter.Seq2[Entry, error
 	}
 }
 
+// IterateUncachedAsOf is IterateAsOf without filling the block cache.
+func (s *Store) IterateUncachedAsOf(snap *Snapshot, cf string, prefix []byte) iter.Seq2[Entry, error] {
+	return func(yield func(Entry, error) bool) {
+		if snap == nil || snap.snap == nil {
+			yield(Entry{}, ErrSnapshotReleased)
+			return
+		}
+		ro := grocksdb.NewDefaultReadOptions()
+		ro.SetSnapshot(snap.snap)
+		ro.SetFillCache(false)
+		defer ro.Destroy()
+		s.iterateWith(ro, cf, prefix)(yield)
+	}
+}
+
 // Flush drains the active memtable to an SST. Callers do NOT need
 // to call this before Close — Close auto-Flushes internally.
 func (s *Store) Flush() error {
@@ -613,9 +628,7 @@ func (s *Store) getPinnedWith(
 	return true, fn(handle.Data())
 }
 
-// iterateWith is the shared body for Iterate, IterateAsOf and IterateUncached; ro
-// selects the read options (s.ro for a live scan, a snapshot-pinned ReadOptions
-// for IterateAsOf, a no-fill-cache one for IterateUncached).
+// iterateWith is the shared body of the Iterate variants; ro selects their read options.
 func (s *Store) iterateWith(ro *grocksdb.ReadOptions, cf string, prefix []byte) iter.Seq2[Entry, error] {
 	return func(yield func(Entry, error) bool) {
 		s.mu.RLock()

@@ -41,7 +41,7 @@ func Open(store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte)
 func open(
 	store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte, maxKeys, maxLedgers int,
 ) (*HotStore, error) {
-	if err := checkSecret(store, secret); err != nil {
+	if err := checkSecret(store, secret, true); err != nil {
 		return nil, err
 	}
 	lastSealed, sealedKeys, err := readMarker(store)
@@ -133,20 +133,20 @@ func (h *HotStore) Get(hash [32]byte) (uint32, error) {
 }
 
 // secretKey, in the default CF, records the secret the chunk's hot keys are
-// blinded with: they cannot be blinded again, so a store given another
-// secret must fail rather than miss every key.
+// blinded with: they cannot be blinded again, so a store or a freeze given
+// another secret must fail rather than miss every key.
 const secretKey = "txhash:secret"
 
-// checkSecret compares secret with the one store records. A store that
-// records none records secret.
-func checkSecret(store *rocksdb.Store, secret [stores.SecretLen]byte) error {
+// checkSecret compares secret with the one store records. With adopt, a
+// store that records none records secret.
+func checkSecret(store *rocksdb.Store, secret [stores.SecretLen]byte, adopt bool) error {
 	v, found, err := store.Get("", []byte(secretKey))
 	switch {
 	case err != nil:
 		return err
-	case !found:
+	case !found && adopt:
 		return store.Put("", []byte(secretKey), secret[:])
-	case !bytes.Equal(v, secret[:]):
+	case !found || !bytes.Equal(v, secret[:]):
 		return errors.New("txhash: the chunk's hot keys are not blinded with this secret; re-ingest the chunk")
 	}
 	return nil
@@ -155,7 +155,10 @@ func checkSecret(store *rocksdb.Store, secret [stores.SecretLen]byte) error {
 // readMarker returns the last sealed ledger and how many keys the seals
 // hold, zeros when nothing is sealed.
 func readMarker(store *rocksdb.Store) (uint32, uint64, error) {
-	v, found, err := store.Get(txhashCF, []byte(markerKey))
+	return decodeMarker(store.Get(txhashCF, []byte(markerKey)))
+}
+
+func decodeMarker(v []byte, found bool, err error) (uint32, uint64, error) {
 	if err != nil || !found {
 		return 0, 0, err
 	}
