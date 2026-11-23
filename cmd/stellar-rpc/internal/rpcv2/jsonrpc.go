@@ -144,7 +144,6 @@ func queryEventsLimits(cfg config.Config) eventsapi.QueryEventsLimits {
 			MaxResponseBytes: deref(cfg.Service.MaxResponseBytes),
 		},
 		TermBudget: uint32(min(deref(m.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
-		MaxFilters: protocol.MaxFilters(deref(m.MaxFilters)),
 	}
 }
 
@@ -171,7 +170,7 @@ func versionInfoLimits(cfg config.Config) *protocol.VersionInfoLimits {
 		GetTransactions: &protocol.PageLimits{MaxLimit: deref(m.GetTransactions.MaxItemsPerResponse)},
 		QueryEvents: &protocol.QueryEventsLimits{
 			TermBudget: queryEvents.TermBudget,
-			MaxFilters: queryEvents.MaxFilters,
+			MaxFilters: protocol.QueryEventsDefaultMaxFilters,
 			MaxLimit:   queryEvents.MaxLimit,
 		},
 	}

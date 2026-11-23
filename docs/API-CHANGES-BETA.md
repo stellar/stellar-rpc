@@ -19,7 +19,7 @@ The response has all the fields of the current RPC, and three new fields:
 | Field | Type | Description |
 |---|---|---|
 | `methods` | string[] | The names of all JSON-RPC methods that the node serves, in sorted order. |
-| `limits` | object | The request limits that the node configuration sets. A client can check a request against them before it sends the request. |
+| `limits` | object | The request limits that the node applies. A client can check a request against them before it sends the request. |
 | `retention` | object | The ledgers that the node keeps. See [Retention](#retention). |
 
 `limits` has these fields:
@@ -31,7 +31,7 @@ The response has all the fields of the current RPC, and three new fields:
 | `getLedgers.maxLimit` | number | The maximum `limit` in one request. | `[service.methods.getLedgers].max_items_per_response` |
 | `getTransactions.maxLimit` | number | The maximum `limit` in one request. | `[service.methods.getTransactions].max_items_per_response` |
 | `queryEvents.termBudget` | number | The maximum number of distinct filter terms in one query. See [Term budget](#term-budget). | `[service.methods.queryEvents].term_budget` |
-| `queryEvents.maxFilters` | number | The maximum number of filters in one query. | `[service.methods.queryEvents].max_filters` |
+| `queryEvents.maxFilters` | number | The maximum number of filters in one query. | None. The value is always 256. |
 | `queryEvents.maxLimit` | number | The maximum `limit` in one request. | `[service.methods.queryEvents].max_items_per_response` |
 
 ```json
@@ -100,7 +100,7 @@ Rules:
 - With `desc` and no `maxLedger`, the top edge is the latest ledger at query start, so every page shares it.
 - Descending reverses the full event order, including events inside one ledger.
 - An omitted topic position matches any value. A set position must match exactly. There is no topic-count matching, so events with more than four topics still match on positions 0 to 3.
-- The list may hold at most 256 filters by default. The operator can change this limit with `max_filters` under `[service.methods.queryEvents]`. Each distinct field value counts against the term budget of 15, however many filters reuse it.
+- The list may hold at most 256 filters. Each distinct field value counts against the term budget of 15, however many filters reuse it.
 - An empty `filters` list, a `topic4` field, or a `limit` outside 1 to 1000 returns `invalid_params`.
 
 ### Result

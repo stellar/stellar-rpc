@@ -3,8 +3,7 @@
 ## Unreleased
 
 ### Added
-* rpcv2: `getVersionInfo` returns three new fields: `methods`, the sorted names of the methods the node serves; `limits`, the request limits its configuration sets (the batch size, the largest `limit` of `getEvents`, `getLedgers`, `getTransactions` and `queryEvents`, and the `queryEvents` term budget and filter cap); and `retention`, the ledgers the node keeps. A client can use one call to find out if the node serves `queryEvents` and to check a request against the limits before it sends it. rpcv1 responses do not change ([#1182](https://github.com/stellar/stellar-rpc/issues/1182)).
-* rpcv2: `[service.methods.queryEvents].max_filters` sets the largest number of filters in one `queryEvents` request (default 256).
+* rpcv2: `getVersionInfo` returns three new fields: `methods`, the sorted names of the methods the node serves; `limits`, the request limits it applies (the batch size, the largest `limit` of `getEvents`, `getLedgers`, `getTransactions` and `queryEvents`, and the `queryEvents` term budget and filter cap); and `retention`, the ledgers the node keeps. A client can use one call to find out if the node serves `queryEvents` and to check a request against the limits before it sends it. rpcv1 responses do not change ([#1182](https://github.com/stellar/stellar-rpc/issues/1182)).
 
 ### Fixed
 * **`getLedgers` no longer fails for ledgers older than the local retention window when the config has no `[buffered_storage_backend_config]` section.** With `SERVE_LEDGERS_FROM_DATASTORE` enabled, those requests used to fail with `-32603` ("failed to create buffered storage backend: buffer size must be > 0"). The buffer size and worker count now default to 100 and 10 when the config leaves them unset. An invalid section, such as one with more workers than the buffer size, now stops stellar-rpc at startup instead of failing every such request.

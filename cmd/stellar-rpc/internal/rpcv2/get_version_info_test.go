@@ -20,9 +20,8 @@ import (
 // limits next to the v1 fields, and queryEvents enforces the same limits.
 func TestJSONRPCHandler_GetVersionInfoAdvertisesMethodsAndLimits(t *testing.T) {
 	cfg := defaultsConfig(t)
-	termBudget, maxFilters, maxLimit := uint(7), uint(2), uint(500)
+	termBudget, maxLimit := uint(7), uint(500)
 	cfg.Service.Methods.QueryEvents.TermBudget = &termBudget
-	cfg.Service.Methods.QueryEvents.MaxFilters = &maxFilters
 	cfg.Service.Methods.QueryEvents.MaxItemsPerResponse = &maxLimit
 	batch, events, ledgers, txs := uint(4), uint(30), uint(3), uint(40)
 	cfg.Service.MaxRequestBatchSize = &batch
@@ -56,14 +55,14 @@ func TestJSONRPCHandler_GetVersionInfoAdvertisesMethodsAndLimits(t *testing.T) {
 		GetEvents:       &protocol.PageLimits{MaxLimit: 30},
 		GetLedgers:      &protocol.PageLimits{MaxLimit: 3},
 		GetTransactions: &protocol.PageLimits{MaxLimit: 40},
-		QueryEvents:     &protocol.QueryEventsLimits{TermBudget: 7, MaxFilters: 2, MaxLimit: 500},
+		QueryEvents:     &protocol.QueryEventsLimits{TermBudget: 7, MaxFilters: 256, MaxLimit: 500},
 	}, result.Limits)
 
 	filter := `{"type":"contract"}`
 	over := rpcv2test.PostRPC(t, srv.URL, protocol.QueryEventsMethodName,
-		`{"minLedger":2,"filters":[`+strings.Repeat(filter+",", 2)+filter+`]}`)
+		`{"minLedger":2,"filters":[`+strings.Repeat(filter+",", 256)+filter+`]}`)
 	require.NotNil(t, over.Error)
-	assert.Contains(t, over.Error.Message, "1 to 2 filters")
+	assert.Contains(t, over.Error.Message, "1 to 256 filters")
 }
 
 // The default config advertises the documented defaults.

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -33,7 +34,6 @@ func testLimits() QueryEventsLimits {
 			DefaultLimit: 100,
 		},
 		TermBudget: protocol.QueryEventsDefaultTermBudget,
-		MaxFilters: protocol.QueryEventsDefaultMaxFilters,
 	}
 }
 
@@ -367,51 +367,27 @@ func TestQueryEvents_WithoutAViewIsAnError(t *testing.T) {
 		"a missing view is a server fault, not a client error")
 }
 
-// queryEvents rejects a request with more filters than the configured cap.
-func TestQueryEvents_FiltersOverTheOperatorCapAreRejected(t *testing.T) {
-	limits := testLimits()
-	limits.MaxFilters = 2
+// queryEvents serves a request at the API's filter cap and rejects one over it.
+// A cap above the cursor codec's would fail the request at the cap as
+// cursor_malformed.
+func TestQueryEvents_FilterCap(t *testing.T) {
 	ctx, first := seedView(t)
-	filter := protocol.QueryEventsFilter{EventType: protocol.EventTypeContract}
+	filters := slices.Repeat([]protocol.QueryEventsFilter{{EventType: protocol.EventTypeContract}},
+		int(protocol.QueryEventsDefaultMaxFilters)+1)
 
-	_, err := queryEvents(ctx, limits, nil, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+	_, err := queryEvents(ctx, testLimits(), nil, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 		MinLedger: first,
-		Filters:   []protocol.QueryEventsFilter{filter, filter},
+		Filters:   filters[:protocol.QueryEventsDefaultMaxFilters],
 	})
 	require.NoError(t, err, "a request at the cap is served")
 
-	_, err = queryEvents(ctx, limits, nil, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+	_, err = queryEvents(ctx, testLimits(), nil, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
 		MinLedger: first,
-		Filters:   []protocol.QueryEventsFilter{filter, filter, filter},
+		Filters:   filters,
 	})
 	require.Error(t, err)
 	requireErrorData(t, err, protocol.ErrorReasonInvalidParams, nil)
-	assert.Contains(t, err.Error(), "1 to 2 filters")
-
-	// One contract ID repeated is one index term, so only the cap stops it.
-	contractID := make([]byte, 32)
-	over := make([]event.Filter, 3)
-	for i := range over {
-		over[i] = event.Filter{ContractID: contractID}
-	}
-	top := first + 2
-	cursorWith := func(filters []event.Filter) string {
-		token, err := (&query.EventCursor{Scope: query.EventScope{
-			MinLedger: first, MaxLedger: &top, Filters: filters,
-		}}).Encode()
-		require.NoError(t, err)
-		return token
-	}
-
-	_, err = queryEvents(ctx, limits, nil, rpcv2test.SilentLogger(),
-		&protocol.QueryEventsRequest{Cursor: cursorWith(over[:2])})
-	require.NoError(t, err, "a cursor at the cap is served")
-
-	token := cursorWith(over)
-	_, err = queryEvents(ctx, limits, nil, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{Cursor: token})
-	require.Error(t, err, "a cursor over the cap is rejected too")
-	requireErrorData(t, err, protocol.ErrorReasonInvalidParams, nil)
-	assert.Contains(t, err.Error(), "1 to 2 filters")
+	assert.Contains(t, err.Error(), fmt.Sprintf("1 to %d filters", protocol.QueryEventsDefaultMaxFilters))
 }
 
 func TestQueryEvents_LimitOverTheOperatorCapIsRejected(t *testing.T) {
