@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
 // A window is sealed before a row would take it past sealKeys keys, or when
@@ -53,31 +54,17 @@ func (w *window) lookup(key []byte) (uint32, bool) {
 // one file. It holds at most two windows of memory: the one being filled and
 // the one being sealed.
 type hotIndex struct {
-	store *rocksdb.Store
-	view  atomic.Pointer[hotIndexView]
-
-	// sealed holds the outcome of the last seal once it is over. rotate takes
-	// it before it starts the next seal, so at most one seal is in flight.
-	sealed chan error
+	store    *rocksdb.Store
+	unsealed *stores.Unsealed[window]
 	// sealedKeys counts the keys of every seal started, for its marker.
 	sealedKeys uint64
 
 	maxKeys, maxLedgers int
 }
 
-// hotIndexView is what a lookup reads from memory. Every window before live
-// is in txhashCF, except prev.
-type hotIndexView struct {
-	live *window
-	prev *window // the window before live until it is sealed, nil after
-}
-
 func newHotIndex(store *rocksdb.Store, sealedKeys uint64, maxKeys, maxLedgers int) *hotIndex {
-	x := &hotIndex{
-		store: store, sealed: make(chan error, 1), sealedKeys: sealedKeys, maxKeys: maxKeys, maxLedgers: maxLedgers,
-	}
-	x.view.Store(&hotIndexView{live: x.newWindow()})
-	x.sealed <- nil
+	x := &hotIndex{store: store, sealedKeys: sealedKeys, maxKeys: maxKeys, maxLedgers: maxLedgers}
+	x.unsealed = stores.NewUnsealed(x.newWindow())
 	return x
 }
 
@@ -89,49 +76,25 @@ func (x *hotIndex) newWindow() *window {
 // it. It fails once a seal has failed; the unsealed rows stay readable from
 // memory, and the next open seals them again.
 func (x *hotIndex) apply(seq uint32, keys []byte) error {
-	select {
-	case err := <-x.sealed: // the last seal is over
-		x.sealed <- err
-		if err != nil {
-			return err
-		}
-	default:
+	if err := x.unsealed.Failed(); err != nil {
+		return err
 	}
-	live := x.view.Load().live
+	live := x.unsealed.Load().Live
 	n := len(keys) / ColdKeySize
 	if rows := int(live.n.Load()); rows > 0 && (rows == x.maxLedgers || live.keys+n > x.maxKeys) {
+		sealed := x.sealedKeys + uint64(live.keys) //nolint:gosec // a key count
+		seal := func(full *window) error { return x.seal(full, sealed) }
 		var err error
-		if live, err = x.rotate(live); err != nil {
+		if live, err = x.unsealed.Rotate(x.newWindow, seal); err != nil {
 			return err
 		}
+		x.sealedKeys = sealed
 	}
 	i := live.n.Load()
 	live.rows[i] = row{seq: seq, keys: keys}
 	live.keys += n
 	live.n.Store(i + 1)
 	return nil
-}
-
-// rotate waits for the last seal, then starts the next window and seals the
-// full one in the background.
-func (x *hotIndex) rotate(full *window) (*window, error) {
-	if err := <-x.sealed; err != nil {
-		x.sealed <- err // final: every later rotate fails the same way
-		return nil, err
-	}
-	next := x.newWindow()
-	x.view.Store(&hotIndexView{live: next, prev: full})
-	x.sealedKeys += uint64(full.keys) //nolint:gosec // a key count
-	keys := x.sealedKeys
-	go func() {
-		err := x.seal(full, keys)
-		if err == nil {
-			// The writer rotates again only after it takes this outcome.
-			x.view.Store(&hotIndexView{live: next})
-		}
-		x.sealed <- err
-	}()
-	return next, nil
 }
 
 // seal loads a full window into txhashCF as one file, its marker first. keys
@@ -157,21 +120,14 @@ func (x *hotIndex) seal(w *window, keys uint64) error {
 	return nil
 }
 
-// settle waits for the seal in flight, if any, and returns its outcome.
-func (x *hotIndex) settle() error {
-	err := <-x.sealed
-	x.sealed <- err
-	return err
-}
-
 // lookup returns the ledger of a routing key the windows in memory hold.
 func (x *hotIndex) lookup(key []byte) (uint32, bool) {
-	v := x.view.Load()
-	if seq, ok := v.live.lookup(key); ok {
+	v := x.unsealed.Load()
+	if seq, ok := v.Live.lookup(key); ok {
 		return seq, true
 	}
-	if v.prev != nil {
-		return v.prev.lookup(key)
+	if v.Prev != nil {
+		return v.Prev.lookup(key)
 	}
 	return 0, false
 }

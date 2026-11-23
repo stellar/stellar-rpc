@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"sync/atomic"
 
 	"github.com/RoaringBitmap/roaring/v2"
 
@@ -30,63 +29,17 @@ func hotIndexKey(slab uint32, k TermKey) []byte {
 // never compacts, and the index holds at most two slabs of memory whatever
 // the chunk holds: the one being filled and the one being sealed.
 type hotIndex struct {
-	store *rocksdb.Store
-	view  atomic.Pointer[hotIndexView]
+	store    *rocksdb.Store
+	unsealed *stores.Unsealed[hotSlab]
 
 	// secret keys every term, so callers cannot pick a term's bucket.
 	secret [stores.SecretLen]byte
-
-	sealer sealer
-}
-
-// sealer runs one slab's seal at a time in the background and keeps the
-// first failure. done holds the last outcome whenever no seal is running.
-type sealer struct{ done chan error }
-
-func newSealer() sealer {
-	s := sealer{done: make(chan error, 1)}
-	s.done <- nil
-	return s
-}
-
-// failed returns the outcome of a seal that is over, without waiting for one
-// still running.
-func (s sealer) failed() error {
-	select {
-	case err := <-s.done:
-		s.done <- err
-		return err
-	default:
-		return nil
-	}
-}
-
-// wait waits for the seal running, if any, and returns the last outcome.
-func (s sealer) wait() error {
-	err := <-s.done
-	s.done <- err
-	return err
-}
-
-// start runs seal in the background. Call it only after wait returned nil.
-func (s sealer) start(seal func() error) {
-	<-s.done
-	go func() { s.done <- seal() }()
-}
-
-// hotIndexView is what a lookup reads from memory. Every slab before live is
-// in IndexCF, except prev.
-type hotIndexView struct {
-	live *hotSlab
-	prev *hotSlab // the slab before live until it is sealed, nil after
 }
 
 // newHotIndex returns the index of a chunk whose IndexCF holds the slabs
 // before sealed; its live slab is empty.
 func newHotIndex(store *rocksdb.Store, sealed uint32, secret [stores.SecretLen]byte) *hotIndex {
-	x := &hotIndex{store: store, secret: secret, sealer: newSealer()}
-	x.view.Store(&hotIndexView{live: newHotSlab(sealed)})
-	return x
+	return &hotIndex{store: store, secret: secret, unsealed: stores.NewUnsealed(newHotSlab(sealed))}
 }
 
 // sealedHotSlabs reads how many slabs IndexCF holds from its last key.
@@ -136,12 +89,12 @@ func (x *hotIndex) sealedBitmap(slab uint32, k TermKey) (*roaring.Bitmap, error)
 
 // slabBitmap returns a term's event ids in one slab, nil if it has none:
 // from memory while v holds the slab, from IndexCF once it is sealed.
-func (x *hotIndex) slabBitmap(v *hotIndexView, slab uint32, k TermKey) (*roaring.Bitmap, error) {
+func (x *hotIndex) slabBitmap(v *stores.View[hotSlab], slab uint32, k TermKey) (*roaring.Bitmap, error) {
 	switch {
-	case slab == v.live.slab:
-		return v.live.bitmap(k), nil
-	case v.prev != nil && slab == v.prev.slab:
-		return v.prev.bitmap(k), nil
+	case slab == v.Live.slab:
+		return v.Live.bitmap(k), nil
+	case v.Prev != nil && slab == v.Prev.slab:
+		return v.Prev.bitmap(k), nil
 	}
 	return x.sealedBitmap(slab, k)
 }
@@ -214,16 +167,17 @@ func (t *ledgerTerms) waitKeyed() {
 // seal has failed; the unsealed slabs stay readable from memory, and the
 // next open indexes them again.
 func (x *hotIndex) add(startID uint32, t *ledgerTerms) error {
-	if err := x.sealer.failed(); err != nil {
+	if err := x.unsealed.Failed(); err != nil {
 		return err
 	}
-	live := x.view.Load().live
+	live := x.unsealed.Load().Live
 	var start uint32
 	for i, end := range t.ends {
 		id := startID + uint32(i) // bounded by IngestLedgerToBatch's overflow guard
 		if id>>indexSlabShift != live.slab {
+			next := func() *hotSlab { return newHotSlab(live.slab + 1) }
 			var err error
-			if live, err = x.rotate(live); err != nil {
+			if live, err = x.unsealed.Rotate(next, x.seal); err != nil {
 				return err
 			}
 		}
@@ -234,28 +188,6 @@ func (x *hotIndex) add(startID uint32, t *ledgerTerms) error {
 	}
 	return nil
 }
-
-// rotate waits for the last seal, then starts the next slab and seals the
-// full one in the background.
-func (x *hotIndex) rotate(full *hotSlab) (*hotSlab, error) {
-	if err := x.sealer.wait(); err != nil {
-		return nil, err
-	}
-	next := newHotSlab(full.slab + 1)
-	x.view.Store(&hotIndexView{live: next, prev: full})
-	x.sealer.start(func() error {
-		err := x.seal(full)
-		if err == nil {
-			// The writer rotates again only after this seal is over.
-			x.view.Store(&hotIndexView{live: next})
-		}
-		return err
-	})
-	return next, nil
-}
-
-// settle waits for the seal in flight, if any, and returns its outcome.
-func (x *hotIndex) settle() error { return x.sealer.wait() }
 
 // lookup returns each term's event ids in the slabs the window touches, and
 // the id range those slabs span.
@@ -274,8 +206,8 @@ func (x *hotIndex) lookup(ctx context.Context, terms []Term, window IDRange) ([]
 	}
 
 	keys := keysUnder(x.secret, terms)
-	v := x.view.Load()
-	for slab := first; slab <= min(last, v.live.slab); slab++ {
+	v := x.unsealed.Load()
+	for slab := first; slab <= min(last, v.Live.slab); slab++ {
 		if err := ctx.Err(); err != nil {
 			return nil, IDRange{}, err
 		}

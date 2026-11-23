@@ -37,7 +37,7 @@ func BenchmarkEventIndex_10M(b *testing.B) {
 
 		start := time.Now()
 		buildIndex10M(b, idx)
-		require.NoError(b, idx.settle())
+		require.NoError(b, idx.unsealed.Wait())
 		buildSec := time.Since(start).Seconds()
 
 		b.ReportMetric(buildSec, "build_sec")

@@ -68,7 +68,7 @@ func open(
 			return nil, err
 		}
 	}
-	if err := index.settle(); err != nil {
+	if err := index.unsealed.Wait(); err != nil {
 		return nil, err
 	}
 	return &HotStore{store: store, secret: secret, index: index}, nil

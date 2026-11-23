@@ -113,7 +113,7 @@ func requireFound(t *testing.T, h *HotStore, want map[[32]byte]uint32) {
 
 func sealedThrough(t *testing.T, h *HotStore) uint32 {
 	t.Helper()
-	require.NoError(t, h.index.settle())
+	require.NoError(t, h.index.unsealed.Wait())
 	last, _, err := readMarker(h.store)
 	require.NoError(t, err)
 	return last
@@ -201,7 +201,7 @@ func TestHotStore_FailedSealIsRetriedByTheNextOpen(t *testing.T) {
 		require.NoError(t, err)
 		want[hashes[0]] = first + i
 	}
-	require.Error(t, h.index.settle())
+	require.Error(t, h.index.unsealed.Wait())
 	requireFound(t, h, want)
 
 	hashes, err := commitLedger(t, h, ledgers, first+5, 1)

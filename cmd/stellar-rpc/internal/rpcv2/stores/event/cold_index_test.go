@@ -533,7 +533,7 @@ func TestColdIndexBuilder_RemovesRuns(t *testing.T) {
 		for id := range uint32(hotSlabEvents + 1) {
 			require.NoError(t, b.Add(id, termsOf("\x01")))
 		}
-		require.NoError(t, b.spiller.wait())
+		require.NoError(t, b.spiller.Wait())
 		runsDir := filepath.Join(dir, IndexRunsDirName(chunk.ID(0)))
 		require.DirExists(t, runsDir)
 		return b, dir, runsDir
