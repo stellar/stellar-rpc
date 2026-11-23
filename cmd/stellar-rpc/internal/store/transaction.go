@@ -39,7 +39,7 @@ func ParseTransactionView(txView ingest.LedgerTransactionView) Transaction {
 		Result:           txView.Result,
 		Meta:             txView.Meta,
 		Envelope:         txView.Envelope,
-		Events:           txView.DiagnosticEvents,
+		Events:           wireBytes(txView.DiagnosticEvents),
 		FeeBump:          txView.FeeBump,
 		ApplicationOrder: txView.ApplicationOrder,
 		Successful:       txView.Successful,
@@ -47,7 +47,31 @@ func ParseTransactionView(txView ingest.LedgerTransactionView) Transaction {
 			Sequence:  txView.LedgerSequence,
 			CloseTime: txView.LedgerCloseTime,
 		},
-		TransactionEvents: txView.TransactionEvents,
-		ContractEvents:    txView.ContractEvents,
+		TransactionEvents: wireBytes(txView.TransactionEvents),
+		ContractEvents:    opWireBytes(txView.ContractEvents),
 	}
+}
+
+// wireBytes returns each view's wire bytes without copying them, keeping a nil
+// list nil.
+func wireBytes[T ~[]byte](views []T) [][]byte {
+	if views == nil {
+		return nil
+	}
+	out := make([][]byte, len(views))
+	for i, v := range views {
+		out[i] = v
+	}
+	return out
+}
+
+func opWireBytes(ops [][]xdr.ContractEventView) [][][]byte {
+	if ops == nil {
+		return nil
+	}
+	out := make([][][]byte, len(ops))
+	for i, op := range ops {
+		out[i] = wireBytes(op)
+	}
+	return out
 }
