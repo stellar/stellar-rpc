@@ -7,9 +7,9 @@ import (
 )
 
 // ConcurrentLedgerOffsets tracks cumulative event counts per ledger
-// for live ingest paths: a single writer (HotStore.applyLedger via
-// the post-commit hook) and many concurrent readers (queries calling
-// View / TotalEvents / etc.). Lock-free reads via a fixed-capacity
+// for live ingest paths: a single writer (HotStore.Apply, after the
+// commit) and many concurrent readers (queries calling View /
+// TotalEvents / etc.). Lock-free reads via a fixed-capacity
 // backing array plus an atomic counter publishing the valid prefix.
 //
 // Memory: 40KB up-front per instance (LedgersPerChunk × uint32).

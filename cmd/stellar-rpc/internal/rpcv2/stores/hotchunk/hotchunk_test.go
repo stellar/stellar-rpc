@@ -800,3 +800,38 @@ func TestReopen_RebuildsTheTxhashWindowFromTheLedgers(t *testing.T) {
 		require.Equal(t, first+uint32(i), seq)
 	}
 }
+
+// TestOpen_RebuildsUnsealedEventsFromLedgers reopens a chunk whose newest
+// events were never sealed and reads every event back as it was ingested.
+func TestOpen_RebuildsUnsealedEventsFromLedgers(t *testing.T) {
+	chunkID := chunk.ID(0)
+	dir := t.TempDir()
+	db, err := Open(dir, chunkID, testSecrets{}, silentLogger())
+	require.NoError(t, err)
+	const ledgers = 300 // past one data window of 256 ledgers
+	for i := range uint32(ledgers) {
+		_, err := ingestRaw(t, db, chunkID.FirstLedger()+i, lcmWithEvents(t, chunkID.FirstLedger()+i, 2))
+		require.NoError(t, err)
+	}
+	all := func(db *DB) []event.Payload {
+		var out []event.Payload
+		for p, err := range db.Events().All(context.Background()) {
+			require.NoError(t, err)
+			p.ContractEventBytes = bytes.Clone(p.ContractEventBytes)
+			out = append(out, p)
+		}
+		return out
+	}
+	want := all(db)
+	require.Len(t, want, 2*ledgers)
+	require.NoError(t, db.Close())
+
+	db, err = Open(dir, chunkID, testSecrets{}, silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	last, sealed, err := storeOf(db).LastKey(event.DataCF)
+	require.NoError(t, err)
+	require.True(t, sealed, "one data window is sealed")
+	require.Less(t, int(rocksdb.DecodeUint32(last)), len(want)-1, "the newest events are not")
+	require.Equal(t, want, all(db))
+}

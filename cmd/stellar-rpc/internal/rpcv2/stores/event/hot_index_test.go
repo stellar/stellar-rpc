@@ -3,7 +3,6 @@ package event
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"math"
 	"math/rand"
 	"os"
@@ -365,20 +364,15 @@ func TestHotStore_FailedSealIsRedoneOnReopen(t *testing.T) {
 	payloads := []Payload{{ContractEventBytes: corpus.raw[hotSlabEvents+1]}}
 	err := ingestLedgerEvents(hot, mustOffsets(t, hot).EndLedger(), payloads)
 	require.ErrorContains(t, err, "seal index slab 0")
-	require.Equal(t, uint32(hotSlabEvents+2), countDataRows(t, raw))
+	_, committed, lerr := raw.Get(testLedgersCF, encodeOffsetKey(mustOffsets(t, hot).EndLedger()))
+	require.NoError(t, lerr)
+	require.True(t, committed)
 	require.Equal(t, uint32(hotSlabEvents+1), mustEventCount(t, hot), "the count never runs ahead of the index")
 	require.NoError(t, raw.Close())
 
 	require.NoError(t, os.Remove(blocker))
 	hot, raw = openHotStoreForTestAt(t, dir, chunkID)
 	requireSealedSlabs(t, raw, 1)
+	require.Equal(t, uint32(hotSlabEvents+2), mustEventCount(t, hot))
 	requireIndexed(t, hot, corpus)
-}
-
-func countDataRows(t *testing.T, store *rocksdb.Store) uint32 {
-	t.Helper()
-	last, found, err := store.LastKey(DataCF)
-	require.NoError(t, err)
-	require.True(t, found)
-	return binary.BigEndian.Uint32(last) + 1
 }

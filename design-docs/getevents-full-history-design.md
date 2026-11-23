@@ -138,9 +138,16 @@ Roaring bitmaps are used because term density varies widely across the data. Mos
 
 ### 8.1 Hot Event Storage
 
-Events are stored uncompressed as raw bytes (XDR payload + metadata), with direct access by event ID. The hot segment also maintains a ledger offset array (cumulative event counts per ledger). There are no per-ledger index deltas: the index column family holds one (slab, term) → bitmap entry per sealed slab, and the events after the last sealed slab are indexed again from their stored payloads at open.
+Events are stored as raw bytes (XDR payload + metadata), with direct access by event ID. The hot segment also maintains a ledger offset array (cumulative event counts per ledger).
 
-The exact storage backend for hot event data is an implementation detail (TODO: decide on storage backend). Regardless of backend, events must be retrievable by event ID in O(1), and the ledger offset array must support O(1) lookup by ledger number.
+A ledger's commit does not carry its events. The ledger itself is stored in the same hot database, and its events can be derived from it again, so the commit holds only the ledger's event count.
+
+- **In memory.** After the commit, the ledger's events join the **data window**: one row per ledger with events, holding its events in events.pack's wire format.
+- **Sealing.** When the next ledger would take the window past 64 MiB, or is 256 ledgers past the window's first, the window is written as one sorted file of event ID → event and loaded into the events data column family. This runs in the background while the next window fills. Event IDs ascend, so the files never overlap and the column family never compacts. The files are zstd-compressed in 32 KiB blocks.
+- **Bound.** The writer waits for the previous seal before starting another, so at most two windows are in memory.
+- **Reads.** An event below the first ID in memory is read from the column family, the rest from the windows, without a lock.
+
+There are no per-ledger index deltas either: the index column family holds one (slab, term) → bitmap entry per sealed slab (Section 8.2).
 
 ### 8.2 Hot Index Storage
 
@@ -152,8 +159,6 @@ Event IDs are cut into **slabs** of 65,536. The index handles one slab at a time
 - **Lookups.** A sealed slab is read from the column family. A slab still in memory is read without a lock: postings that share the leading 16 bits of their key form a chain, and a lookup walks one chain.
 - **Keys.** Each term is filed under its key under the chunk secret, the key the cold index uses (Section 9.2).
 
-After a restart, the events after the last sealed slab (at most about two slabs) are indexed again from the events data column family.
-
 ### 8.3 Hot Write Path
 
 ```
@@ -161,14 +166,22 @@ For each incoming ledger:
 
 1. Assign event IDs: start_id = next_event_id; next_event_id += len(events).
 
-2. Persist events (XDR bytes + event metadata), keyed by event ID.
+2. Marshal the ledger's events (XDR bytes + event metadata) into one row and derive their terms.
 
-3. Persist cumulative event count for this ledger in the ledger offset array.
+3. Atomically commit the ledger and its event count. The events and the index are derived state, rebuilt from the ledgers on open (Section 8.4).
 
-4. Atomically commit: the events and the ledger's offset row become durable together, before the index is updated; the index is derived state, rebuilt from them on open.
+4. After the commit, add the row to the data window; when the window is full, wait for the previous seal to finish and seal it into the events data column family in the background.
 
-5. After the commit, append each event's terms to the live slab; when an event starts a new slab, wait for the previous seal to finish and seal the full slab into the index column family in the background. A seal that fails keeps its slab readable from memory and fails the next ledger's apply, which ends the ingestion run; the next open seals the slab again.
+5. Append each event's terms to the live slab; when an event starts a new slab, wait for the previous seal to finish and seal the full slab into the index column family in the background. A seal that fails keeps its slab readable from memory and fails the next ledger's apply, which ends the ingestion run; the next open seals the slab again.
 ```
+
+### 8.4 Restart
+
+The events data column family's last key says how many events are sealed, and the ledger offsets say which ledger the next one belongs to. Opening the hot database replays the ledgers from that one on: each is decompressed and walked once, eight at a time, and its events are applied in order exactly as after a commit. The same pass rebuilds the tx-hash rows that were not sealed. At most two data windows are replayed, so at most 512 ledgers.
+
+Each replayed ledger must yield the event count its commit recorded, or the open fails.
+
+The index covers the events after its last sealed slab the same way. Those already in sealed data files are indexed again from the files, the rest as their ledgers are replayed.
 
 ## 9. Cold Segment
 
@@ -376,12 +389,13 @@ On startup:
 
 3. Ensure no hot segment data exists beyond last_committed_ledger.
 
-4. Rebuild the index:
-   a. Read the number of sealed slabs from the last key of the index column family.
-   b. Fail if that is more slabs than the committed events fill.
-   c. Index the events after the last sealed slab again from the events data column family, sealing each slab once the next one has its first event.
+4. Load ledger offset array.
 
-5. Load ledger offset array.
+5. Rebuild the events and the index (Section 8.4):
+   a. Read the number of sealed events and sealed slabs from the last keys of the events data and index column families.
+   b. Fail if either is more than the committed events fill, or if the sealed events end inside a ledger.
+   c. Index the sealed events after the last sealed slab again from the events data column family.
+   d. Replay the ledgers whose events were not sealed, sealing each data window and slab as it fills.
 
 6. Resume accepting writes.
 ```
@@ -477,6 +491,7 @@ It does not grow with the number of unique terms: a segment with 1.8M unique ter
 **Other in-memory structures:**
 
 - **Ledger offset array**: 10,000 entries × 8 bytes = ~80 KB (negligible).
+- **Data windows**: at most two, of up to 64 MiB each (Section 8.1), so up to 128 MiB.
 
 ## 16. Ingestion Performance
 
