@@ -12,7 +12,6 @@ package hotchunk
 import (
 	"context"
 	"fmt"
-	"iter"
 	"maps"
 	"slices"
 	"time"
@@ -20,7 +19,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
-	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
@@ -135,14 +133,14 @@ func OpenExisting(path string, chunkID chunk.ID, secrets SecretSource, logger *s
 // refinement DEPENDS on that replay to read a correct MaxCommittedSeq. (An
 // unsynced tail is exactly what a crash loses, and is not recovered.)
 //
-// A read-only open is a LEDGERS-ONLY view: it composes the ledger facade but SKIPS
-// the events and txhash facades, because both read-only callers (freeze re-derives
-// the cold artifacts from raw LCMs via Source(); the startup refiner reads only
-// MaxCommittedSeq()) touch the ledgers CF alone and never the indexes. Composing
-// those facades would replay the unsealed ledgers into them, discarded unread at
-// Close (#834). The skip is enforced structurally: a read-only
-// DB has neither facade, so Events() and Txhash() panic and IngestLedger errors
-// rather than serving a cold, unwarmed surface.
+// A read-only open composes the ledger facade but SKIPS the events and txhash
+// facades, because neither read-only caller uses them: the freeze reads the
+// chunk's column families straight from the store, and the startup refiner
+// reads only MaxCommittedSeq(). Composing those facades would replay the
+// unsealed ledgers into them, discarded unread at Close (#834). The skip is
+// enforced structurally: a read-only DB has neither facade, so Events() and
+// Txhash() panic and IngestLedger errors rather than serving a cold, unwarmed
+// surface.
 func OpenReadOnly(path string, chunkID chunk.ID, secrets SecretSource, logger *supportlog.Entry) (*DB, error) {
 	return open(path, chunkID, secrets, logger, true, false)
 }
@@ -210,11 +208,11 @@ func open(
 		chunkID: chunkID,
 		ledger:  ledger.NewWithStore(store),
 	}
-	// A read-only open is a ledgers-only freeze/probe view (see OpenReadOnly): it
-	// never reads the indexes, so skip composing their facades and the replay.
-	// Read-WRITE opens (ingestion) MUST warm: the write path assigns event IDs
-	// off the warmed offsets and extends the txhash window, so they always
-	// compose both.
+	// A read-only open serves the freeze and the startup probe (see
+	// OpenReadOnly), which use neither the events nor the txhash facade, so
+	// skip composing them and the replay. Read-WRITE opens (ingestion) MUST
+	// warm: the write path assigns event IDs off the warmed offsets and
+	// extends the txhash window, so they always compose both.
 	if readOnly {
 		return db, nil
 	}
@@ -407,13 +405,55 @@ func (d *DB) Events() *event.HotStore {
 	return d.events
 }
 
-// Source streams the chunk's LCMs from the ledgers CF as a ledgerbackend.LedgerStream
-// the cold writer (backfill's WriteColdChunk) drains, so a just-closed chunk freezes
-// straight from its hot DB without a refetch. The freeze reads through the
-// registry's shared handle when one is published; the read-only reopen is the
-// fallback for the startup catch-up, where no writer is open.
-func (d *DB) Source() ledgerbackend.LedgerStream {
-	return &hotLedgerStream{store: d.ledger}
+// FreezeEventsCold builds the chunk's cold events artifacts in dirs from the
+// shared store: see event.FreezeColdFromStore. It returns how many events it
+// wrote. The chunk must be complete, and the DB may be open read-only.
+func (d *DB) FreezeEventsCold(
+	ctx context.Context, dirs event.ColdDirs, secret [stores.SecretLen]byte, opts event.ColdWriterOptions,
+) (uint32, error) {
+	unsealed := func(from uint32) ([]event.LedgerEvents, error) {
+		return ledgersFrom(ctx, d.ledger, from, freezeWorkers,
+			func(seq uint32, lcmView xdr.LedgerCloseMetaView, txParts []sdkingest.LedgerTxParts) (event.LedgerEvents, error) {
+				closeTime, err := lcmView.LedgerCloseTime()
+				if err != nil {
+					return event.LedgerEvents{}, err
+				}
+				payloads, err := event.PayloadsFromLedgerEvents(txParts, seq, closeTime)
+				if err != nil {
+					return event.LedgerEvents{}, err
+				}
+				return event.MarshalLedgerEvents(seq, payloads)
+			})
+	}
+	return event.FreezeColdFromStore(ctx, d.chunkID, d.store, unsealed, dirs, secret, opts)
+}
+
+// freezeWorkers is one: a freeze runs beside live ingestion.
+const freezeWorkers = 1
+
+// FreezeLedgersCold builds the chunk's cold ledger pack at packPath from the
+// shared store: see ledger.FreezeColdFromStore. The chunk must be complete,
+// and the DB may be open read-only.
+func (d *DB) FreezeLedgersCold(ctx context.Context, packPath string, opts ledger.ColdWriterOptions) (int, error) {
+	return ledger.FreezeColdFromStore(ctx, d.chunkID, d.store, packPath, opts)
+}
+
+// FreezeTxhashCold writes the chunk's cold .bin at path from the shared
+// store, its keys blinded with secret and its payloads counted from base: see
+// txhash.FreezeColdFromStore. The chunk must be complete, and the DB may be
+// open read-only.
+func (d *DB) FreezeTxhashCold(
+	ctx context.Context, path string, secret [stores.SecretLen]byte, base uint32, bytesPerSync int,
+) (uint64, error) {
+	bin := txhash.ColdBin{Secret: secret, Base: base, Chunk: d.chunkID}
+	unsealed := func(from uint32) ([][]byte, error) {
+		return ledgersFrom(ctx, d.ledger, from, freezeWorkers,
+			func(_ uint32, _ xdr.LedgerCloseMetaView, txParts []sdkingest.LedgerTxParts) ([]byte, error) {
+				row, _, err := txhash.EncodeRow(secret, txParts)
+				return row, err
+			})
+	}
+	return txhash.FreezeColdFromStore(ctx, d.store, unsealed, path, bin, bytesPerSync)
 }
 
 // Close releases the shared store exactly once. Idempotent, and safe against
@@ -601,60 +641,4 @@ func (d *DB) IngestLedger(
 		return rep, fmt.Errorf("apply ledger %d to chunk %s: %w", seq, d.chunkID, err)
 	}
 	return rep, nil
-}
-
-// hotLedgerStream is a ledgerbackend.LedgerStream over a ledger.HotStore, so the
-// source-blind cold pipeline freezes a just-closed chunk from its hot DB.
-type hotLedgerStream struct {
-	store *ledger.HotStore
-}
-
-var _ ledgerbackend.LedgerStream = (*hotLedgerStream)(nil)
-
-// RawLedgers yields the range's wire bytes from the hot store. IterateLedgers
-// yields BORROWED buffers (valid only to the next step); the drain loop consumes
-// each fully before the next yield, so the borrow is safe. ctx cancellation is
-// observed between ledgers (the LedgerStream contract drain relies on).
-//
-// It enforces the LedgerStream in-order contract at the source (so the shared
-// cursor could be deleted): the hot store is the SOLE writer of recent history, so
-// a gap in its keyspace is a real defect, caught here by a key-derived seq check
-// (no XDR parse). An unbounded range self-bounds at the store's committed frontier
-// (LastSeq), mirroring packStream, so callers can pass UnboundedRange(from).
-func (st *hotLedgerStream) RawLedgers(
-	ctx context.Context, r ledgerbackend.Range, _ ...ledgerbackend.StreamOption,
-) iter.Seq2[[]byte, error] {
-	return func(yield func([]byte, error) bool) {
-		to := r.To()
-		if !r.Bounded() {
-			maxSeq, ok, err := st.store.LastSeq()
-			if err != nil {
-				yield(nil, fmt.Errorf("hotLedgerStream: read committed frontier: %w", err))
-				return
-			}
-			if !ok {
-				return // empty store: nothing to yield
-			}
-			to = maxSeq
-		}
-		expected := r.From()
-		for e, ierr := range st.store.IterateLedgers(r.From(), to) {
-			if cerr := ctx.Err(); cerr != nil {
-				yield(nil, cerr)
-				return
-			}
-			if ierr != nil {
-				yield(nil, ierr)
-				return
-			}
-			if e.Seq != expected {
-				yield(nil, fmt.Errorf("hotLedgerStream: gap at seq %d, expected %d", e.Seq, expected))
-				return
-			}
-			if !yield(e.Bytes, nil) {
-				return
-			}
-			expected++
-		}
-	}
 }
