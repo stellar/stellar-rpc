@@ -57,6 +57,8 @@ func TestKeyToPathBijection(t *testing.T) {
 		"/data/events/index/00005/00005350-index.pack",
 		"/data/events/index/00005/00005350-index.hash",
 	}, l.EventsPaths(5350))
+	require.Equal(t, []string{"/data/events/index/00005/00005350-index.runs"}, l.ScratchPaths(5350, KindEvents))
+	require.Nil(t, l.ScratchPaths(5350, KindLedgers))
 	require.Equal(t, "/data/hot/00005350", l.HotChunkPath(5350))
 
 	cov := TxHashIndexCoverage{Index: 5, Lo: 5100, Hi: 5349}
