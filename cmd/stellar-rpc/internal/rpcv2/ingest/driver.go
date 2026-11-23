@@ -72,8 +72,9 @@ type ColdDirs struct {
 // Source resolution (pack-stat, coverage wait) runs in the caller BEFORE this, so
 // a pack-missing or coverage-timeout failure never becomes a ColdChunkTotal
 // attempt here; it reaches only the scheduler's retry counter and its retry and
-// failure logs. The only pre-open failures metered here are a canceled ctx and a
-// cold-writer open failure.
+// failure logs. The only pre-open failures reported to the sink here are a
+// canceled ctx (PrometheusSink records no status for it) and a cold-writer open
+// failure.
 func WriteColdChunk(
 	ctx context.Context,
 	logger *supportlog.Entry,
@@ -95,7 +96,7 @@ func WriteColdChunk(
 	// deliberately the whole attempt — open, the drain of the source stream,
 	// every ingest, finalize, and the deferred close (see coldBuckets).
 	start := time.Now()
-	defer func() { sink.ColdChunkTotal(time.Since(start)) }()
+	defer func() { sink.ColdChunkTotal(time.Since(start), err) }()
 
 	if cerr := ctx.Err(); cerr != nil {
 		return cerr
@@ -104,7 +105,21 @@ func WriteColdChunk(
 	if oerr != nil {
 		return oerr
 	}
-	defer func() { err = errors.Join(err, cc.close()) }()
+	defer func() {
+		err = errors.Join(err, cc.close())
+		if err != nil {
+			return
+		}
+		// Logged after close, so it never reports a file write that then fails.
+		// The caller's fsync barrier and catalog flip come later and can still
+		// fail the chunk.
+		// The exact item counts of this chunk: a log line can carry the chunk
+		// ID, a metric cannot.
+		logger.WithFields(cc.itemFields()).WithFields(supportlog.F{
+			"chunk":    chunkID.String(),
+			"duration": time.Since(start).Round(time.Millisecond).String(),
+		}).Info("cold chunk written")
+	}()
 	logger.Debugf("cold ingest chunk %d [%d, %d]", uint32(chunkID), chunkID.FirstLedger(), chunkID.LastLedger())
 
 	if derr := drain(raw, chunkID, cc); derr != nil {

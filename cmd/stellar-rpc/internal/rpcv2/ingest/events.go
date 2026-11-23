@@ -187,7 +187,7 @@ func (e *eventsCold) ingestSeq(seq uint32, closedAt int64, txParts []sdkingest.L
 	// this writer emits. The PayloadsFromLedgerEvents shaping at the top of the
 	// function folds into the ColdIngest total without its own stage; the shared
 	// ExtractLedgerTxParts walk is metered once, ledger-scoped, by the ColdExtract
-	// signal (cold_extract_duration_seconds). uint32(len(payloads)) is 0 for an
+	// signal (chunk_extract_duration_seconds). uint32(len(payloads)) is 0 for an
 	// empty ledger — an explicit Append(seq, 0) that records the empty ledger.
 	wstart := time.Now()
 	//nolint:gosec // the overflow guard above proved startID+len(payloads) fits in uint32

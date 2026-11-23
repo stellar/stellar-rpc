@@ -66,5 +66,6 @@
 // cancellation — the drain loop relies on it for cancellation rather
 // than polling ctx itself. Metrics flow through MetricSink (Prometheus in prod,
 // recorders in tests); the cold tier's invariant is exactly one
-// ColdChunkTotal per chunk attempt, including pre-open failures.
+// ColdChunkTotal per chunk attempt, including pre-open failures, carrying the
+// attempt's outcome.
 package ingest

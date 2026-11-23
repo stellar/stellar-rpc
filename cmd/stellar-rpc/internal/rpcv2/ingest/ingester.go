@@ -7,6 +7,7 @@ import (
 	"time"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -166,6 +167,24 @@ func (c *coldChunk) finalize(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// itemFields returns the item count of each enabled writer for the chunk's
+// completion log: totals for the whole chunk. The keys are log field names, not
+// the data_type metric labels. The hot loop's "ledger ingested" line has the
+// same txhashes and events keys, but its counts are for the one logged ledger.
+func (c *coldChunk) itemFields() supportlog.F {
+	f := supportlog.F{}
+	if c.ledgers != nil {
+		f["ledgers"] = c.ledgers.metrics.items
+	}
+	if c.txhash != nil {
+		f["txhashes"] = c.txhash.metrics.items
+	}
+	if c.events != nil {
+		f["events"] = c.events.metrics.items
+	}
+	return f
 }
 
 // close closes every opened writer, joining each close error. Idempotent: on
