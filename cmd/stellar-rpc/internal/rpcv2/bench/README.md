@@ -9,6 +9,7 @@ run rpcv2, so build with `RPCV2=true`.
 |---|---|
 | `bench ingest cold` | Runs the daemon backfill over a chunk range. Writes a cold dataset. |
 | `bench ingest hot` | Runs the daemon live ingestion loop over a chunk range. Writes a hot dataset. |
+| `bench ingest freeze` | Freezes a complete chunk of a hot dataset from its hot DB, which opens read-only as at daemon startup. The time includes rebuilding the tx-hash rows after the last seal, as every freeze does. |
 | `bench query` | Calls the daemon read handlers on a dataset at fixed request rates. Measures latency. |
 
 ```
@@ -68,7 +69,7 @@ sum of the items in the samples. The bench drops samples of 0 ns, except in
 |---|---|
 | `ledgers.csv`, `txhash.csv`, `events.csv` | Cold: one row for each freeze stage of the data type (`term_index`, `write`, `finalize`) |
 | `hot.csv` | Hot: one row for each phase of one ledger (`extract`, `ledgers`, `txhash`, `events`, `commit`, `apply`) |
-| `driver.csv` | Cold: `backfill_wall`, `index_rebuild`, `chunk_total`, `<type>_total`, `cold_extract`. Hot: `ingest_total` (sum of the phases of one ledger), `run_wall`, `pace_lag` |
+| `driver.csv` | Cold: `backfill_wall`, `index_rebuild`, `chunk_total`, `<type>_total`, `cold_extract`. Hot: `ingest_total` (sum of the phases of one ledger), `run_wall`, `pace_lag`, and `index_rebuild` with `--txindex-bin-dir` |
 
 The row labels in `csvsink.go` say what each `driver.csv` row times.
 
