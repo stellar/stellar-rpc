@@ -673,8 +673,10 @@ footer { margin-top: 80px; color: var(--muted); font-size: 0.82rem; border-top: 
   <div class="note warn">
     <b>Provisioning note:</b> old and new coverage files coexist from the start of a rebuild's write until
     the eager sweep's unlink, so the window dir transiently holds ~2× the index size (~25 GB at the end of a
-    dense full window), and the window-end rebuild writes ~12.5 GB in ~1 minute (~200 MB/s burst) — trivial
-    on instance NVMe, worth provisioning for on throughput-capped volumes like EBS gp3.
+    dense full window). Every rebuild reads all of the window's <code>.bin</code> files, so with a local NVMe
+    disk and EBS they go on an EBS volume of their own: on the local disk, losing it would mean hours of
+    regenerating them, and on the volume serving cold queries, the rebuild's reads would delay the queries'.
+    At the gp3 baseline of 125 MiB/s, reading a dense window's ~60 GB takes about 8 minutes.
   </div>
 </section>
 
@@ -1101,7 +1103,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
       "<div style='margin-top:10px'><span class='dim'>pack:&nbsp;&nbsp;</span>ledgers/" + p5(bucket) + "/" + p8(chunk) + ".pack</div>",
       "<div><span class='dim'>events:</span>events/data/" + p5(bucket) + "/" + p8(chunk) + "-events.pack</div>",
       "<div><span class='dim'>bin:&nbsp;&nbsp;&nbsp;</span>txhash/raw/" + p5(bucket) + "/" + p8(chunk) + ".bin <span class='dim'>(transient)</span></div>",
-      "<div><span class='dim'>idx:&nbsp;&nbsp;&nbsp;</span>txhash/index/" + p8(win) + "/{lo}-{hi}.idx</div>",
+      "<div><span class='dim'>idx:&nbsp;&nbsp;&nbsp;</span>hot/txhash-index-" + p8(win) + "/{lo}-{hi}.idx <span class='dim'>(while the window fills; then txhash/index/" + p8(win) + "/)</span></div>",
     ].join("");
   }
   seqIn.addEventListener("input", () => render(+seqIn.value));
@@ -1187,27 +1189,27 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
         { t:"Skip check",
           d:"If the window's unique frozen key already covers exactly [lo, hi] → return. This also covers re-scheduled builds of finalized windows, which must not demand .bin inputs the sweep has deleted. (Every input .bin exists by the time this runs: an index build only starts once its in-coverage chunk builds have closed their done-channels on success.)",
           meta:[["index:00000005:00005100:00005349","frozen"]],
-          files:[["txhash/index/00000005/00005100-00005349.idx",F_OK,"the live index"]],
+          files:[["hot/txhash-index-00000005/00005100-00005349.idx",F_OK,"the live index"]],
           crash:"Nothing has happened yet." },
         { t:"Mark the new coverage",
           d:"index:00000005:00005100:00005350 ← \"freezing\". The coverage is the whole identity. Re-marking a crashed attempt's key is an idempotent overwrite; the file is rewritten wholesale either way.",
           meta:[["index:00000005:00005100:00005349","frozen"],["index:00000005:00005100:00005350","freezing"]],
-          files:[["txhash/index/00000005/00005100-00005349.idx",F_OK,"the live index — readers unaffected"]],
+          files:[["hot/txhash-index-00000005/00005100-00005349.idx",F_OK,"the live index — readers unaffected"]],
           crash:"The predecessor stays frozen — readers never notice. The new key is \"freezing\" debris: the next build of this coverage re-marks and overwrites it; if the coverage is no longer desired, the prune scan deletes file and key unread." },
         { t:"Write the coverage's file",
           d:"K-way merge of the sorted .bin files for chunks [5100, 5350] through streamhash's SortedBuilder → 00005100-00005350.idx, created or truncated wholesale. Fsync the file and the window dir. The file readers hold is never a writer's target: a file is writable only under a key that has never been \"frozen\" in this run.",
           meta:[["index:00000005:00005100:00005349","frozen"],["index:00000005:00005100:00005350","freezing"]],
-          files:[["txhash/index/00000005/00005100-00005349.idx",F_OK,"the live index — readers unaffected"],["txhash/index/00000005/00005100-00005350.idx",F_OK,"written + fsynced, not yet committed"]],
+          files:[["hot/txhash-index-00000005/00005100-00005349.idx",F_OK,"the live index — readers unaffected"],["hot/txhash-index-00000005/00005100-00005350.idx",F_OK,"written + fsynced, not yet committed"]],
           crash:"Same story as the mark step: predecessor frozen, new coverage is debris (partial or even complete — irrelevant; deleted unread or rewritten wholesale). The two files coexisting is why the window dir transiently holds ~2× the index size." },
         { t:"Commit — one atomic synced batch",
           d:"{[5100,5350] → \"frozen\", [5100,5349] → \"pruning\"} in a single write. A terminal build (hi = the window's last chunk — derived, marked nowhere) adds every chunk:c:txhash in [lo, hi] → \"pruning\": the batch <em>is</em> the entire finalization protocol. Note the batch only ever demotes keys — no file is unlinked here, ever.",
           meta:[["index:00000005:00005100:00005349","pruning"],["index:00000005:00005100:00005350","frozen"]],
-          files:[["txhash/index/00000005/00005100-00005349.idx",F_OK,"superseded, awaiting sweep"],["txhash/index/00000005/00005100-00005350.idx",F_OK,"the live index"]],
+          files:[["hot/txhash-index-00000005/00005100-00005349.idx",F_OK,"superseded, awaiting sweep"],["hot/txhash-index-00000005/00005100-00005350.idx",F_OK,"the live index"]],
           crash:"The new coverage is live; the demotions are ordinary sweep work the next run finishes. At no crash instant are two coverages frozen, or none, or a frozen chunk:c:txhash key whose .bin is gone." },
         { t:"Eager sweep (buildThenSweep)",
           d:"Right after the commit, in both regimes: unlink 00005100-00005349.idx → fsyncDir → delete its key (plus the demoted .bins, for a terminal build). Window-local — concurrent windows' sweeps touch disjoint keys. The run's prune scan is the crash backstop.",
           meta:[["index:00000005:00005100:00005350","frozen"]],
-          files:[["txhash/index/00000005/00005100-00005350.idx",F_OK,"the live index"]],
+          files:[["hot/txhash-index-00000005/00005100-00005350.idx",F_OK,"the live index"]],
           crash:"A crash mid-sweep leaves the \"pruning\" key in place (the key outlives the durable unlink), and the next prune scan finishes. The eager site is what bounds transient .bin disk to the windows actually in flight." },
       ]},
     { id:"sweep", label:"Sweep (delete an artifact)", intro:"sweepChunkArtifacts / sweepIndexKey — the system's only two deletion bodies, one per key family, identical internal shape.",
@@ -1455,7 +1457,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
       { p:"hot/00005350/", kind:"dir", note:"live hot DB — ledgers/txhash/events CFs" },
       { p:"ledgers/00005/051xx.pack ×250", kind:"ok", note:"chunks 5100–5349" },
       { p:"txhash/raw/00005/051xx.bin ×250", kind:"ok", note:"window 5's rebuild inputs" },
-      { p:"txhash/index/00000005/00005100-00005349.idx", kind:"ok", note:"the live index" },
+      { p:"hot/txhash-index-00000005/00005100-00005349.idx", kind:"ok", note:"the live index" },
     ],
     reads: [
       "tx in chunk 5350 → hot DB 5350's txhash CF",
@@ -1497,7 +1499,7 @@ const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;
       f:s => { s.meta.push({ k:"index:00000005:00005100:00005350", v:"freezing" }); mark(s, "m", s.meta.length-1); } },
     { a:"lifecycle", t:"IndexBuild w5 — merge, write, fsync",
       d:"K-way merge of 251 sorted .bin runs (chunks 5100–5350) through streamhash's SortedBuilder → 00005100-00005350.idx, created/truncated wholesale; fsync file + window dir. Readers still resolve the old frozen key — the file they hold is never a writer's target (a file is writable only under a key that has never been \"frozen\" in this run).",
-      f:s => { s.files.push({ p:"txhash/index/00000005/00005100-00005350.idx", kind:"ok", note:"written + fsynced, not yet committed" }); mark(s, "f", s.files.length-1); } },
+      f:s => { s.files.push({ p:"hot/txhash-index-00000005/00005100-00005350.idx", kind:"ok", note:"written + fsynced, not yet committed" }); mark(s, "f", s.files.length-1); } },
     { a:"lifecycle", t:"Commit batch — the atomic swap",
       d:"One synced batch: {[5100,5350] → \"frozen\", [5100,5349] → \"pruning\"}. The window's frozen coverage changes hands atomically — never two frozen, never none. (A terminal build — hi = the window's last chunk — would demote every chunk:c:txhash in [lo, hi] in this same write; that batch is the entire finalization protocol.)",
       f:s => { const ni = s.meta.findIndex(m=>m.k.endsWith("00005350")&&m.k.startsWith("index"));
