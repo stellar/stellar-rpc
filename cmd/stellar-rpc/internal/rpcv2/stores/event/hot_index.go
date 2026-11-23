@@ -139,11 +139,22 @@ func (t *ledgerTerms) appendKeyed(eventBytes []byte, secret [stores.SecretLen]by
 	return nil
 }
 
+// keyWorkers goroutines key a ledger's terms, each a contiguous range.
+const keyWorkers = 4
+
 func (t *ledgerTerms) key(secret [stores.SecretLen]byte) {
-	t.keys = slices.Grow(t.keys[:0], t.terms.Len())
-	for i := range t.terms.Len() {
-		t.keys = append(t.keys, t.terms.Key(i, secret))
+	n := t.terms.Len()
+	t.keys = slices.Grow(t.keys[:0], n)[:n]
+	step := max(1, (n+keyWorkers-1)/keyWorkers)
+	var wg sync.WaitGroup
+	for lo := 0; lo < n; lo += step {
+		wg.Go(func() {
+			for i := lo; i < min(lo+step, n); i++ {
+				t.keys[i] = t.terms.Key(i, secret)
+			}
+		})
 	}
+	wg.Wait()
 }
 
 // keyAsync keys the terms on another goroutine; t.keying.Wait waits for it.
