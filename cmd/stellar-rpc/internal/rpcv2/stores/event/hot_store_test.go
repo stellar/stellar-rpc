@@ -66,8 +66,20 @@ func openHotStoreForTestAt(t *testing.T, dir string, chunkID chunk.ID) (*HotStor
 
 func tryOpenHotStoreForTest(t *testing.T, dir string, chunkID chunk.ID) (*HotStore, *rocksdb.Store, error) {
 	t.Helper()
+	return tryOpenHotStoreSealing(t, dir, chunkID, sealBytes, sealLedgers)
+}
+
+// tryOpenHotStoreSealing opens a store whose data windows seal at the given
+// bounds.
+func tryOpenHotStoreSealing(
+	t *testing.T, dir string, chunkID chunk.ID, maxBytes, maxLedgers int,
+) (*HotStore, *rocksdb.Store, error) {
+	t.Helper()
 	raw := openRawHotChunkForTest(t, dir, chunkID)
-	hot, err := NewWithStore(raw, chunkID, testCatalogSecret)
+	hot, err := newWithStore(raw, chunkID, testCatalogSecret, maxBytes, maxLedgers)
+	if err == nil {
+		err = replayTestLedgers(hot, raw)
+	}
 	if err != nil {
 		_ = raw.Close()
 		return nil, nil, err
@@ -80,12 +92,80 @@ func openRawHotChunkForTest(t *testing.T, dir string, chunkID chunk.ID) *rocksdb
 	t.Helper()
 	raw, err := rocksdb.New(rocksdb.Config{
 		Path:           filepath.Join(dir, chunkID.String()),
-		ColumnFamilies: CFNames(),
+		ColumnFamilies: append(CFNames(), testLedgersCF),
 		Logger:         silentLogger(),
 		PerCFOptions:   CFOptions(),
 	})
 	require.NoError(t, err)
 	return raw
+}
+
+// testLedgersCF stands in for the chunk's hot ledgers: ingestLedgerEvents
+// commits each ledger's payloads to it, and testLedgerEvents reads them back.
+const testLedgersCF = "ledgers"
+
+// replayTestLedgers replays the ledgers hot had not sealed, as the store's
+// caller does after an open.
+func replayTestLedgers(hot *HotStore, raw *rocksdb.Store) error {
+	tail, err := testLedgerEvents(raw, hot.Unsealed(), hot.Derive)
+	if err != nil {
+		return err
+	}
+	for _, e := range tail {
+		if err := hot.Replay(e); err != nil {
+			return err
+		}
+	}
+	return hot.Replayed()
+}
+
+// testLedgerEvents derives the events of the test ledgers from from on.
+func testLedgerEvents(
+	raw *rocksdb.Store, from uint32, derive func(seq uint32, payloads []Payload) (LedgerEvents, error),
+) ([]LedgerEvents, error) {
+	var out []LedgerEvents
+	for seq := from; ; seq++ {
+		v, ok, err := raw.Get(testLedgersCF, encodeOffsetKey(seq))
+		if err != nil || !ok {
+			return out, err
+		}
+		payloads, err := decodeTestLedger(v)
+		if err != nil {
+			return nil, err
+		}
+		e, err := derive(seq, payloads)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+}
+
+func encodeTestLedger(payloads []Payload) []byte {
+	var out []byte
+	for i := range payloads {
+		b, err := payloads[i].Marshal()
+		if err != nil {
+			panic(err)
+		}
+		out = binary.BigEndian.AppendUint32(out, uint32(len(b)))
+		out = append(out, b...)
+	}
+	return out
+}
+
+func decodeTestLedger(raw []byte) ([]Payload, error) {
+	var out []Payload
+	for len(raw) > 0 {
+		n := binary.BigEndian.Uint32(raw)
+		var p Payload
+		if err := p.Unmarshal(bytes.Clone(raw[4 : 4+n])); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+		raw = raw[4+n:]
+	}
+	return out, nil
 }
 
 func makePayload(symbol string) (Payload, []Term) {
@@ -147,27 +227,26 @@ func TestHotStore_FreshChunkHasEmptyState(t *testing.T) {
 	assert.Equal(t, chunkID.FirstLedger(), mustOffsets(t, h.store).StartLedger())
 }
 
-func TestHotStore_IngestLedgerWritesDataAndOffsets(t *testing.T) {
+func TestHotStore_IngestLedgerWritesOffsetsAndKeepsEventsInMemory(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	h := openHotStoreForTest(t, chunkID)
 
 	p, terms := makePayload("transfer")
 	require.NoError(t, ingestLedgerEvents(h.store, 2, []Payload{p}))
 
-	// events_data row exists.
-	got, found, err := h.store.chunkStore.Get(DataCF, encodeDataKey(0))
+	// The event is served from memory: events_data holds sealed windows only.
+	got, err := h.store.FetchEvents(context.Background(), []uint32{0})
 	require.NoError(t, err)
-	require.True(t, found)
-	var decoded Payload
-	require.NoError(t, decoded.Unmarshal(got))
-	assert.Equal(t, p.TxHash, decoded.TxHash)
+	assert.Equal(t, p.TxHash, got[0].TxHash)
+	_, found, err := h.store.chunkStore.LastKey(DataCF)
+	require.NoError(t, err)
+	assert.False(t, found)
 
 	// events_index holds sealed slabs only, and the first slab is not full.
 	_, found, err = h.store.chunkStore.LastKey(IndexCF)
 	require.NoError(t, err)
 	assert.False(t, found)
 
-	// events_offsets: cumulative = 1.
 	offVal, found, err := h.store.chunkStore.Get(OffsetsCF, encodeOffsetKey(2))
 	require.NoError(t, err)
 	require.True(t, found)
@@ -197,11 +276,9 @@ func TestHotStore_EventIDsAreMonotonic(t *testing.T) {
 	p3, _ := makePayload("c")
 	require.NoError(t, ingestLedgerEvents(h.store, first+1, []Payload{p3}))
 
-	for id := range uint32(3) {
-		_, found, err := h.store.chunkStore.Get(DataCF, encodeDataKey(id))
-		require.NoError(t, err)
-		assert.True(t, found, "missing event id %d", id)
-	}
+	got, err := h.store.FetchEvents(context.Background(), []uint32{0, 1, 2})
+	require.NoError(t, err)
+	assert.Len(t, got, 3)
 	assert.Equal(t, uint32(3), mustEventCount(t, h.store))
 }
 
@@ -276,20 +353,25 @@ func TestHotStore_FetchEventsErrorsOnMissingID(t *testing.T) {
 func TestHotStore_FetchEventsLargeBatch(t *testing.T) {
 	const chunkID = chunk.ID(0)
 	const n = 1100
-	h := openHotStoreForTest(t, chunkID)
+	hot, _, err := tryOpenHotStoreSealing(t, t.TempDir(), chunkID, sealBytes, 1)
+	require.NoError(t, err)
 
 	payloads := make([]Payload, n)
 	for i := range n {
 		p, _ := makePayload(fmt.Sprintf("evt-%03d", i))
 		payloads[i] = p
 	}
-	require.NoError(t, ingestLedgerEvents(h.store, 2, payloads))
+	require.NoError(t, ingestLedgerEvents(hot, 2, payloads))
+	require.NoError(t, ingestLedgerEvents(hot, 3, nil))
+	require.NoError(t, hot.data.unsealed.Wait())
+	first, _ := hot.data.inMemory()
+	require.Equal(t, uint32(n), first, "every event is in DataCF")
 
 	ids := make([]uint32, n)
 	for i := range n {
 		ids[i] = uint32(i)
 	}
-	fetched, err := h.store.FetchEvents(context.Background(), ids)
+	fetched, err := hot.FetchEvents(context.Background(), ids)
 	require.NoError(t, err)
 	require.Len(t, fetched, n)
 	for i := range n {
@@ -643,26 +725,28 @@ func mustOffsets(t *testing.T, r Reader) *LedgerOffsets {
 // addPostings injects postings into the slab being filled, the way a term
 // hash collision would. No ingest may run beside it.
 func addPostings(h *HotStore, term Term, ids ...uint32) {
-	live := h.index.view.Load().live
+	live := h.index.unsealed.Load().Live
 	for _, id := range ids {
 		live.add(term.Key(h.index.secret), id)
 	}
 }
 
-// ingestLedgerEvents commits one ledger's events through IngestLedgerToBatch in
-// a test-owned batch and runs the post-commit apply hook — the production
-// write shape, reduced to a test seeding call.
+// ingestLedgerEvents commits one ledger's events through AddToBatch in a
+// test-owned batch and then applies them: the production write shape,
+// reduced to a test seeding call.
 func ingestLedgerEvents(h *HotStore, ledgerSeq uint32, payloads []Payload) error {
 	if h.chunkStore.IsClosed() {
 		return stores.ErrStoreClosed
 	}
-	var apply func() error
+	e, err := h.Derive(ledgerSeq, payloads)
+	if err != nil {
+		return err
+	}
 	if err := h.chunkStore.Batch(func(b *rocksdb.BatchWriter) error {
-		a, aerr := h.IngestLedgerToBatch(b, ledgerSeq, payloads)
-		apply = a
-		return aerr
+		b.Put(testLedgersCF, encodeOffsetKey(ledgerSeq), encodeTestLedger(payloads))
+		return h.AddToBatch(b, e)
 	}); err != nil {
 		return err
 	}
-	return apply()
+	return h.Apply(e)
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -347,6 +348,29 @@ func TestTxReader_HotHitSkipsColdEnumeration(t *testing.T) {
 	assert.Equal(t, hotSeq, txv.LedgerSequence)
 }
 
+func TestTxReader_MadeUpHashSharingAHotPrefixIsAMiss(t *testing.T) {
+	// A made-up hash sharing a real one's first 16 bytes must miss.
+	hotSeq := chunk.ID(10).FirstLedger()
+	fl := buildLedgers(t, []uint32{hotSeq}, 3)
+	hot, err := Open(openTestRocks(t, t.TempDir()), chunk.ID(10), hotSecret)
+	require.NoError(t, err)
+	require.NoError(t, commit(t, hot, hotSeq, slices.Collect(maps.Keys(fl.byHash))))
+	reader, err := NewTxReader([]HashIndex{hot}, nil, fl.src, network.TestNetworkPassphrase)
+	require.NoError(t, err)
+
+	for h := range fl.byHash {
+		madeUp := h
+		madeUp[31] ^= 0xFF
+		_, found, err := reader.GetTransaction(madeUp)
+		require.NoError(t, err)
+		assert.False(t, found)
+
+		_, found, err = reader.GetTransaction(h)
+		require.NoError(t, err)
+		assert.True(t, found)
+	}
+}
+
 func TestTxReader_ColdProviderErrorIsHard(t *testing.T) {
 	sentinel := errors.New("cold enumeration failed")
 	cold := func() ([]HashIndex, error) { return nil, sentinel }
@@ -389,10 +413,9 @@ func TestTxReader_ExactSourceUnavailableLedgerErrors(t *testing.T) {
 func TestTxReader_HotAndColdFederation(t *testing.T) {
 	hotSeq := chunk.ID(10).FirstLedger()
 	flHot := buildLedgers(t, []uint32{hotSeq}, 1)
-	hotStore := openTestHotStore(t)
-	for h, seq := range flHot.byHash {
-		require.NoError(t, addEntries(hotStore, []Entry{{Hash: h, LedgerSeq: seq}}))
-	}
+	hotStore, err := Open(openTestRocks(t, t.TempDir()), chunk.ID(10), hotSecret)
+	require.NoError(t, err)
+	require.NoError(t, commit(t, hotStore, hotSeq, slices.Collect(maps.Keys(flHot.byHash))))
 
 	coldSeq := chunk.ID(5).FirstLedger()
 	flCold := buildLedgers(t, []uint32{coldSeq}, 1)

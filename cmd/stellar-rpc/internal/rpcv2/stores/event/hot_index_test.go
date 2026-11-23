@@ -3,7 +3,6 @@ package event
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"math"
 	"math/rand"
 	"os"
@@ -163,9 +162,9 @@ func TestHotIndex_AnswersAcrossSealedAndLiveSlabs(t *testing.T) {
 	for f.committed < 3*hotSlabEvents+hotSlabEvents/3 {
 		f.add(t, x, 7001)
 	}
-	require.NoError(t, x.settle())
+	require.NoError(t, x.unsealed.Wait())
 	requireSealedSlabs(t, store, 3)
-	require.Nil(t, x.view.Load().prev, "a sealed slab leaves memory")
+	require.Nil(t, x.unsealed.Load().Prev, "a sealed slab leaves memory")
 
 	terms := append([]Term{f.every, randomTerm(f.rng)}, f.shared...)
 	for term := range f.want {
@@ -214,7 +213,7 @@ func TestHotIndex_LookupReportsUnreadableSlabs(t *testing.T) {
 	for f.committed <= hotSlabEvents {
 		f.add(t, x, 9000)
 	}
-	require.NoError(t, x.settle())
+	require.NoError(t, x.unsealed.Wait())
 	requireSealedSlabs(t, store, 1)
 	window := IDRange{0, f.committed}
 
@@ -270,7 +269,7 @@ func TestHotIndex_ConcurrentLookupsDuringSealing(t *testing.T) {
 		f.add(t, x, 3001)
 		committed.Store(f.committed)
 	}
-	require.NoError(t, x.settle())
+	require.NoError(t, x.unsealed.Wait())
 	close(stop)
 	readers.Wait()
 }
@@ -304,7 +303,7 @@ func TestHotStore_ReopenKeepsSealedSlabsAndIndexesTheRestAgain(t *testing.T) {
 
 	hot, raw := openHotStoreForTestAt(t, dir, chunkID)
 	ingestCorpus(t, hot, corpus, 2*hotSlabEvents+100)
-	require.NoError(t, hot.index.settle())
+	require.NoError(t, hot.index.unsealed.Wait())
 	requireSealedSlabs(t, raw, 2)
 	requireIndexed(t, hot, corpus)
 	require.NoError(t, raw.Close())
@@ -314,7 +313,7 @@ func TestHotStore_ReopenKeepsSealedSlabsAndIndexesTheRestAgain(t *testing.T) {
 	requireIndexed(t, hot, corpus)
 	// Ingestion carries on into the next slab.
 	ingestCorpus(t, hot, corpus, 3*hotSlabEvents+100)
-	require.NoError(t, hot.index.settle())
+	require.NoError(t, hot.index.unsealed.Wait())
 	requireSealedSlabs(t, raw, 3)
 	requireIndexed(t, hot, corpus)
 }
@@ -325,7 +324,7 @@ func TestHotStore_IndexKeysAreTheColdKeys(t *testing.T) {
 	hot, raw := openHotStoreForTestAt(t, t.TempDir(), chunkID)
 	corpus := newDiffCorpus(t, rand.New(rand.NewSource(5)), newDiffVocab(t), hotSlabEvents+100)
 	ingestCorpus(t, hot, corpus, hotSlabEvents+100)
-	require.NoError(t, hot.index.settle())
+	require.NoError(t, hot.index.unsealed.Wait())
 	requireSealedSlabs(t, raw, 1)
 
 	secret := ColdIndexSecret(testCatalogSecret[:], chunkID)
@@ -356,29 +355,24 @@ func TestHotStore_FailedSealIsRedoneOnReopen(t *testing.T) {
 	blocker := filepath.Join(dir, chunkID.String(), "loading")
 	require.NoError(t, os.WriteFile(blocker, nil, 0o600))
 	ingestCorpus(t, hot, corpus, hotSlabEvents+1)
-	require.ErrorContains(t, hot.index.settle(), "seal index slab 0")
+	require.ErrorContains(t, hot.index.unsealed.Wait(), "seal index slab 0")
 	requireSealedSlabs(t, raw, 0)
-	require.Equal(t, uint32(0), hot.index.view.Load().prev.slab, "the slab stays in memory")
+	require.Equal(t, uint32(0), hot.index.unsealed.Load().Prev.slab, "the slab stays in memory")
 	requireIndexed(t, hot, corpus)
 
 	// The next ledger commits, but its apply fails.
 	payloads := []Payload{{ContractEventBytes: corpus.raw[hotSlabEvents+1]}}
 	err := ingestLedgerEvents(hot, mustOffsets(t, hot).EndLedger(), payloads)
 	require.ErrorContains(t, err, "seal index slab 0")
-	require.Equal(t, uint32(hotSlabEvents+2), countDataRows(t, raw))
+	_, committed, lerr := raw.Get(testLedgersCF, encodeOffsetKey(mustOffsets(t, hot).EndLedger()))
+	require.NoError(t, lerr)
+	require.True(t, committed)
 	require.Equal(t, uint32(hotSlabEvents+1), mustEventCount(t, hot), "the count never runs ahead of the index")
 	require.NoError(t, raw.Close())
 
 	require.NoError(t, os.Remove(blocker))
 	hot, raw = openHotStoreForTestAt(t, dir, chunkID)
 	requireSealedSlabs(t, raw, 1)
+	require.Equal(t, uint32(hotSlabEvents+2), mustEventCount(t, hot))
 	requireIndexed(t, hot, corpus)
-}
-
-func countDataRows(t *testing.T, store *rocksdb.Store) uint32 {
-	t.Helper()
-	last, found, err := store.LastKey(DataCF)
-	require.NoError(t, err)
-	require.True(t, found)
-	return binary.BigEndian.Uint32(last) + 1
 }

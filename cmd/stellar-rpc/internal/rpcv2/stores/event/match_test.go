@@ -1151,8 +1151,8 @@ func TestQuery_InvalidFilterRejected(t *testing.T) {
 // Walks the hot store one ledger at a time using its Offsets snapshot
 // (which tracks the ingest-time ledger sequence) rather than reading
 // LedgerSequence off each Payload — the test fixture's payloadFor
-// builder doesn't set Payload.LedgerSequence, and IngestLedgerToBatch
-// stores them verbatim, so the per-event field is the zero value and
+// builder doesn't set Payload.LedgerSequence, and the store keeps
+// them verbatim, so the per-event field is the zero value and
 // can't be used to recover ledger boundaries.
 //
 //nolint:unparam // chunkID is conceptually a fixture knob even though tests use chunk.ID(0) today

@@ -251,6 +251,6 @@ func TestMatches_FindsEveryCommittedEventDuringIngest(t *testing.T) {
 		got := collectOrdinals(t, h.store, filters, IDRange{End: committed}, false)
 		require.Equal(t, append([]uint32(nil), want[:n]...), got, "over the first %d events", committed)
 	}
-	require.NoError(t, h.store.index.settle())
+	require.NoError(t, h.store.index.unsealed.Wait())
 	requireSealedSlabs(t, h.raw, 1)
 }

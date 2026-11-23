@@ -1,107 +1,124 @@
-// Package txhash holds the hot transaction-hash store (RocksDB-backed, a single
-// txhash CF), the cold artifacts (the raw per-chunk .bin file and the
+// Package txhash holds the hot transaction-hash store (a CF of the chunk's
+// hot DB), the cold artifacts (the raw per-chunk .bin file and the
 // streamhash-MPHF-backed cold index reader/builder), and the read-assembly
 // layer that resolves a hash across tiers.
 package txhash
 
 import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"slices"
+
+	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
-// txhashCF is the single column family holding every (txhash → ledgerSeq)
-// entry for the chunk, per the design's hot-tier spec (one `txhash` CF).
+// txhashCF maps sealed windows' routing keys to ledgers, one loaded file per window.
 const txhashCF = "txhash"
 
-// Entry — one (txhash → ledgerSeq) mapping.
-type Entry struct {
-	Hash      [32]byte
-	LedgerSeq uint32
-}
-
-// HotStore — RocksDB-backed hot transaction-hash store. A single txhash CF
-// holding the full 32-byte hash as key and the big-endian ledgerSeq as value.
-// The CF name and encoding are internal.
-//
-// Like every hot store, a HotStore instance is chunk-bound: it
-// accumulates exactly one chunk's (txhash → seq) tuples before being
-// frozen into the chunk's cold .bin artifact. The store does not itself
-// range-check writes (the driver's drain loop already validates every ledger
-// sequence against the chunk).
+// HotStore is a chunk's hot tx-hash index. A ledger's row is its routing keys,
+// sorted and concatenated. Writes are single-writer; lookups are safe alongside
+// them.
 type HotStore struct {
-	store *rocksdb.Store
+	store  *rocksdb.Store
+	secret [stores.SecretLen]byte
+	index  *hotIndex
+	// unsealed is the first ledger whose row was not sealed when the store opened.
+	unsealed uint32
 }
 
-// NewWithStore wraps an ALREADY-OPEN rocksdb.Store as a txhash HotStore on the
-// single txhash CF (CFNames()). The store is owned by the caller — in production,
-// hotchunk.DB composes this facade over the shared per-chunk DB and closes that DB
-// once. The store must have CFNames() registered.
-func NewWithStore(store *rocksdb.Store) *HotStore {
-	return &HotStore{store: store}
+// Open composes the store over a writable hot DB. It holds the sealed windows
+// only: the caller applies the rows from Unsealed on again.
+func Open(store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte) (*HotStore, error) {
+	return open(store, chunkID, secret, sealKeys, sealLedgers)
 }
 
-// CFNames returns the single txhash CF name this facade owns. Exported so
-// the hotchunk shared-DB opener can register it alongside the other CFs.
+func open(
+	store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte, maxKeys, maxLedgers int,
+) (*HotStore, error) {
+	if err := checkSecret(store, secret); err != nil {
+		return nil, err
+	}
+	lastSealed, sealedKeys, err := readMarker(store)
+	if err != nil {
+		return nil, err
+	}
+	return &HotStore{
+		store: store, secret: secret, index: newHotIndex(store, sealedKeys, maxKeys, maxLedgers),
+		unsealed: max(lastSealed+1, chunkID.FirstLedger()),
+	}, nil
+}
+
+// Unsealed returns the first ledger whose row was not sealed when the store
+// opened.
+func (h *HotStore) Unsealed() uint32 { return h.unsealed }
+
+// Settle waits for the seal in flight, if any, and returns its outcome.
+func (h *HotStore) Settle() error { return h.index.unsealed.Wait() }
+
+// CFNames returns the CFs this facade owns, for the hotchunk opener to
+// register.
 func CFNames() []string { return []string{txhashCF} }
 
-// CFOptions returns the calibration the hotchunk opener installs on the
-// txhash CF alone. The workload is write-once / point-lookup; only it
-// earned this tuning — the other CFs ride on RocksDB defaults.
 func CFOptions() map[string]rocksdb.CFOptions {
 	return map[string]rocksdb.CFOptions{
 		txhashCF: {
-			// 64 MB memtable so one flush produces one ~64 MB SST under
-			// uniform writes.
-			WriteBufferMB:        64,
-			MaxWriteBufferNumber: 2,
-
-			// L0 triggers pinned high + DisableAutoCompactions=true:
-			// compaction would re-write the same data with no reordering
-			// benefit (txhash is write-once, random-key, point-lookup).
-			// The L0 999s match DisableAutoCompactions so even if a future
-			// flush somehow exceeded the trigger, the engine still
-			// wouldn't try to compact. NOTE: DisableAutoCompactions and
-			// Tuning.MaxBackgroundJobs are orthogonal — the former turns
-			// compaction off entirely, the latter only caps the thread
-			// budget for background work.
+			// The windows' files overlap, so they stay in level 0. The CF
+			// never compacts, and its file count must never stall writes.
 			Level0FileNumCompactionTrigger: 999,
 			Level0SlowdownWritesTrigger:    999,
 			Level0StopWritesTrigger:        999,
 			DisableAutoCompactions:         true,
-
-			// 64 MB target file matches WriteBufferMB so one memtable
-			// flush produces one ~64 MB SST — fewer bloom checks per
-			// query at no-compaction scale.
-			TargetFileSizeMB: 64,
-
-			// 12 bits/key bloom (~0.4% false-positive) is tighter than
-			// the standard 10 bits/key because every false positive at
-			// no-compaction SST count costs a disk seek across many SSTs.
-			// Only this CF is probed for keys it may not hold.
-			BloomFilterBitsPerKey: 12,
+			BloomFilterBitsPerKey:          12,
+			CacheIndexAndFilterBlocks:      true,
 		},
 	}
 }
 
-// AddEntriesToBatch queues each (txhash → ledgerSeq) Put into b on the txhash
-// CF — the building block hotchunk uses to fold the tx-hash writes into the one
-// shared per-ledger WriteBatch (decision (a)). Does not commit (caller owns the
-// batch). It cannot fail: BatchWriter.Put latches any CF error, surfaced by the
-// enclosing Store.Batch, whose lifecycle RLock + checkOpen is the authoritative
-// closed-store guard.
-func (h *HotStore) AddEntriesToBatch(b *rocksdb.BatchWriter, entries []Entry) {
-	for _, e := range entries {
-		b.Put(txhashCF, e.Hash[:], rocksdb.EncodeUint32(e.LedgerSeq))
-	}
+// EncodeRow blinds a ledger's transaction hashes, a fee-bump's inner hash
+// included, into the ledger's row, and returns it with its key count.
+func (h *HotStore) EncodeRow(txParts []sdkingest.LedgerTxParts) ([]byte, int, error) {
+	return EncodeRow(h.secret, txParts)
 }
 
-// Get returns the ledger sequence the hash was committed in, or
-// (0, stores.ErrNotFound) on miss.
+// EncodeRow is HotStore.EncodeRow under secret, for a chunk with no store open.
+func EncodeRow(secret [stores.SecretLen]byte, txParts []sdkingest.LedgerTxParts) ([]byte, int, error) {
+	keys := make([][ColdKeySize]byte, 0, len(txParts))
+	for i := range txParts {
+		keys = append(keys, RoutingKey(secret, txParts[i].Hash))
+		if txParts[i].FeeBump {
+			keys = append(keys, RoutingKey(secret, txParts[i].InnerHash))
+		}
+	}
+	slices.SortFunc(keys, func(a, b [ColdKeySize]byte) int { return bytes.Compare(a[:], b[:]) })
+	row := make([]byte, 0, len(keys)*ColdKeySize)
+	for i, k := range keys {
+		if i > 0 && k == keys[i-1] {
+			return nil, 0, fmt.Errorf("txhash: two hashes of the ledger have routing key %x", k)
+		}
+		row = append(row, k[:]...)
+	}
+	return row, len(keys), nil
+}
+
+// Apply adds committed ledger seq's row and keeps it. It fails only when a seal
+// failed, after which the caller must stop ingesting.
+func (h *HotStore) Apply(seq uint32, row []byte) error { return h.index.apply(seq, row) }
+
+// Get returns the ledger the hash was committed in, or (0, stores.ErrNotFound)
+// on a miss.
 func (h *HotStore) Get(hash [32]byte) (uint32, error) {
-	// The value is four bytes and is decoded before the pinned block is
-	// released, so this probe — one per hot chunk per lookup — copies nothing.
+	key := RoutingKey(h.secret, hash)
+	if seq, ok := h.index.lookup(key[:]); ok {
+		return seq, nil
+	}
 	var seq uint32
-	found, err := h.store.GetPinned(txhashCF, hash[:], func(v []byte) error {
+	found, err := h.store.GetPinned(txhashCF, key[:], func(v []byte) error {
 		seq = rocksdb.DecodeUint32(v)
 		return nil
 	})
@@ -112,4 +129,37 @@ func (h *HotStore) Get(hash [32]byte) (uint32, error) {
 		return 0, stores.ErrNotFound
 	}
 	return seq, nil
+}
+
+// secretKey, in the default CF, records the secret the chunk's hot keys are
+// blinded with: they cannot be blinded again, so a store given another
+// secret must fail rather than miss every key.
+const secretKey = "txhash:secret"
+
+// checkSecret compares secret with the one store records. A store that
+// records none records secret.
+func checkSecret(store *rocksdb.Store, secret [stores.SecretLen]byte) error {
+	v, found, err := store.Get("", []byte(secretKey))
+	switch {
+	case err != nil:
+		return err
+	case !found:
+		return store.Put("", []byte(secretKey), secret[:])
+	case !bytes.Equal(v, secret[:]):
+		return errors.New("txhash: the chunk's hot keys are not blinded with this secret; re-ingest the chunk")
+	}
+	return nil
+}
+
+// readMarker returns the last sealed ledger and how many keys the seals
+// hold, zeros when nothing is sealed.
+func readMarker(store *rocksdb.Store) (uint32, uint64, error) {
+	v, found, err := store.Get(txhashCF, []byte(markerKey))
+	if err != nil || !found {
+		return 0, 0, err
+	}
+	if len(v) != 12 {
+		return 0, 0, fmt.Errorf("txhash: corrupt chunk: seal marker %x", v)
+	}
+	return rocksdb.DecodeUint32(v[:4]), binary.BigEndian.Uint64(v[4:]), nil
 }

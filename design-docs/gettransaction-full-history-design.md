@@ -38,7 +38,7 @@ Each in-retention transaction lives in exactly one place — one tier, one windo
 
 | Tier | Structure | Serves |
 |---|---|---|
-| **Hot** | `txhash` CF of the per-chunk hot RocksDB | the live chunk, plus any frozen chunk the window index doesn't cover yet |
+| **Hot** | the `txhash` CF of the per-chunk hot RocksDB, plus an in-memory window of recent ledgers | the live chunk, plus any frozen chunk the window index doesn't cover yet |
 | **Cold** | one streamhash `.idx` per window, covering chunks `[lo, hi]` | every chunk in `[lo, hi]` (at/below the frozen `hi`, at/above the floor chunk `lo`) |
 
 ```
@@ -76,16 +76,17 @@ Window 0 spans ledgers 2–10,000,001 (chunks 0–999), window N spans N×10M+2 
 
 ### 5.1 Storage
 
-The hot tier is a plain key-value table, one per chunk, stored as a `txhash` column family in that chunk's RocksDB:
+The hot tier keys every transaction by its **routing key**: its whole hash blinded into 16 bytes, the same key the cold `.bin` uses (§6.1), blinded with the secret of the window the chunk belongs to. It lives in one column family of the chunk's RocksDB, **`txhash`**, which maps a routing key to its 4-byte ledger sequence for every ledger up to the last **seal** (§5.2). Each seal adds one file, which RocksDB bulk-loads and never compacts.
 
-- **Key**: the full 32-byte transaction hash.
-- **Value**: the 4-byte ledger sequence.
+A ledger's **row** is its routing keys, sorted and concatenated. The rows after the last seal, the **window**, are held only in memory. The chunk's ledgers, which the hot DB stores anyway, are their durable copy.
 
-Storing the full hash makes the hot tier **exact**: a lookup either finds the hash or it doesn't. There are no false positives to screen out and nothing to verify. The table is tuned for point lookups.
+Two of a chunk's transactions sharing a routing key is the same negligible event the cold tier accepts (§8.2), and it is as loud: the ingest, the chunk's freeze or the index build fails rather than answering wrong.
 
 ### 5.2 Write path
 
-Writing is straightforward. As each ledger is ingested, one `(hash, seq)` entry is added for every transaction hash in it — two entries for a fee-bump (outer and inner) — in the same atomic write that stores the rest of the ledger. So a ledger's hashes are written all-or-nothing, together with the rest of the ledger.
+As each ledger is ingested, its row is built before the ledger's atomic write: the per-hash work, blinding and sorting the keys, happens there, and a fee-bump contributes two keys (outer and inner). The write itself carries nothing for the tx-hash index, so a dense ledger adds no inserts to the synced write; the ledger it stores holds the hashes.
+
+Once the write commits, the row joins the window. When the next row would take the window past 2²⁰ keys, or the window holds 256 ledgers, the window is sealed: a background goroutine merges its rows into one sorted file and bulk-loads it into `txhash`. Every file also holds a **marker** entry recording the last ledger it seals, so a restart rebuilds the window from the ledgers after the newest marker, with no other bookkeeping. Opening the hot database replays its unsealed ledgers once for the tx-hash rows and the events together: it decompresses and walks eight ledgers at a time, then applies their rows in order. At most two windows are in memory, the one being filled and the one being sealed, about 16 MB each.
 
 ### 5.3 Lifetime
 
@@ -180,7 +181,7 @@ A hash names no ledger, so the reader cannot know which home holds it in advance
 | Tier | Probe set | How |
 |---|---|---|
 | cold — one `.idx` per window | **every in-retention window** | MPHF + fingerprint + verify (§8.2) |
-| hot — `txhash` CF per chunk | the chunks above any window's `hi` (live, or frozen awaiting coverage) | exact full-key get (§8.3) |
+| hot — per chunk | the chunks above any window's `hi` (live, or frozen awaiting coverage) | in-memory window, then one point get (§8.3) |
 
 The hot tier is normally just the live chunk plus a window's tail — after downtime or a slow freeze it can be many chunks, shrinking as rebuilds advance `hi` (§8.3) — so the probe set is `≈ (in-retention windows) + (the hot chunks)`. Before a window has any index, all of its chunks are hot-tier. How the reader learns current coverage and stays consistent across rebuilds is the query-routing design's concern. This document requires only two things: that the two tiers together cover the whole retention window (the gap-free hot→cold handoff, §5.3), and that each transaction lives in exactly one of them. So **at most one probe confirms**: the verify runs on every fingerprint hit but succeeds for at most one.
 
@@ -214,7 +215,7 @@ A **routing-key collision between two distinct in-retention transactions** has t
 
 ### 8.3 Hot lookup
 
-Chunks above `hi` are probed in their hot DBs' `txhash` column family — an exact, full-key point get. A miss here is a real miss, with none of the cold tier's verification subtleties (the fetch-and-verify still runs, since the response needs the transaction anyway). In steady state this tier is just the live chunk, plus briefly the one chunk in the freeze-to-coverage gap. After catch-up or a crash it can be several chunks, shrinking as rebuilds advance `hi`.
+Chunks above `hi` are probed in their hot DBs: the hash's routing key is searched for in the window's rows, newest first, and on a miss looked up with one point get in `txhash`, which RocksDB answers from the sealed files newest first through their bloom filters. A miss here is a real miss, with none of the cold tier's fingerprint screening (the fetch-and-verify still runs, since the response needs the transaction anyway). In steady state this tier is just the live chunk, plus briefly the one chunk in the freeze-to-coverage gap. After catch-up or a crash it can be several chunks, shrinking as rebuilds advance `hi`.
 
 ---
 
@@ -226,7 +227,7 @@ Per dense chunk (~3M transactions) and dense window (1,000 chunks, ~3×10⁹ tra
 
 | Structure | Unit cost | Dense chunk | Dense window | Lifetime |
 |---|---|---|---|---|
-| hot `txhash` CF | 36 B/tx raw (32 key + 4 value), before RocksDB overhead | ~110 MB raw | — (per-chunk) | chunk ingestion → index coverage |
+| hot `txhash` CF | ~31 B/tx of sealed files (20 raw, the rest bloom, index and block overhead) | ~93 MB | — (per-chunk) | chunk ingestion → index coverage |
 | `.bin` sorted run | 19 B/tx | ~57 MB | ~57 GB | chunk freeze → window finalization, or retention floor |
 | `.idx` | ≈4.2 B/tx (3-byte payload) | — (per-window) | ~12.5 GB | build → superseded next boundary, or retention |
 
@@ -234,11 +235,11 @@ Transient peaks: ~2× the index size in the window dir during each rebuild (~25 
 
 ## 10. Performance
 
-- **Ingest, hot**: one `(hash, seq)` put per transaction, inside the ledger's existing write.
+- **Ingest, hot**: no write of its own; each ledger's keys are blinded and sorted into its row in memory, and a background seal runs every 2²⁰ keys or 256 ledgers. A restart rebuilds at most two windows' rows from the chunk's ledgers.
 - **Ingest, cold**: sorted runs of 2²⁰ entries merged into the `.bin`, negligible against the chunk's streaming pass; the `.bin` write is sequential.
 - **Rebuild**: a full dense window builds a ~12.5 GB `.idx` from ~57 GB of sorted `.bin` files in about a minute (~200 MB/s write burst) on 8 build workers: streamhash's sorted-file build runs at about 6M keys/s per worker, up to what the disk reads. A build gets `[backfill] index_workers` workers, half of `GOMAXPROCS` by default. Mid-window rebuilds scale with `hi − lo`. Against a ~14-hour boundary cadence at mainnet rates, the rebuild is a ~0.1% duty cycle.
 - **Lookup, cold**: one MPHF probe per in-retention window — fingerprint screen, then fetch-and-verify on a hit. The hash is in at most one window, so at most one fetch confirms; fingerprint false positives (~1/256 per window, §6.2) are rejected by the full-hash verify. Probe ordering, parallelism, and the resulting latency/throughput are the query-routing design's concern (§8.1).
-- **Lookup, hot**: one RocksDB point get in a bloom-filtered CF, then the same ledger fetch.
+- **Lookup, hot**: a binary search of each of the window's rows (at most 512), then one RocksDB point get across the sealed files' bloom filters, then the same ledger fetch.
 
 ---
 
