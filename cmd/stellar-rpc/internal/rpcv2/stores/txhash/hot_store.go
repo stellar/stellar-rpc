@@ -6,16 +6,12 @@ package txhash
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
 
-	"golang.org/x/sync/errgroup"
-
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
@@ -26,14 +22,6 @@ import (
 // txhashCF maps sealed windows' routing keys to ledgers, one loaded file per window.
 const txhashCF = "txhash"
 
-const openWorkers = 8
-
-// Ledgers is the chunk's hot ledger store. WithLedger lends fn the ledger's bytes.
-type Ledgers interface {
-	LastSeq() (uint32, bool, error)
-	WithLedger(seq uint32, fn func(raw []byte) error) error
-}
-
 // HotStore is a chunk's hot tx-hash index. A ledger's row is its routing keys,
 // sorted and concatenated. Writes are single-writer; lookups are safe alongside
 // them.
@@ -41,15 +29,18 @@ type HotStore struct {
 	store  *rocksdb.Store
 	secret [stores.SecretLen]byte
 	index  *hotIndex
+	// unsealed is the first ledger whose row was not sealed when the store opened.
+	unsealed uint32
 }
 
-// Open composes the store over a writable hot DB and rebuilds the rows after the last seal.
-func Open(store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte, ledgers Ledgers) (*HotStore, error) {
-	return open(store, chunkID, secret, ledgers, sealKeys, sealLedgers)
+// Open composes the store over a writable hot DB. It holds the sealed windows
+// only: the caller applies the rows from Unsealed on again.
+func Open(store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte) (*HotStore, error) {
+	return open(store, chunkID, secret, sealKeys, sealLedgers)
 }
 
 func open(
-	store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte, ledgers Ledgers, maxKeys, maxLedgers int,
+	store *rocksdb.Store, chunkID chunk.ID, secret [stores.SecretLen]byte, maxKeys, maxLedgers int,
 ) (*HotStore, error) {
 	if err := checkSecret(store, secret, chunkID); err != nil {
 		return nil, err
@@ -58,63 +49,18 @@ func open(
 	if err != nil {
 		return nil, err
 	}
-	index := newHotIndex(store, sealedKeys, maxKeys, maxLedgers)
-	rows, err := rowsFrom(
-		context.Background(), secret, ledgers, max(lastSealed+1, chunkID.FirstLedger()), openWorkers)
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range rows {
-		if err := index.apply(r.seq, r.keys); err != nil {
-			return nil, err
-		}
-	}
-	if err := index.unsealed.Wait(); err != nil {
-		return nil, err
-	}
-	return &HotStore{store: store, secret: secret, index: index}, nil
+	return &HotStore{
+		store: store, secret: secret, index: newHotIndex(store, sealedKeys, maxKeys, maxLedgers),
+		unsealed: max(lastSealed+1, chunkID.FirstLedger()),
+	}, nil
 }
 
-// rowsFrom rebuilds the rows of the ledgers from ledger from on, workers at a time.
-func rowsFrom(
-	ctx context.Context, secret [stores.SecretLen]byte, ledgers Ledgers, from uint32, workers int,
-) ([]row, error) {
-	last, ok, err := ledgers.LastSeq()
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		last = from - 1
-	}
-	if last+1 < from {
-		return nil, fmt.Errorf("txhash: corrupt chunk: sealed through ledger %d, the ledgers end at %d", from-1, last)
-	}
-	rows := make([]row, last+1-from)
-	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(workers)
-	for i := range rows {
-		g.Go(func() error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			seq := from + uint32(i) //nolint:gosec // at most a chunk's rows
-			err := ledgers.WithLedger(seq, func(raw []byte) error {
-				parts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
-				if err != nil {
-					return err
-				}
-				keys, _, err := encodeRow(secret, parts)
-				rows[i] = row{seq: seq, keys: keys}
-				return err
-			})
-			if err != nil {
-				return fmt.Errorf("txhash: rebuild the row of ledger %d: %w", seq, err)
-			}
-			return nil
-		})
-	}
-	return rows, g.Wait()
-}
+// Unsealed returns the first ledger whose row was not sealed when the store
+// opened.
+func (h *HotStore) Unsealed() uint32 { return h.unsealed }
+
+// Settle waits for the seal in flight, if any, and returns its outcome.
+func (h *HotStore) Settle() error { return h.index.unsealed.Wait() }
 
 // CFNames returns the CFs this facade owns, for the hotchunk opener to
 // register.
@@ -138,10 +84,11 @@ func CFOptions() map[string]rocksdb.CFOptions {
 // EncodeRow blinds a ledger's transaction hashes, a fee-bump's inner hash
 // included, into the ledger's row, and returns it with its key count.
 func (h *HotStore) EncodeRow(txParts []sdkingest.LedgerTxParts) ([]byte, int, error) {
-	return encodeRow(h.secret, txParts)
+	return EncodeRow(h.secret, txParts)
 }
 
-func encodeRow(secret [stores.SecretLen]byte, txParts []sdkingest.LedgerTxParts) ([]byte, int, error) {
+// EncodeRow is HotStore.EncodeRow under secret, for a chunk with no store open.
+func EncodeRow(secret [stores.SecretLen]byte, txParts []sdkingest.LedgerTxParts) ([]byte, int, error) {
 	keys := make([][ColdKeySize]byte, 0, len(txParts))
 	for i := range txParts {
 		keys = append(keys, RoutingKey(secret, txParts[i].Hash))

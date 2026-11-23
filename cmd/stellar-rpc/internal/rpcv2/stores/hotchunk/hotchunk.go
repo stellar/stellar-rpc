@@ -19,6 +19,8 @@ import (
 	"slices"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -216,7 +218,7 @@ func open(
 	}
 	catalogSecret := secrets.Secret()
 	indexID := uint32(secrets.TxHashIndexLayout().TxHashIndexID(chunkID))
-	tx, err := txhash.Open(store, chunkID, txhash.ColdIndexSecret(catalogSecret[:], indexID), db.ledger)
+	tx, err := txhash.Open(store, chunkID, txhash.ColdIndexSecret(catalogSecret[:], indexID))
 	if err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("compose txhash facade for chunk %s: %w", chunkID, err)
@@ -228,7 +230,55 @@ func open(
 		return nil, fmt.Errorf("compose events facade for chunk %s: %w", chunkID, err)
 	}
 	db.events = es
+	if err := db.replayUnsealed(); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("replay the unsealed ledgers of chunk %s: %w", chunkID, err)
+	}
 	return db, nil
+}
+
+// replayWorkers is how many ledgers an open derives at a time.
+const replayWorkers = 8
+
+// ledgersFrom returns fn's result for each hot ledger starting at from, in ledger
+// order. It walks workers ledgers at a time. fn must not keep lcmView or
+// txParts.
+func ledgersFrom[T any](
+	ctx context.Context, ledgers *ledger.HotStore, from uint32, workers int,
+	fn func(seq uint32, lcmView xdr.LedgerCloseMetaView, txParts []sdkingest.LedgerTxParts) (T, error),
+) ([]T, error) {
+	last, ok, err := ledgers.LastSeq()
+	if err != nil {
+		return nil, err
+	}
+	if !ok || last < from {
+		return nil, nil
+	}
+	out := make([]T, last+1-from)
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(workers)
+	for i := range out {
+		g.Go(func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			seq := from + uint32(i) //nolint:gosec // at most a chunk's ledgers
+			err := ledgers.WithLedger(seq, func(raw []byte) error {
+				lcmView := xdr.LedgerCloseMetaView(raw)
+				txParts, err := sdkingest.ExtractLedgerTxParts(lcmView)
+				if err != nil {
+					return err
+				}
+				out[i], err = fn(seq, lcmView, txParts)
+				return err
+			})
+			if err != nil {
+				return fmt.Errorf("ledger %d: %w", seq, err)
+			}
+			return nil
+		})
+	}
+	return out, g.Wait()
 }
 
 // ChunkID returns the chunk this DB is bound to.
@@ -492,6 +542,26 @@ func (d *DB) IngestLedger(
 		return rep, fmt.Errorf("apply ledger %d to chunk %s: %w", seq, d.chunkID, err)
 	}
 	return rep, nil
+}
+
+// replayUnsealed applies the rows of the ledgers the txhash facade had not
+// sealed when the DB closed, through the apply a commit is followed by.
+func (d *DB) replayUnsealed() error {
+	from := d.txhash.Unsealed()
+	rows, err := ledgersFrom(context.Background(), d.ledger, from, replayWorkers,
+		func(_ uint32, _ xdr.LedgerCloseMetaView, txParts []sdkingest.LedgerTxParts) ([]byte, error) {
+			row, _, err := d.txhash.EncodeRow(txParts)
+			return row, err
+		})
+	if err != nil {
+		return err
+	}
+	for i, row := range rows {
+		if err := d.txhash.Apply(from+uint32(i), row); err != nil { //nolint:gosec // at most a chunk's ledgers
+			return err
+		}
+	}
+	return d.txhash.Settle()
 }
 
 // hotLedgerStream is a ledgerbackend.LedgerStream over a ledger.HotStore, so the
