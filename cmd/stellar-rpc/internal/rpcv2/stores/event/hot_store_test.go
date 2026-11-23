@@ -643,7 +643,7 @@ func mustOffsets(t *testing.T, r Reader) *LedgerOffsets {
 // addPostings injects postings into the slab being filled, the way a term
 // hash collision would. No ingest may run beside it.
 func addPostings(h *HotStore, term Term, ids ...uint32) {
-	live := h.index.view.Load().live
+	live := h.index.unsealed.Load().Live
 	for _, id := range ids {
 		live.add(term.Key(h.index.secret), id)
 	}

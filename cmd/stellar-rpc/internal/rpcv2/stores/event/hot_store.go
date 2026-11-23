@@ -544,7 +544,7 @@ func replayUnsealed(chunkStore *rocksdb.Store, index *hotIndex, from, total uint
 	if err := index.add(from, &terms); err != nil {
 		return err
 	}
-	return index.settle()
+	return index.unsealed.Wait()
 }
 
 // verifyChunkConsistency cross-checks the three on-disk CFs before the

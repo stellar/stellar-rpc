@@ -57,7 +57,7 @@ type ColdIndexBuilder struct {
 	live    *hotSlab
 	// spare is the slab being spilled, or a free one once that spill is over.
 	spare   *hotSlab
-	spiller sealer // runs one spill at a time, in the background
+	spiller stores.Sealer // runs one spill at a time, in the background
 	written bool
 }
 
@@ -71,7 +71,7 @@ func NewColdIndexBuilder(chunkID chunk.ID, dirs ColdDirs, secret [stores.SecretL
 		secret:  secret,
 		runs:    coldRuns{dir: filepath.Join(dirs.Scratch, IndexRunsDirName(chunkID))},
 		live:    newHotSlab(0),
-		spiller: newSealer(),
+		spiller: stores.NewSealer(),
 	}
 }
 
@@ -101,7 +101,7 @@ func (b *ColdIndexBuilder) Add(eventID uint32, terms *Terms) error {
 
 // Close waits for the spill in flight, if any, and removes the runs.
 func (b *ColdIndexBuilder) Close() error {
-	_ = b.spiller.wait() // the build is abandoned, so a spill error doesn't matter
+	_ = b.spiller.Wait() // the build is abandoned, so a spill error doesn't matter
 	return b.runs.remove()
 }
 
@@ -130,7 +130,7 @@ func (b *ColdIndexBuilder) Write(ctx context.Context) (err error) {
 	if err := b.spill(); err != nil {
 		return err
 	}
-	if err := b.spiller.wait(); err != nil {
+	if err := b.spiller.Wait(); err != nil {
 		return err
 	}
 	b.live, b.spare = nil, nil // the slabs are all in the runs now
@@ -169,7 +169,7 @@ func (b *ColdIndexBuilder) spill() error {
 	if b.live.n == 0 {
 		return nil
 	}
-	if err := b.spiller.wait(); err != nil {
+	if err := b.spiller.Wait(); err != nil {
 		return err
 	}
 	full := b.live
@@ -177,7 +177,7 @@ func (b *ColdIndexBuilder) spill() error {
 		b.spare = newHotSlab(0)
 	}
 	b.live, b.spare = b.spare, full
-	b.spiller.start(func() error {
+	b.spiller.Start(func() error {
 		if err := b.runs.spill(full.slab, full.terms()); err != nil {
 			return fmt.Errorf("events: spill index slab %d: %w", full.slab, err)
 		}
