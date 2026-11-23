@@ -54,11 +54,17 @@ type CFOptions struct {
 	// right for a CF never probed for keys it may not hold.
 	BloomFilterBitsPerKey int
 
+	// RibbonFilter makes that filter a Ribbon filter: smaller, slower to build.
+	RibbonFilter bool
+
 	// CacheIndexAndFilterBlocks keeps each SST's index and filter blocks in
 	// the block cache instead of on the heap for as long as the file is
 	// open. For a CF that accumulates many files, it bounds their memory by
 	// the cache size.
 	CacheIndexAndFilterBlocks bool
+
+	// NoBlockCache keeps this CF out of the block cache, so it evicts no other CF's blocks.
+	NoBlockCache bool
 }
 
 // Tuning — DB-wide RocksDB knobs shared across every CF of one store. Zero
@@ -86,4 +92,13 @@ type Tuning struct {
 	// replay scales with this cap; graceful Close drains the
 	// memtable so this only bounds ungraceful shutdowns.
 	MaxTotalWalSizeMB int
+
+	// BytesPerSyncMB starts writeback of flush and compaction output
+	// every this many MB as it is written, so its dirty pages never
+	// pile up in front of a WAL fsync.
+	BytesPerSyncMB int
+
+	// WALBytesPerSyncMB does the same for the WAL, so a write's fsync
+	// finds most of the write already on its way to disk.
+	WALBytesPerSyncMB int
 }

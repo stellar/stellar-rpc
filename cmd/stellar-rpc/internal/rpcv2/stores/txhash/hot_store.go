@@ -75,6 +75,7 @@ func CFOptions() map[string]rocksdb.CFOptions {
 			Level0StopWritesTrigger:        999,
 			DisableAutoCompactions:         true,
 			BloomFilterBitsPerKey:          12,
+			RibbonFilter:                   true,
 			CacheIndexAndFilterBlocks:      true,
 		},
 	}

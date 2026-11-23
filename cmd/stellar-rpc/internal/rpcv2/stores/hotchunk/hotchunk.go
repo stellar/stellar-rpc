@@ -70,9 +70,7 @@ func dbTuning() rocksdb.Tuning {
 		MaxBackgroundJobs: 8,
 		MaxOpenFiles:      10_000,
 
-		// 512 MB block cache — txhash bloom-filter blocks are the hot
-		// working set; the cache needs to hold recently-touched bloom
-		// blocks at scale.
+		// One cache per hot DB, sized so the indexes' filter and index blocks fit its high-priority half.
 		BlockCacheMB: 512,
 
 		// 1 GB WAL cap. Graceful Close auto-Flushes (see
@@ -80,14 +78,20 @@ func dbTuning() rocksdb.Tuning {
 		// ungraceful-shutdown recovery (kernel panic, power loss, OOM
 		// kill).
 		MaxTotalWalSizeMB: 1024,
+
+		// Each ledger commit fsyncs the WAL; without writeback as they
+		// go, a memtable flush's dirty pages land in front of that
+		// fsync, and the commit waits for them.
+		BytesPerSyncMB:    1,
+		WALBytesPerSyncMB: 1,
 	}
 }
 
 // config builds the shared store's rocksdb.Config: the DB-wide dbTuning plus
-// the per-CF options merged from every facade — each CF keeps its
-// pre-unification standalone tuning; the ledgers CF rides on RocksDB defaults.
+// the per-CF options merged from every facade.
 func config(path string, logger *supportlog.Entry, readOnly, mustExist bool) rocksdb.Config {
-	perCF := event.CFOptions()
+	perCF := ledger.CFOptions()
+	maps.Copy(perCF, event.CFOptions())
 	maps.Copy(perCF, txhash.CFOptions())
 	return rocksdb.Config{
 		Path:           path,
