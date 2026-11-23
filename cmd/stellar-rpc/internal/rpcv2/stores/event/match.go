@@ -7,7 +7,7 @@ package event
 // Matches.
 //
 // Optimization shape: terms are deduped across filters and issued as one
-// batched Reader.LookupKeys per window stage, whose bitmaps the walk holds
+// batched Reader.LookupTerms per window stage, whose bitmaps the walk holds
 // for that stage; payload fetches stream in internal batches. The window is
 // materialized in stages of a few slabs each, in the walk's direction, the
 // next only if the page did not fill — so a query that stops after a page
@@ -73,56 +73,56 @@ func (f TopicCountFilter) matches(n int) bool {
 	return n >= f.Count
 }
 
-// termKeys returns the topic-count buckets whose union covers f. Every
+// terms returns the topic-count buckets whose union covers f. Every
 // count ValidateFilters admits has a bucket of its own, and an "at
 // least" union is closed by the overflow bucket, so the union never
 // holds an event f does not match.
-func (f TopicCountFilter) termKeys() []TermKey {
+func (f TopicCountFilter) terms() []Term {
 	if f.isWildcard() {
 		return nil
 	}
 	if f.Exact {
-		return []TermKey{TopicCountTermKey(f.Count)}
+		return []Term{TopicCountTerm(f.Count)}
 	}
-	return TopicCountTermKeysAtLeast(f.Count)
+	return TopicCountTermsAtLeast(f.Count)
 }
 
-// valueTermKeys returns one term per constrained value field
+// valueTerms returns one term per constrained value field
 // (contract ID, event type, topics): the single enumeration
 // termPlans and CountDistinctTerms share, so the two cannot drift
 // over which values a filter names. The topic-count buckets are not
 // value terms; termPlans adds them separately and the budget does
 // not count them.
-func (f *Filter) valueTermKeys() []TermKey {
-	var keys []TermKey
+func (f *Filter) valueTerms() []Term {
+	var terms []Term
 	if len(f.ContractID) > 0 {
-		keys = append(keys, ComputeTermKey(f.ContractID, FieldContractID))
+		terms = append(terms, NewTerm(FieldContractID, f.ContractID))
 	}
 	if f.EventType != nil {
-		keys = append(keys, EventTypeTermKey(*f.EventType))
+		terms = append(terms, EventTypeTerm(*f.EventType))
 	}
 	for tIdx, t := range f.Topics {
 		if len(t) == 0 {
 			continue
 		}
-		keys = append(keys, ComputeTermKey(t, topicField(tIdx)))
+		terms = append(terms, NewTerm(topicField(tIdx), t))
 	}
-	return keys
+	return terms
 }
 
 // termPlans returns the filter's plans, each an AND of terms. A topic-count
 // range becomes one plan per bucket, unless a constrained topic position
 // already implies the count; the post-filter enforces the count either way.
-func (f *Filter) termPlans() [][]TermKey {
-	values := f.valueTermKeys()
-	var buckets []TermKey
+func (f *Filter) termPlans() [][]Term {
+	values := f.valueTerms()
+	var buckets []Term
 	if !f.impliesTopicCount() {
-		buckets = f.TopicCount.termKeys()
+		buckets = f.TopicCount.terms()
 	}
 	if len(buckets) == 0 {
-		return [][]TermKey{values}
+		return [][]Term{values}
 	}
-	plans := make([][]TermKey, 0, len(buckets))
+	plans := make([][]Term, 0, len(buckets))
 	for _, bucket := range buckets {
 		plans = append(plans, append(slices.Clone(values), bucket))
 	}
@@ -186,7 +186,7 @@ func (r IDRange) check() error {
 	return nil
 }
 
-// Coverage is where a LookupKeys answer is exact: every bitmap on the
+// Coverage is where a LookupTerms answer is exact: every bitmap on the
 // IDRange, and bitmap i on every id too when Whole[i] is set, its term being
 // stored whole. A missing entry is not whole.
 type Coverage struct {
@@ -265,7 +265,7 @@ type Match struct {
 	Ordinal uint32
 }
 
-// termPlan is a plan's terms as slots in the LookupKeys result.
+// termPlan is a plan's terms as slots in the LookupTerms result.
 type termPlan []int
 
 // batchSizes returns the first and later fetch sizes. A positive hint is a
@@ -311,10 +311,10 @@ func stageRemainder(remaining, walked IDRange, descending bool) IDRange {
 	return IDRange{Start: walked.End, End: remaining.End}
 }
 
-// lookupStage is LookupKeys for one stage. Covering less than the stage would
+// lookupStage is LookupTerms for one stage. Covering less than the stage would
 // never advance the walk, so it is an error.
-func lookupStage(ctx context.Context, r Reader, keys []TermKey, stage IDRange) ([]*roaring.Bitmap, Coverage, error) {
-	got, covered, err := r.LookupKeys(ctx, keys, stage)
+func lookupStage(ctx context.Context, r Reader, terms []Term, stage IDRange) ([]*roaring.Bitmap, Coverage, error) {
+	got, covered, err := r.LookupTerms(ctx, terms, stage)
 	if err != nil {
 		return nil, Coverage{}, fmt.Errorf("events: query lookup: %w", err)
 	}
@@ -331,9 +331,9 @@ func lookupStage(ctx context.Context, r Reader, keys []TermKey, stage IDRange) (
 // bounds: for every plan, its sparsest whole term, or nil when it has none and
 // can match anywhere. bounds is never nil.
 func laterStages(
-	keys []TermKey, plans []termPlan, sources []*roaring.Bitmap, covered Coverage,
-) ([]TermKey, []int, []*roaring.Bitmap) {
-	read := make([]bool, len(keys))
+	terms []Term, plans []termPlan, sources []*roaring.Bitmap, covered Coverage,
+) ([]Term, []int, []*roaring.Bitmap) {
+	read := make([]bool, len(terms))
 	bounds := make([]*roaring.Bitmap, 0, len(plans))
 	for _, plan := range plans {
 		var sparsest *roaring.Bitmap
@@ -348,14 +348,14 @@ func laterStages(
 		}
 		bounds = append(bounds, sparsest)
 	}
-	var splitKeys []TermKey
+	var splitTerms []Term
 	var split []int
-	for i, k := range keys {
+	for i, t := range terms {
 		if read[i] {
-			splitKeys, split = append(splitKeys, k), append(split, i)
+			splitTerms, split = append(splitTerms, t), append(split, i)
 		}
 	}
-	return splitKeys, split, bounds
+	return splitTerms, split, bounds
 }
 
 // Matches yields the events in window matching filters, in
@@ -403,7 +403,7 @@ func Matches(
 		if window.isEmpty() {
 			return
 		}
-		plans, uniqueKeys, matchAll := planIndexTerms(filters)
+		plans, uniqueTerms, matchAll := planIndexTerms(filters)
 		// Match-all path: empty filter slice or any filter that asks the
 		// index for no terms. Serves without touching the index: the
 		// window is dense, so it streams Reader.FetchRange directly.
@@ -416,7 +416,7 @@ func Matches(
 		// stage always walks at least what it asked for, so it always shrinks.
 		remaining := window
 		stage := stageRequest(remaining, descending, firstStageSlabs)
-		sources, covered, err := lookupStage(ctx, r, uniqueKeys, stage)
+		sources, covered, err := lookupStage(ctx, r, uniqueTerms, stage)
 		if err != nil {
 			yield(Match{}, err)
 			return
@@ -430,7 +430,7 @@ func Matches(
 			return
 		}
 		// Set up once the walk goes past stage 1 (see laterStages).
-		var splitKeys []TermKey
+		var splitTerms []Term
 		var split []int
 		var bounds []*roaring.Bitmap
 		for {
@@ -451,7 +451,7 @@ func Matches(
 				return
 			}
 			if bounds == nil {
-				splitKeys, split, bounds = laterStages(uniqueKeys, plans, sources, covered)
+				splitTerms, split, bounds = laterStages(uniqueTerms, plans, sources, covered)
 			}
 			if remaining = remaining.narrow(bounds); remaining.isEmpty() {
 				return
@@ -463,7 +463,7 @@ func Matches(
 				sources[i] = nil
 			}
 			var got []*roaring.Bitmap
-			if got, covered, err = lookupStage(ctx, r, splitKeys, stage); err != nil {
+			if got, covered, err = lookupStage(ctx, r, splitTerms, stage); err != nil {
 				yield(Match{}, err)
 				return
 			}
@@ -500,22 +500,22 @@ func validateMatchCall(ctx context.Context, r Reader, filters []Filter, window I
 }
 
 // planIndexTerms returns every filter's plans, without repeats, as slots
-// into the unique keys. matchAll reports that some filter, or the empty
+// into the unique terms. matchAll reports that some filter, or the empty
 // slice, constrains nothing.
-func planIndexTerms(filters []Filter) ([]termPlan, []TermKey, bool) {
+func planIndexTerms(filters []Filter) ([]termPlan, []Term, bool) {
 	if len(filters) == 0 {
 		return nil, nil, true
 	}
-	var uniqueKeys []TermKey
+	var uniqueTerms []Term
 	plans := make([]termPlan, 0, len(filters))
 	for i := range filters {
-		for _, keys := range filters[i].termPlans() {
-			if len(keys) == 0 {
+		for _, terms := range filters[i].termPlans() {
+			if len(terms) == 0 {
 				return nil, nil, true
 			}
-			plan := make(termPlan, len(keys))
-			for j, key := range keys {
-				plan[j] = indexOfOrAddTerm(&uniqueKeys, key)
+			plan := make(termPlan, len(terms))
+			for j, t := range terms {
+				plan[j] = indexOfOrAddTerm(&uniqueTerms, t)
 			}
 			// Slots follow field order, so equal plans are equal slices.
 			dup := slices.ContainsFunc(plans, func(p termPlan) bool {
@@ -527,7 +527,7 @@ func planIndexTerms(filters []Filter) ([]termPlan, []TermKey, bool) {
 			plans = append(plans, plan)
 		}
 	}
-	return plans, uniqueKeys, false
+	return plans, uniqueTerms, false
 }
 
 // emitBatch fetches one batch of candidate ordinals, drops the bitmap-side
@@ -588,7 +588,7 @@ func ValidateFilters(filters []Filter) error {
 			if len(topic) == 0 {
 				continue
 			}
-			// The topic bytes are what ComputeTermKey hashes, so a filter
+			// The topic bytes are what a topic term holds, so a filter
 			// naming anything but one whole ScVal was never minted here.
 			// The length comparison rejects trailing bytes.
 			view := xdr.ScValView(topic)
@@ -623,26 +623,26 @@ func ValidateFilters(filters []Filter) error {
 // implementation detail of the engine's plans, not a value the
 // client named. Exported for the v2 handler's term-budget check. It
 // lives here, beside termPlans, so the budget and the engine's
-// lookups agree on what a value term is: TermKey over the store's
+// lookups agree on what a value term is: a field and the value's
 // canonical bytes.
 func CountDistinctTerms(filters []Filter) int {
-	unique := make(map[TermKey]struct{})
+	unique := make(map[Term]struct{})
 	for i := range filters {
-		for _, key := range filters[i].valueTermKeys() {
-			unique[key] = struct{}{}
+		for _, t := range filters[i].valueTerms() {
+			unique[t] = struct{}{}
 		}
 	}
 	return len(unique)
 }
 
-// indexOfOrAddTerm returns the index of key inside *keys, appending
+// indexOfOrAddTerm returns the index of t inside *terms, appending
 // it first if absent.
-func indexOfOrAddTerm(keys *[]TermKey, key TermKey) int {
-	if i := slices.Index(*keys, key); i >= 0 {
+func indexOfOrAddTerm(terms *[]Term, t Term) int {
+	if i := slices.Index(*terms, t); i >= 0 {
 		return i
 	}
-	*keys = append(*keys, key)
-	return len(*keys) - 1
+	*terms = append(*terms, t)
+	return len(*terms) - 1
 }
 
 // streamRange serves the match-all path: every ordinal in the window
@@ -704,14 +704,8 @@ func streamRange(
 	}
 }
 
-// postFilter is the collision-defense pass: TermKey is
-// xxh3_128(field || value), a non-cryptographic hash on
-// attacker-controllable topic values, so the bitmap index can in
-// principle return false-positive event IDs from a collision.
-// postFilter verifies each materialized event's raw field bytes
-// against the requested filter clauses and discards mismatches. The
-// hash becomes load-bearing only for narrowing efficiency, not for
-// result correctness.
+// postFilter drops events whose raw fields do not match, since the index can
+// return one through a fingerprint or key collision.
 //
 // Within a clause: AND across constrained fields. Across clauses: OR.
 // The match-all short-circuit upstream means this is only reached

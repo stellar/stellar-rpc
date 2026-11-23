@@ -59,6 +59,9 @@ func testEventsSecret() [stores.SecretLen]byte { return event.ColdIndexSecret(te
 // testEventsSecretBytes is testEventsSecret as a slice, for ingest.Config.EventsSecret.
 func testEventsSecretBytes() []byte { s := testEventsSecret(); return s[:] }
 
+// testCatalogSecret is testTxhashKey as the catalog secret hot DBs open with.
+var testCatalogSecret = [32]byte(testTxhashKey)
+
 // ───────────────────────── test metric sink ─────────────────────────
 
 type hotPhaseCall struct {
@@ -290,9 +293,9 @@ const eventTopic = "ingest_test"
 
 // marshalLCMWithEvent builds a V2 LCM carrying one transaction with one
 // operation-level contract event (topic=eventTopic). It returns the wire bytes,
-// the transaction hash (for txhash lookups), and the event's term key (for event
-// index lookups).
-func marshalLCMWithEvent(t *testing.T, seq uint32) ([]byte, [32]byte, event.TermKey) {
+// the transaction hash (for txhash lookups), and the event's first term (for
+// event index lookups).
+func marshalLCMWithEvent(t *testing.T, seq uint32) ([]byte, [32]byte, event.Term) {
 	t.Helper()
 	ev := buildContractEvent(eventTopic)
 	meta := xdr.TransactionMeta{
@@ -305,10 +308,10 @@ func marshalLCMWithEvent(t *testing.T, seq uint32) ([]byte, [32]byte, event.Term
 
 	evBytes, err := ev.MarshalBinary()
 	require.NoError(t, err)
-	keys, err := event.TermsForBytes(evBytes)
+	terms, err := event.TermsForBytes(evBytes)
 	require.NoError(t, err)
-	require.NotEmpty(t, keys)
-	return rawBytes, hash, keys[0]
+	require.NotEmpty(t, terms)
+	return rawBytes, hash, terms[0]
 }
 
 // buildContractEvent returns a contract ContractEvent with a single symbol
@@ -553,7 +556,7 @@ func TestEventsColdWriter_Readback(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ing.close()) }()
 
-	var term event.TermKey
+	var term event.Term
 	for _, seq := range []uint32{first, first + 1} {
 		raw, _, tk := marshalLCMWithEvent(t, seq)
 		term = tk
@@ -569,7 +572,7 @@ func TestEventsColdWriter_Readback(t *testing.T) {
 	cnt, err := cr.EventCount()
 	require.NoError(t, err)
 	require.Equal(t, uint32(2), cnt)
-	bms, _, err := cr.LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
+	bms, _, err := cr.LookupTerms(context.Background(), []event.Term{term}, termWindow)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	require.Equal(t, uint64(2), bms[0].GetCardinality())
@@ -625,7 +628,7 @@ func TestEventsColdWriter_V0KeepsOffsetsContiguous(t *testing.T) {
 	require.Equal(t, uint32(1), evEnd)
 
 	// And the event is queryable by its term.
-	bms, _, err := cr.LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
+	bms, _, err := cr.LookupTerms(context.Background(), []event.Term{term}, termWindow)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	require.Equal(t, uint64(1), bms[0].GetCardinality())
@@ -670,8 +673,8 @@ func TestWriteColdChunk_EventlessChunk_FullyReadable(t *testing.T) {
 	cnt, err := cr.EventCount()
 	require.NoError(t, err)
 	require.Zero(t, cnt)
-	anyKey := event.ComputeTermKey([]byte("any"), event.FieldContractID)
-	bms, _, lerr := cr.LookupKeys(context.Background(), []event.TermKey{anyKey}, termWindow)
+	anyTerm := event.NewTerm(event.FieldContractID, []byte("any"))
+	bms, _, lerr := cr.LookupTerms(context.Background(), []event.Term{anyTerm}, termWindow)
 	require.NoError(t, lerr)
 	require.Nil(t, bms[0], "a term with no matching events misses cleanly (nil bitmap)")
 
@@ -700,7 +703,7 @@ func TestColdChunk_Success(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cc.close()) }()
 
-	var term event.TermKey
+	var term event.Term
 	for _, seq := range []uint32{first, first + 1} {
 		raw, _, tk := marshalLCMWithEvent(t, seq)
 		term = tk
@@ -725,7 +728,7 @@ func TestColdChunk_Success(t *testing.T) {
 		chunkID, sameDirs(filepath.Join(coldDir, dataTypeEvents, chunkID.BucketID())), event.ColdReaderOptions{})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, ecr.Close()) }()
-	bms, _, err := ecr.LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
+	bms, _, err := ecr.LookupTerms(context.Background(), []event.Term{term}, termWindow)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), bms[0].GetCardinality())
 
@@ -996,8 +999,8 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	require.Equal(t, wantEntries, gotEntries, "cold .bin must hold every resolvable hash, sorted and keyed")
 
 	// Reference #2 — events: PayloadsFromLedgerEvents with chunk-relative IDs
-	// assigned in ingest (ascending-seq) order, mapped to their term keys.
-	wantTermIDs := map[event.TermKey][]uint32{}
+	// assigned in ingest (ascending-seq) order, mapped to their terms.
+	wantTermIDs := map[event.Term][]uint32{}
 	var nextID uint32
 	for _, seq := range sentinels {
 		view := xdr.LedgerCloseMetaView(raws[seq])
@@ -1008,10 +1011,10 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 		payloads, err := event.PayloadsFromLedgerEvents(txParts, seq, closedAt)
 		require.NoError(t, err)
 		for i := range payloads {
-			keys, kerr := event.TermsForBytes(payloads[i].ContractEventBytes)
+			terms, kerr := event.TermsForBytes(payloads[i].ContractEventBytes)
 			require.NoError(t, kerr)
-			for _, k := range keys {
-				wantTermIDs[k] = append(wantTermIDs[k], nextID)
+			for _, term := range terms {
+				wantTermIDs[term] = append(wantTermIDs[term], nextID)
 			}
 			nextID++
 		}
@@ -1027,11 +1030,11 @@ func TestWriteColdChunk_ByteIdentity_SharedWalk(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, nextID, cnt, "cold event count must match the reference payload count")
 
-	terms := make([]event.TermKey, 0, len(wantTermIDs))
+	terms := make([]event.Term, 0, len(wantTermIDs))
 	for k := range wantTermIDs {
 		terms = append(terms, k)
 	}
-	bms, _, err := ecr.LookupKeys(context.Background(), terms, termWindow)
+	bms, _, err := ecr.LookupTerms(context.Background(), terms, termWindow)
 	require.NoError(t, err)
 	for i, k := range terms {
 		require.NotNil(t, bms[i], "term %d present in reference must resolve", i)
@@ -1096,7 +1099,7 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 	logger := testLogger()
 
 	evSeqs := map[uint32]bool{first: true, first + 1: true}
-	var term event.TermKey
+	var term event.Term
 	gen := func(tt *testing.T, seq uint32) []byte {
 		if evSeqs[seq] {
 			raw, _, tk := marshalLCMWithEvent(tt, seq)
@@ -1119,7 +1122,7 @@ func TestWriteColdChunk_EventsCold_Readback(t *testing.T) {
 	cnt, err := cr.EventCount()
 	require.NoError(t, err)
 	require.Equal(t, uint32(len(evSeqs)), cnt)
-	bms, _, err := cr.LookupKeys(context.Background(), []event.TermKey{term}, termWindow)
+	bms, _, err := cr.LookupTerms(context.Background(), []event.Term{term}, termWindow)
 	require.NoError(t, err)
 	require.NotNil(t, bms[0])
 	require.Equal(t, uint64(len(evSeqs)), bms[0].GetCardinality())
@@ -1178,7 +1181,7 @@ func hotTestLogger() *supportlog.Entry {
 // TestHotService_FeedsFeeWindowsAfterCommit: a successfully committed ledger's
 // fee observations land in the injected windows.
 func TestHotService_FeedsFeeWindowsAfterCommit(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1200,7 +1203,7 @@ func TestHotService_FeedsFeeWindowsAfterCommit(t *testing.T) {
 // next-expected seq) contributes nothing to the windows, so its retry cannot
 // double-count.
 func TestHotService_RejectedLedgerFeedsNoFees(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1227,7 +1230,7 @@ func TestHotService_RejectedLedgerFeedsNoFees(t *testing.T) {
 // the ledger is durably committed, the windows stay unfed, and the loop's
 // caller sees the error (tip-only trusted input, mirroring extract failures).
 func TestHotService_FeeClassificationErrorFailsCommittedLedger(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1251,7 +1254,7 @@ func TestHotService_FeeClassificationErrorFailsCommittedLedger(t *testing.T) {
 // once, the write phases carry per-type volume (extract/commit/apply carry none),
 // and no phase carries an error.
 func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1274,11 +1277,52 @@ func TestHotService_EmitsEveryPhaseOnSuccess(t *testing.T) {
 	assert.False(t, hadErr, "success path carries no phase error")
 }
 
+// A failed apply reports every phase, the write phases with what landed and
+// the error on PhaseApply.
+func TestHotService_EmitsEveryPhaseOnFailedApply(t *testing.T) {
+	dir := t.TempDir()
+	db, err := hotchunk.Open(dir, chunk.ID(0), testCatalogSecret, hotTestLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	// A file where the events index wants its load directory makes every
+	// seal fail.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loading"), nil, 0o600))
+
+	sink := &testSink{}
+	svc := NewHotService(db, nil, sink)
+	first := chunk.ID(0).FirstLedger()
+	var contractID xdr.ContractId
+	contractID[0] = 0xab
+	events := func(n int) []xdr.ContractEvent {
+		evs := make([]xdr.ContractEvent, n)
+		for i := range evs {
+			evs[i] = rpcv2test.SymbolContractEvent(contractID, "x", "x")
+		}
+		return evs
+	}
+	// The first ledger fills index slab 0, whose seal fails; the second
+	// reaches the next slab boundary and learns of it.
+	_, err = svc.Ingest(first, xdr.LedgerCloseMetaView(rpcv2test.EventsLCMBytes(t, first, events(1<<16+1)...)))
+	require.NoError(t, err)
+	sink.hotPhases = nil
+	_, err = svc.Ingest(first+1, xdr.LedgerCloseMetaView(rpcv2test.EventsLCMBytes(t, first+1, events(1<<16)...)))
+	require.ErrorContains(t, err, "seal index slab 0")
+
+	require.Len(t, sink.hotPhases, int(hotchunk.NumPhases), "every phase emitted once")
+	items := sink.hotPhaseItems()
+	assert.Equal(t, 1, items[hotchunk.PhaseLedgers])
+	assert.Equal(t, 1, items[hotchunk.PhaseTxhash])
+	assert.Equal(t, 1<<16, items[hotchunk.PhaseEvents])
+	failed, hadErr := sink.hotPhaseErr()
+	require.True(t, hadErr)
+	assert.Equal(t, hotchunk.PhaseApply, failed)
+}
+
 // TestHotService_CommitErrorLandsOnCommitPhase asserts a commit failure (a closed
 // DB) surfaces the error on the commit phase — by construction, not by a
 // separately-maintained label — and emits no items on the failure path.
 func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
 	require.NoError(t, err)
 	require.NoError(t, db.Close()) // closed => the batch commit fails
 
@@ -1302,7 +1346,7 @@ func TestHotService_CommitErrorLandsOnCommitPhase(t *testing.T) {
 // failure lands by construction — and emits ONLY that phase (no batch was opened, so
 // no later phase ran).
 func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1326,7 +1370,7 @@ func TestHotService_ExtractFailureLandsOnExtractPhase(t *testing.T) {
 // Failed's zero value, a NON-zero Failed is the discriminator that proves the phase was
 // actually assigned rather than defaulted.
 func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -1353,7 +1397,7 @@ func TestHotService_EventsQueueFailureLandsOnEventsPhase(t *testing.T) {
 // that completed earlier phases carry theirs too. Uses the same out-of-order failure as
 // above, whose failed phase is the events queue.
 func TestHotService_FailedPhaseCarriesPartialDuration(t *testing.T) {
-	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), hotTestLogger())
+	db, err := hotchunk.Open(t.TempDir(), chunk.ID(0), testCatalogSecret, hotTestLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 

@@ -17,7 +17,7 @@ import (
 )
 
 // Closed-store lifecycle: HotStore and ColdReader read methods
-// (LookupKeys, FetchEvents, All, EventCount, Offsets) return
+// (LookupTerms, FetchEvents, All, EventCount, Offsets) return
 // stores.ErrStoreClosed after Close, per the stores
 // translation contract. ChunkID is the one exception — it returns
 // its constructor-supplied value unchanged after Close.
@@ -83,17 +83,20 @@ type Reader interface {
 	//   - ColdReader returns the lazily-decoded LedgerOffsets cached
 	//     on the reader; the same pointer is returned to every
 	//     caller. Both paths must treat the returned value as
-	//     read-only — mutation would corrupt either the live mirror
+	//     read-only — mutation would corrupt either the live offsets
 	//     (hot, indirectly via the view's backing slice) or every
 	//     other reader holding the cached pointer (cold).
 	//
 	// Returns (nil, stores.ErrStoreClosed) after Close.
 	Offsets() (*LedgerOffsets, error)
 
-	// LookupKeys returns bitmaps for each key, aligned positionally
-	// with the input slice (result[i] corresponds to keys[i]).
-	// result[i] is nil if keys[i] has no matching events in this
-	// chunk — a per-key miss is not an error.
+	// LookupTerms returns bitmaps for each term, aligned positionally
+	// with the input slice (result[i] corresponds to terms[i]). Each
+	// reader looks a term up by its key under the chunk's secret.
+	// result[i] is nil only when the reader knows terms[i] has no
+	// events anywhere in this chunk; otherwise it is a bitmap, empty
+	// included, that answers for the covered range. A per-term miss
+	// is not an error.
 	//
 	// window is the id range to answer for. The second result says where
 	// the answer is exact: every bitmap on its range, which contains
@@ -105,21 +108,15 @@ type Reader interface {
 	// single ReadItems pass, fanning out across the worker count
 	// configured via ColdReaderOptions.Concurrency. It reads a split term
 	// only in the slabs the window reaches, covers them, and marks the other
-	// terms whole. HotStore returns snapshots of the live mirror shared by
-	// all readers of a term; a dense term written since its last lookup is
-	// cloned once, by the first reader to look it up, and that clone is then
-	// shared, window or no window.
+	// terms whole. HotStore reads the slabs the window reaches, from memory or
+	// from its index column family, and covers them.
 	//
-	// Callers MUST treat returned bitmaps as read-only. Dense hot
-	// snapshots are shared with other readers; sparse hot terms
-	// return a fresh caller-owned bitmap per lookup; cold-path
-	// bitmaps are freshly unmarshaled and owned by the caller. See
-	// ConcurrentBitmaps.Get.
+	// Callers MUST treat returned bitmaps as read-only.
 	//
 	// ctx cancels in-flight I/O on the cold path (MPHF load,
 	// index.pack ReadAt); hot side checks ctx as a fast guard before
-	// touching the in-memory mirror.
-	LookupKeys(ctx context.Context, keys []TermKey, window IDRange) ([]*roaring.Bitmap, Coverage, error)
+	// touching the index.
+	LookupTerms(ctx context.Context, terms []Term, window IDRange) ([]*roaring.Bitmap, Coverage, error)
 
 	// FetchEvents decodes events for the supplied chunk-relative
 	// eventIDs and returns them positionally aligned with the input
@@ -135,7 +132,7 @@ type Reader interface {
 	// scattered-read batches, the hot path before each BatchMultiGet.
 	//
 	// A missing row is an error: every caller passes ids that name
-	// stored events (bitmap ids come from LookupKeys; the pager's
+	// stored events (bitmap ids come from LookupTerms; the pager's
 	// resume ordinal is bounds-checked against its ledger's ID range
 	// first), so a miss signals corruption or a writer/reader
 	// mismatch, not a normal not-found case.
