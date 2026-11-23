@@ -2,6 +2,7 @@ package rpcv2
 
 import (
 	"context"
+	"maps"
 	"math"
 	"slices"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/eventsapi"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/feewindow"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
@@ -39,7 +41,7 @@ type handlerParams struct {
 	feeWindows        *feewindow.FeeWindows
 	preflightGetter   methods.PreflightGetter
 	networkPassphrase string
-	retentionWindow   uint32
+	retention         geometry.Retention
 }
 
 // withRegistry returns p serving over registry, with the ledger and
@@ -99,6 +101,11 @@ func buildHandlerSpecs(cfg config.Config, p handlerParams) []jsonrpc.HandlerSpec
 				DefaultLimit:     deref(m.GetEvents.DefaultItemsPerResponse),
 				MaxResponseBytes: deref(cfg.Service.MaxResponseBytes),
 			}, p.logger),
+			VersionInfo: methods.VersionInfoReport{
+				Methods:   slices.Sorted(maps.Keys(limitsByMethod(m))),
+				Limits:    versionInfoLimits(cfg),
+				Retention: versionInfoRetention(p.retention),
+			},
 
 			// No DataStoreLedgerReader: getLedgers can fall back to a bulk
 			// datastore for ledgers below local retention, but the full-history
@@ -106,7 +113,7 @@ func buildHandlerSpecs(cfg config.Config, p handlerParams) []jsonrpc.HandlerSpec
 			NetworkPassphrase: p.networkPassphrase,
 			FriendbotURL:      m.GetNetwork.FriendbotURL,
 
-			RetentionWindow:         p.retentionWindow,
+			RetentionWindow:         p.retention.RetentionWindow(),
 			MaxHealthyLedgerLatency: deref(m.GetHealth.MaxHealthyLedgerLatency),
 
 			MaxLedgersLimit:          deref(m.GetLedgers.MaxItemsPerResponse),
@@ -117,19 +124,56 @@ func buildHandlerSpecs(cfg config.Config, p handlerParams) []jsonrpc.HandlerSpec
 		})
 	specs = append(specs, jsonrpc.HandlerSpec{
 		MethodName: protocol.QueryEventsMethodName,
-		Handler: eventsapi.NewQueryEventsHandler(eventsapi.QueryEventsLimits{
-			Limits: eventsapi.Limits{
-				MaxLimit:         deref(m.QueryEvents.MaxItemsPerResponse),
-				DefaultLimit:     deref(m.QueryEvents.DefaultItemsPerResponse),
-				MaxResponseBytes: deref(cfg.Service.MaxResponseBytes),
-			},
-			TermBudget: uint32(min(deref(m.QueryEvents.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
-		}, p.eventsMetrics, p.logger),
+		Handler:    eventsapi.NewQueryEventsHandler(queryEventsLimits(cfg), p.eventsMetrics, p.logger),
 	})
 	for i := range specs {
 		specs[i].Handler = wrapAdapterRequest(specs[i].Handler, p.registry)
 	}
 	return specs
+}
+
+// queryEventsLimits maps [service.methods.queryEvents] onto the handler's
+// limits. The handler and the limits getVersionInfo advertises both read it,
+// so the two cannot disagree.
+func queryEventsLimits(cfg config.Config) eventsapi.QueryEventsLimits {
+	m := cfg.Service.Methods.QueryEvents
+	return eventsapi.QueryEventsLimits{
+		Limits: eventsapi.Limits{
+			MaxLimit:         deref(m.MaxItemsPerResponse),
+			DefaultLimit:     deref(m.DefaultItemsPerResponse),
+			MaxResponseBytes: deref(cfg.Service.MaxResponseBytes),
+		},
+		TermBudget: uint32(min(deref(m.TermBudget), math.MaxUint32)), //nolint:gosec // min clamps it
+	}
+}
+
+// versionInfoRetention returns the retention getVersionInfo reports: every
+// ledger from the pinned earliest ledger when retention_chunks is 0, else the
+// window in ledgers.
+func versionInfoRetention(r geometry.Retention) *protocol.Retention {
+	if window := r.RetentionWindow(); window > 0 {
+		return &protocol.Retention{Keeps: protocol.RetentionLatest, Ledgers: window}
+	}
+	return &protocol.Retention{Keeps: protocol.RetentionAll, FromLedger: r.EarliestLedger()}
+}
+
+// versionInfoLimits returns the request limits getVersionInfo reports. It
+// reads the same config values as the handlers and the batch limit, so the
+// report cannot disagree with what the server enforces.
+func versionInfoLimits(cfg config.Config) *protocol.VersionInfoLimits {
+	m := cfg.Service.Methods
+	queryEvents := queryEventsLimits(cfg)
+	return &protocol.VersionInfoLimits{
+		MaxBatchSize:    deref(cfg.Service.MaxRequestBatchSize),
+		GetEvents:       &protocol.PageLimits{MaxLimit: deref(m.GetEvents.MaxItemsPerResponse)},
+		GetLedgers:      &protocol.PageLimits{MaxLimit: deref(m.GetLedgers.MaxItemsPerResponse)},
+		GetTransactions: &protocol.PageLimits{MaxLimit: deref(m.GetTransactions.MaxItemsPerResponse)},
+		QueryEvents: &protocol.QueryEventsLimits{
+			TermBudget: queryEvents.TermBudget,
+			MaxFilters: protocol.QueryEventsDefaultMaxFilters,
+			MaxLimit:   queryEvents.MaxLimit,
+		},
+	}
 }
 
 // readMethodNames are the methods ReadMethods serves: the ones that read only
