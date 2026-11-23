@@ -70,6 +70,9 @@ func validateForm(cfg config.Config) error {
 	if workers := deref(cfg.Backfill.Workers); workers < 1 {
 		return fmt.Errorf("workers must be >= 1 (got %d) — a zero pool deadlocks executePlan", workers)
 	}
+	if indexWorkers := deref(cfg.Backfill.IndexWorkers); indexWorkers < 1 {
+		return fmt.Errorf("index_workers must be >= 1 (got %d)", indexWorkers)
+	}
 	if maxRetries := deref(cfg.Backfill.MaxRetries); maxRetries < 0 {
 		return fmt.Errorf("max_retries must be >= 0 (got %d) — 0 means run once, no retry", maxRetries)
 	}

@@ -131,7 +131,7 @@ func TestProcessChunk_ProducesAllArtifactsAndFreezes(t *testing.T) {
 
 	// The .bin is readable as a sorted run (rule 5) — exercises the merged
 	// txhash cold writer's output via its reader.
-	entries := rpcv2test.ReadColdBin(t, layout.TxHashBinPath(chunkID))
+	entries := rpcv2test.ReadColdBin(t, layout.TxHashBinPath(chunkID), chunkID.FirstLedger())
 	require.Empty(t, entries, "zero-tx chunk yields an empty sorted .bin")
 
 	// The pack is a valid cold ledger pack covering the whole chunk.

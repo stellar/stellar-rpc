@@ -60,6 +60,8 @@ func (cfg ProcessConfig) validate() error {
 // catalog.ArtifactSet, so catalog needn't import ingest (the #824 split invariant).
 // For a txhash or events request it resolves the chunk's per-index secret from the
 // catalog (the same one the index build derives), so ingest keys stay consistent.
+// For txhash it also resolves the payload base, the first ledger of the chunk's
+// index window.
 func ingestConfigFor(s catalog.ArtifactSet, chunkID chunk.ID, cfg ProcessConfig) ingest.Config {
 	c := ingest.Config{
 		Ledgers: s.Has(geometry.KindLedgers),
@@ -69,9 +71,11 @@ func ingestConfigFor(s catalog.ArtifactSet, chunkID chunk.ID, cfg ProcessConfig)
 	if c.Txhash || c.Events {
 		catalogSecret := cfg.Catalog.Secret()
 		if c.Txhash {
-			indexID := uint32(cfg.Catalog.TxHashIndexLayout().TxHashIndexID(chunkID))
-			sec := txhash.ColdIndexSecret(catalogSecret[:], indexID)
+			txLayout := cfg.Catalog.TxHashIndexLayout()
+			indexID := txLayout.TxHashIndexID(chunkID)
+			sec := txhash.ColdIndexSecret(catalogSecret[:], uint32(indexID))
 			c.TxhashSecret = sec[:]
+			c.TxhashPayloadBase = txLayout.FirstChunk(indexID).FirstLedger()
 		}
 		if c.Events {
 			sec := event.ColdIndexSecret(catalogSecret[:], chunkID)
@@ -129,6 +133,7 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 	dirs := ingest.ColdDirs{
 		LedgerPack: layout.LedgerPackPath(chunkID),
 		TxhashBin:  layout.TxHashBinPath(chunkID),
+		TxhashRuns: layout.TxHashRunsDir(chunkID),
 		Events:     layout.EventsColdDirs(chunkID),
 	}
 	raw := src.RawLedgers(ctx, ledgerbackend.BoundedRange(chunkID.FirstLedger(), chunkID.LastLedger()))
