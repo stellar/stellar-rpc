@@ -162,7 +162,11 @@ func (x *hotIndex) add(startID uint32, t *ledgerTerms) error {
 	live := x.unsealed.Load().Live
 	var start uint32
 	for i, end := range t.ends {
-		id := startID + uint32(i) // bounded by IngestLedgerToBatch's overflow guard
+		id := startID + uint32(i)           // bounded by the store's overflow guard
+		if id>>indexSlabShift < live.slab { // sealed already: a replayed event
+			start = end
+			continue
+		}
 		if id>>indexSlabShift != live.slab {
 			next := func() *hotSlab { return newHotSlab(live.slab + 1) }
 			var err error

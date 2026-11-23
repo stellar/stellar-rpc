@@ -1,14 +1,12 @@
 // Package hotchunk implements decision (a): the per-chunk hot tier is ONE
-// RocksDB holding the union of every hot data type's CFs (ledger + 3 events +
-// txhash), and each ledger commits as ONE atomic synced WriteBatch
-// across ALL of them — so a ledger is fully present or fully absent, with a
-// SINGLE per-chunk last-committed ledger (max committed seq, from the ledgers CF's last key)
-// and no per-store frontiers / min-of-three. The three typed facades
-// (ledger/txhash/the event store HotStore) are composed over the shared store via
-// NewWithStore; the ledger and events write paths queue Puts into the one
-// shared batch, and the txhash facade keeps each ledger's row in memory. A
-// read-only open composes a ledgers-only view without the events and txhash
-// facades (see OpenReadOnly).
+// RocksDB holding every hot data type's CFs (ledger + 3 events + txhash).
+// Each ledger commits as ONE synced WriteBatch holding the ledger and its
+// event count, so there is a SINGLE per-chunk last-committed ledger (the
+// ledgers CF's last key). Everything else is derived from the ledger: the
+// txhash and events facades keep it in memory after the commit, seal it into
+// bulk-loaded files in the background, and rebuild what was not sealed from
+// the ledgers at open. A read-only open composes a ledgers-only view without
+// the events and txhash facades (see OpenReadOnly).
 package hotchunk
 
 import (
@@ -66,8 +64,9 @@ func ColumnFamilies() []string {
 // — the only pre-unification instance that set them.
 func dbTuning() rocksdb.Tuning {
 	return rocksdb.Tuning{
-		// Background-job budget for memtable flushes and the
-		// ledger/events compactions.
+		// Background-job budget for the flushes and compactions of the
+		// ledgers and events offsets CFs. The other CFs are bulk-loaded
+		// and have neither.
 		MaxBackgroundJobs: 8,
 		MaxOpenFiles:      10_000,
 
@@ -136,9 +135,8 @@ func OpenExisting(path string, chunkID chunk.ID, secrets SecretSource, logger *s
 // the events and txhash facades, because both read-only callers (freeze re-derives
 // the cold artifacts from raw LCMs via Source(); the startup refiner reads only
 // MaxCommittedSeq()) touch the ledgers CF alone and never the indexes. Composing
-// those facades would run their unconditional warmups — indexing the unsealed
-// events again plus the offsets rebuild, and rebuilding the txhash window from the
-// ledgers — discarded unread at Close (#834). The skip is enforced structurally: a read-only
+// those facades would replay the unsealed ledgers into them, discarded unread at
+// Close (#834). The skip is enforced structurally: a read-only
 // DB has neither facade, so Events() and Txhash() panic and IngestLedger errors
 // rather than serving a cold, unwarmed surface.
 func OpenReadOnly(path string, chunkID chunk.ID, secrets SecretSource, logger *supportlog.Entry) (*DB, error) {
@@ -209,10 +207,10 @@ func open(
 		ledger:  ledger.NewWithStore(store),
 	}
 	// A read-only open is a ledgers-only freeze/probe view (see OpenReadOnly): it
-	// never reads the indexes, so skip composing their facades and their
-	// unconditional warmup scans. Read-WRITE opens (ingestion) MUST warm — the
-	// write path assigns event IDs off the warmed offsets and extends the txhash
-	// window — so they always compose both.
+	// never reads the indexes, so skip composing their facades and the replay.
+	// Read-WRITE opens (ingestion) MUST warm: the write path assigns event IDs
+	// off the warmed offsets and extends the txhash window, so they always
+	// compose both.
 	if readOnly {
 		return db, nil
 	}
@@ -235,6 +233,16 @@ func open(
 		return nil, fmt.Errorf("replay the unsealed ledgers of chunk %s: %w", chunkID, err)
 	}
 	return db, nil
+}
+
+// derived is what the txhash and events facades keep of one ledger. Either
+// part is absent when the ledger was derived without it.
+type derived struct {
+	closeTime int64
+	txRow     []byte
+	txKeys    int
+	events    event.LedgerEvents
+	numEvents int
 }
 
 // replayWorkers is how many ledgers an open derives at a time.
@@ -347,15 +355,16 @@ func (d *DB) MaxCommittedSeq() (uint32, bool, error) {
 //     pre-batch, so every decode failure lands here by construction);
 //     HotService.Ingest folds the walk's own duration into this phase,
 //     keeping it "the walk + product reads";
-//   - PhaseLedgers/PhaseEvents: each facade's queue-into-batch step;
+//   - PhaseLedgers: compressing the ledger plus its Put;
+//   - PhaseEvents: deriving the ledger's terms and marshaling its events;
 //   - PhaseTxhash: building the ledger's txhash row, before the batch;
 //   - PhaseCommit: the RocksDB batch write (WAL append + fsync + memtable) = the
-//     whole Batch call minus the two queue steps: the fsync wait pprof can't see.
-//   - PhaseApply: the post-commit index/offsets apply (appending the ledger's
-//     txhash row and event postings in memory, and at a window or slab
-//     boundary waiting for the previous seal). It runs only after the batch
-//     is durable. It fails only when an index could not seal; the ledger is
-//     committed, and the next open indexes it again.
+//     whole Batch call minus the ledgers step: the fsync wait pprof can't see.
+//   - PhaseApply: the post-commit apply (appending the ledger's txhash row,
+//     events and postings in memory, and at a window or slab boundary
+//     waiting for the previous seal). It runs only after the batch is
+//     durable. It fails only when a seal failed; the ledger is committed,
+//     and the next open replays it.
 type Phase uint8
 
 const (
@@ -410,10 +419,9 @@ type LedgerReport struct {
 	CloseTime int64
 }
 
-// IngestLedger commits ONE ledger as a SINGLE atomic synced WriteBatch across all
-// hot CFs (decision (a)): queue ledgers and events rows into one BatchWriter,
-// commit once, and only then apply the txhash row and events index/offsets
-// updates in memory.
+// IngestLedger commits ONE ledger as a SINGLE synced WriteBatch (decision
+// (a)): the ledger and its event count. Only then does it apply the txhash
+// row and the ledger's events in memory.
 //
 // txParts is the caller's ExtractLedgerTxParts output for lcmView. The walk
 // lives one level up (HotService.Ingest) because its output feeds BOTH this
@@ -438,57 +446,15 @@ func (d *DB) IngestLedger(
 		return rep, fmt.Errorf("chunk %s: IngestLedger on a read-only (ledgers-only) hot DB", d.chunkID)
 	}
 
-	// Pre-extract anything that can fail BEFORE opening the batch, so a decode
-	// error rejects the ledger without a half-built batch.
-	//
-	// The caller's ONE TxProcessing walk (txParts) feeds BOTH hot data types:
-	// every product is a plain read over that slice — txhash builds its row
-	// from each element's Hash/InnerHash, and PayloadsFromLedgerEvents pulls
-	// the contract events off the already-located meta views and shapes them.
-	// One walk instead of one per product halves per-ledger extraction, and
-	// shaping the already-extracted slice (not re-walking) keeps the event-ID
-	// assignment order identical to a per-view shaping. The
-	// atomic batch below serializes only the commit; the product reads are
-	// independent and could run concurrently into the same batch if catch-up
-	// profiling ever demands it — sequential is right at live cadence.
-	// Every failure below stamps the failed phase's PARTIAL duration before
-	// returning — a phase that blocked and then failed is signal (mirrors
-	// RunBackfill's "reported even on failure"), so the error is never emitted with
-	// a zero-duration sample.
-	extractStart := time.Now()
-	closedAt, err := lcmView.LedgerCloseTime()
+	// Derive everything that can fail BEFORE opening the batch.
+	l, err := d.derive(seq, lcmView, txParts, true, true, &rep)
 	if err != nil {
-		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
-		rep.Failed = PhaseExtract
-		return rep, fmt.Errorf("ledger close time seq %d: %w", seq, err)
+		return rep, err
 	}
-	rep.CloseTime = closedAt
-	// A pre-Soroban ledger yields zero payloads, no error.
-	payloads, err := event.PayloadsFromLedgerEvents(txParts, seq, closedAt)
-	if err != nil {
-		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
-		rep.Failed = PhaseExtract
-		return rep, fmt.Errorf("shape events seq %d: %w", seq, err)
-	}
-	rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
+	rep.CloseTime = l.closeTime
 
-	ts := time.Now()
-	txRow, txKeys, err := d.txhash.EncodeRow(txParts)
-	rep.Phases[PhaseTxhash].Dur = time.Since(ts)
-	if err != nil {
-		rep.Failed = PhaseTxhash
-		return rep, fmt.Errorf("txhash row seq %d: %w", seq, err)
-	}
-
-	// The events facade queues inside the batch callback (so a rejected ledger
-	// never leaves committed rows) and returns its post-commit apply hook. Under
-	// decision (a) resume is always MaxCommittedSeq+1, so seq is never a duplicate
-	// and the hook is always non-nil on success. Each queue step is timed
-	// individually; Commit (below) is the whole Batch minus those: the RocksDB
-	// write (WAL append + fsync + memtable).
-	var applyEvents func() error
-	// A batch error not attributed to a specific queue step below is the commit
-	// itself (the RocksDB write); a queue-step error narrows Failed to its phase.
+	// A batch error not attributed to a queue step below is the commit itself
+	// (the RocksDB write).
 	failed := PhaseCommit
 	batchStart := time.Now()
 	cerr := d.store.Batch(func(b *rocksdb.BatchWriter) error {
@@ -500,24 +466,17 @@ func (d *DB) IngestLedger(
 		}
 		rep.Phases[PhaseLedgers].Dur = time.Since(ls)
 
-		es := time.Now()
-		apply, err := d.events.IngestLedgerToBatch(b, seq, payloads)
-		if err != nil {
-			rep.Phases[PhaseEvents].Dur = time.Since(es)
+		if err := d.events.AddToBatch(b, l.events); err != nil {
 			failed = PhaseEvents
 			return fmt.Errorf("queue events seq %d: %w", seq, err)
 		}
-		rep.Phases[PhaseEvents].Dur = time.Since(es)
-		applyEvents = apply
 		return nil
 	})
-	// Commit is the whole Batch call minus the two queue steps: the RocksDB write
-	// (WAL append + fsync + memtable). Stamp it whether the batch succeeded or the
-	// commit itself failed (all queue steps ran) — a slow-then-failed commit is
-	// signal. A queue-step failure already stamped its own partial above.
+	// Commit is the whole Batch call minus the ledgers step: the RocksDB write
+	// (WAL append + fsync + memtable). Stamp it whether the batch succeeded or
+	// the commit itself failed: a slow-then-failed commit is signal.
 	if failed == PhaseCommit {
-		rep.Phases[PhaseCommit].Dur = time.Since(batchStart) -
-			rep.Phases[PhaseLedgers].Dur - rep.Phases[PhaseEvents].Dur
+		rep.Phases[PhaseCommit].Dur = time.Since(batchStart) - rep.Phases[PhaseLedgers].Dur
 	}
 	if cerr != nil {
 		rep.Failed = failed
@@ -526,15 +485,15 @@ func (d *DB) IngestLedger(
 
 	// The batch is durable: the write phases now carry what landed.
 	rep.Phases[PhaseLedgers].Items = 1
-	rep.Phases[PhaseTxhash].Items = txKeys
-	rep.Phases[PhaseEvents].Items = len(payloads)
+	rep.Phases[PhaseTxhash].Items = l.txKeys
+	rep.Phases[PhaseEvents].Items = l.numEvents
 
-	// Now and only now apply the txhash window and events index/offsets updates.
+	// Now and only now apply the txhash row and the events.
 	// PhaseApply times this post-commit work, which otherwise lands in no phase.
 	applyStart := time.Now()
-	err = d.txhash.Apply(seq, txRow)
+	err = d.txhash.Apply(seq, l.txRow)
 	if err == nil {
-		err = applyEvents()
+		err = d.events.Apply(l.events)
 	}
 	rep.Phases[PhaseApply].Dur = time.Since(applyStart)
 	if err != nil {
@@ -544,24 +503,87 @@ func (d *DB) IngestLedger(
 	return rep, nil
 }
 
-// replayUnsealed applies the rows of the ledgers the txhash facade had not
-// sealed when the DB closed, through the apply a commit is followed by.
+// derive builds what the facades keep of ledger seq from the walk of its
+// transactions, and times its steps into rep. A replay asks only for the
+// parts that were not sealed.
+func (d *DB) derive(
+	seq uint32, lcmView xdr.LedgerCloseMetaView, txParts []sdkingest.LedgerTxParts, tx, events bool,
+	rep *LedgerReport,
+) (derived, error) {
+	var out derived
+	var err error
+	extractStart := time.Now()
+	if out.closeTime, err = lcmView.LedgerCloseTime(); err != nil {
+		rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
+		rep.Failed = PhaseExtract
+		return out, fmt.Errorf("ledger close time seq %d: %w", seq, err)
+	}
+	var payloads []event.Payload
+	if events {
+		if payloads, err = event.PayloadsFromLedgerEvents(txParts, seq, out.closeTime); err != nil {
+			rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
+			rep.Failed = PhaseExtract
+			return out, fmt.Errorf("shape events seq %d: %w", seq, err)
+		}
+	}
+	rep.Phases[PhaseExtract].Dur = time.Since(extractStart)
+
+	if tx {
+		ts := time.Now()
+		out.txRow, out.txKeys, err = d.txhash.EncodeRow(txParts)
+		rep.Phases[PhaseTxhash].Dur = time.Since(ts)
+		if err != nil {
+			rep.Failed = PhaseTxhash
+			return out, fmt.Errorf("txhash row seq %d: %w", seq, err)
+		}
+	}
+	if events {
+		es := time.Now()
+		out.events, err = d.events.Derive(seq, payloads)
+		rep.Phases[PhaseEvents].Dur = time.Since(es)
+		if err != nil {
+			rep.Failed = PhaseEvents
+			return out, fmt.Errorf("derive events seq %d: %w", seq, err)
+		}
+		out.numEvents = len(payloads)
+	}
+	return out, nil
+}
+
+// replayUnsealed applies the ledgers the facades had not sealed when the DB
+// closed: each is walked once, and each facade gets the ledgers from its own
+// first unsealed one on, through the apply that follows a commit.
 func (d *DB) replayUnsealed() error {
-	from := d.txhash.Unsealed()
-	rows, err := ledgersFrom(context.Background(), d.ledger, from, replayWorkers,
-		func(_ uint32, _ xdr.LedgerCloseMetaView, txParts []sdkingest.LedgerTxParts) ([]byte, error) {
-			row, _, err := d.txhash.EncodeRow(txParts)
-			return row, err
+	txFrom, eventsFrom := d.txhash.Unsealed(), d.events.Unsealed()
+	from := min(txFrom, eventsFrom)
+	ledgers, err := ledgersFrom(context.Background(), d.ledger, from, replayWorkers,
+		func(seq uint32, lcmView xdr.LedgerCloseMetaView, txParts []sdkingest.LedgerTxParts) (derived, error) {
+			var rep LedgerReport
+			return d.derive(seq, lcmView, txParts, seq >= txFrom, seq >= eventsFrom, &rep)
 		})
 	if err != nil {
 		return err
 	}
-	for i, row := range rows {
-		if err := d.txhash.Apply(from+uint32(i), row); err != nil { //nolint:gosec // at most a chunk's ledgers
-			return err
+	if end := from + uint32(len(ledgers)); end < txFrom { //nolint:gosec // at most a chunk's ledgers
+		return fmt.Errorf("corrupt chunk: tx hashes sealed through ledger %d, the ledgers end at %d", txFrom-1, end-1)
+	}
+	for i, l := range ledgers {
+		seq := from + uint32(i)
+		if seq >= txFrom {
+			if err := d.txhash.Apply(seq, l.txRow); err != nil {
+				return err
+			}
+		}
+		if seq >= eventsFrom {
+			if err := d.events.Replay(l.events); err != nil {
+				return err
+			}
 		}
 	}
-	return d.txhash.Settle()
+	if err := d.txhash.Settle(); err != nil {
+		return err
+	}
+	return d.events.Replayed()
 }
 
 // hotLedgerStream is a ledgerbackend.LedgerStream over a ledger.HotStore, so the

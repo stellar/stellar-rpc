@@ -9,7 +9,7 @@ It keeps two tiers of data. **Hot** data is the most recent ledgers near the net
 The daemon does three things:
 
 - **Backfills on startup.** Before it serves anything, it runs backfill as a subroutine to bring what's on disk in line with the current retention window. It pulls every chunk inside that window that isn't already frozen from a configured bulk source: an object-store lake read through BSB (the Buffered Storage Backend) when one is configured, otherwise captive core replaying from the history archives. It skips the partial chunk still forming at the tip; hot-DB ingestion fills that one once it starts. This single mechanism covers a first-ever start, gaps left by downtime, and gaps opened by widening retention.
-- **Ingests** live ledgers from `CaptiveStellarCore` into one hot RocksDB per chunk — ledgers, transaction hashes, and events as column families. Each ledger's rows are written in one atomic batch; the events term index is the exception: it is built in memory one slab of 65,536 event ids at a time and loaded into its column family as one sorted file when the slab is full.
+- **Ingests** live ledgers from `CaptiveStellarCore` into one hot RocksDB per chunk — ledgers, transaction hashes, and events as column families. Each ledger and its event count are written in one atomic batch. The tx-hash rows, the event payloads and the events term index are derived from the ledger: they are held in memory and loaded into their column families as sorted files, one full window or slab at a time.
 - **Freezes** completed chunks to immutable files, **rebuilds** the current tx-hash index from its frozen inputs on every chunk boundary, and **prunes** superseded and past-retention artifacts. All run in a background lifecycle goroutine.
 
 ---
@@ -211,7 +211,7 @@ During ingestion the daemon maintains **one hot RocksDB per chunk** at `{storage
 | `txhash` | the sealed windows of the ledgers' tx-hash routing keys, routing key → seq | `getTransaction` for the live chunk |
 | events CFs | live events (schema per the events doc) | `getEvents` for the live chunk |
 
-CFs share the instance's WAL, so each ledger commits as **one atomic WriteBatch** across the ledgers, events data and events offsets CFs. The events index CF and the `txhash` CF are not in the batch: a full slab or window is loaded into them as one sorted file, and what is not yet loaded is rebuilt when the DB is opened, from the events data CF and from the ledgers. Per-CF options keep tuning independent (the events CFs carry their own settings). The DB is created when ingestion enters the chunk. It is discarded whole once every cold artifact derived from the chunk is durable **and** the rolling index covers the chunk. It keeps serving tx lookups across the brief freeze-to-coverage interval; freeze, rebuild, and discard all chain within one lifecycle run.
+CFs share the instance's WAL, and each ledger commits as **one atomic WriteBatch** holding the ledger and its event count (the ledgers and events offsets CFs). Everything else is derived from the ledger. The events data CF, the events index CF and the `txhash` CF are not in the batch, the WAL or a memtable: a full window or slab is loaded into them as one sorted file that is never compacted, and what is not yet loaded is held in memory. When the DB is opened, the ledgers whose derived data was not loaded are replayed once, eight at a time, for the events and the tx-hash rows together. Per-CF options keep tuning independent (the events CFs carry their own settings). The DB is created when ingestion enters the chunk. It is discarded whole once every cold artifact derived from the chunk is durable **and** the rolling index covers the chunk. It keeps serving tx lookups across the brief freeze-to-coverage interval; freeze, rebuild, and discard all chain within one lifecycle run.
 
 ### Catalog keys
 
@@ -742,12 +742,13 @@ func runIngestionLoop(ctx context.Context, cat Catalog, core LedgerBackend, hotD
 			return err
 		}
 
-		// One atomic synced batch across all CFs, so a ledger is fully present or
-		// absent; it is the only per-ledger durability boundary.
+		// One atomic synced batch, so a ledger is fully present or absent; it is
+		// the only per-ledger durability boundary.
 		batch := hotDB.NewBatch()
 		putLedger(batch, lcm)
-		putEvents(batch, lcm)
+		putEventCount(batch, lcm)
 		batch.Commit( /*sync=*/ true)
+		applyInMemory(hotDB, lcm) // tx-hash row, events and their terms; sealed in the background
 
 		if seq == chunkLastLedger(chunkID(seq)) {
 			// Close this chunk and open the next before notifying, so the lifecycle
@@ -932,7 +933,7 @@ func sweepIndexKey(cat Catalog, key IndexKey) error {
 
 Two writer goroutines and read-only readers. The catalog partitions their domains at the **live chunk** — the highest chunk with a `hot:chunk` key:
 
-- **Ingestion** owns the live chunk. It is the writer of its hot DB: it commits each ledger's batch and seals the events index one slab at a time in the background. It also creates each `hot:chunk` key (via `openHotDBForChunk` at the boundary). Any read-write open of a hot DB can also seal a slab that a crash left unsealed.
+- **Ingestion** owns the live chunk. It is the writer of its hot DB: it commits each ledger's batch and seals the event data, the events index and the tx-hash rows in the background, one window or slab at a time. It also creates each `hot:chunk` key (via `openHotDBForChunk` at the boundary). Any read-write open of a hot DB can also seal a slab that a crash left unsealed.
 - **The lifecycle** owns everything below it: handed-off hot DBs (freeze + discard), all `chunk:*` and `index:*` keys, and the deletion side of `hot:chunk` keys.
 
 Their two links are the boundary notification, which hands over each completed chunk, and the gate. The handoff is by write ordering — ingestion stops committing to the chunk and opens the next (moving the partition) *before* notifying — so the lifecycle never freezes a chunk ingestion still commits to, though a seal started by the chunk's last ledgers can still land during the freeze. Both write the catalog at the same time but never the same key (RocksDB handles concurrent writes safely). And because the chunk ids ingestion hands over only increase, a chunk completing while a lifecycle run is already in progress just bumps the starting point of the *next* run — it can't disturb the one underway. Readers hold their own read-only handles and resolve files through keys, so writer activity never races them.
@@ -1000,7 +1001,7 @@ Convergence rests on three properties shared by the resolver and the scans — e
 Properties we rely on the underlying storage to provide:
 
 - **Sync WAL.** All catalog puts and deletes that the invariants depend on use RocksDB's `WriteOptions.sync = true`, which fsyncs the WAL before the write returns. Multi-key commits — the index commit batch, the sweeps' key-delete batches — are single atomic synced WriteBatches: all-or-nothing across keys.
-- **Per-ledger durability.** The chunk hot DB's synced WriteBatch (atomic across every CF the batch writes; the events index CF is loaded per slab outside the WAL and is re-derived from the events data CF on open) is the sole per-ledger durability boundary; the last committed ledger is derived from it. Per-artifact: the per-chunk files **and the directory entries naming them** are fsynced before the key flips to `"frozen"`, and an index coverage's `.idx` (and the directory entries naming it, including a just-created window dir's own entry) is fsynced before the commit batch freezes its key.
+- **Per-ledger durability.** The chunk hot DB's synced WriteBatch (the ledger and its event count; the events data, events index and `txhash` CFs are loaded outside the WAL and re-derived from the ledgers on open) is the sole per-ledger durability boundary; the last committed ledger is derived from it. Per-artifact: the per-chunk files **and the directory entries naming them** are fsynced before the key flips to `"frozen"`, and an index coverage's `.idx` (and the directory entries naming it, including a just-created window dir's own entry) is fsynced before the commit batch freezes its key.
 - **Read-side WAL recovery.** A read-only open of a hot DB recovers the synced write-ahead log, so everything the last synced batch committed is visible to a reader — the freeze's completeness check and the startup derivation both depend on this, not just on the write side of the sync-WAL guarantee.
 - **Deterministic, idempotent writes.** Re-applying any write from the same source produces byte-identical state: tx-hash entries are keyed on consensus-fixed transaction hashes (deterministic from any backend), and the streamhash index is byte-identical from byte-identical sorted inputs. Ledger bytes are deterministic per source: a lake serves the LCM bytes it stores, but captive-core replay is not guaranteed byte-stable across core versions — byte-level comparisons must use the same source and version.
 - **Monotonic progress.** Within a process run, ingestion only moves forward: each synced batch extends the last, and the last-complete-chunk it hands the lifecycle climbs with it (strictly increasing chunk ids). Across a crash, the startup derivation equals exactly the durable state — the pre-crash value, or a hair above it (a batch that committed in the instant before the crash). It lands *below* the pre-crash value only when state was demoted or lost: surgical recovery shrinks the derivation's inputs by demoting them. For example, demoting hot state to `"transient"` rewinds the derivation to the durable cold boundary; demoting a finished window's index on a daemon interrupted during its first backfill (no hot DBs to anchor the derivation) can drop it below that window until backfill rebuilds the index — re-deriving the untainted chunks from their on-disk `.pack`s and re-fetching only the tainted ones.
