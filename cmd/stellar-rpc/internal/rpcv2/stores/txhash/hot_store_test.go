@@ -3,7 +3,6 @@ package txhash
 import (
 	"bytes"
 	"crypto/rand"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -46,26 +45,36 @@ func openTestRocks(t *testing.T, path string) *rocksdb.Store {
 // testLedgers stands in for the chunk's hot ledger store.
 type testLedgers map[uint32][]byte
 
-func (l testLedgers) LastSeq() (uint32, bool, error) {
-	if len(l) == 0 {
-		return 0, false, nil
+// rowsFrom returns the rows of the ledgers from from on, as the store's
+// caller derives them.
+func (l testLedgers) rowsFrom(from uint32) ([][]byte, error) {
+	var rows [][]byte
+	for seq := from; l[seq] != nil; seq++ {
+		parts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(l[seq]))
+		if err != nil {
+			return nil, err
+		}
+		row, _, err := EncodeRow(hotSecret, parts)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
 	}
-	return slices.Max(slices.Collect(maps.Keys(l))), true, nil
+	return rows, nil
 }
 
-func (l testLedgers) WithLedger(seq uint32, fn func(raw []byte) error) error {
-	raw, ok := l[seq]
-	if !ok {
-		return stores.ErrNotFound
-	}
-	return fn(raw)
-}
-
-// openTiny composes a store whose windows seal at 10 keys or 4 ledgers.
+// openTiny composes a store whose windows seal at 10 keys or 4 ledgers, and
+// applies the unsealed rows again from ledgers.
 func openTiny(t *testing.T, store *rocksdb.Store, ledgers testLedgers) *HotStore {
 	t.Helper()
-	h, err := open(store, chunk.ID(0), hotSecret, ledgers, 10, 4)
+	h, err := open(store, chunk.ID(0), hotSecret, 10, 4)
 	require.NoError(t, err)
+	rows, err := ledgers.rowsFrom(h.Unsealed())
+	require.NoError(t, err)
+	for i, row := range rows {
+		require.NoError(t, h.Apply(h.Unsealed()+uint32(i), row))
+	}
+	require.NoError(t, h.Settle())
 	return h
 }
 
@@ -113,7 +122,7 @@ func requireFound(t *testing.T, h *HotStore, want map[[32]byte]uint32) {
 
 func sealedThrough(t *testing.T, h *HotStore) uint32 {
 	t.Helper()
-	require.NoError(t, h.index.unsealed.Wait())
+	require.NoError(t, h.Settle())
 	last, _, err := readMarker(h.store)
 	require.NoError(t, err)
 	return last
@@ -201,7 +210,7 @@ func TestHotStore_FailedSealIsRetriedByTheNextOpen(t *testing.T) {
 		require.NoError(t, err)
 		want[hashes[0]] = first + i
 	}
-	require.Error(t, h.index.unsealed.Wait())
+	require.Error(t, h.Settle())
 	requireFound(t, h, want)
 
 	hashes, err := commitLedger(t, h, ledgers, first+5, 1)
@@ -218,19 +227,12 @@ func TestHotStore_FailedSealIsRetriedByTheNextOpen(t *testing.T) {
 func TestHotStore_RefusesAnotherSecret(t *testing.T) {
 	path := t.TempDir()
 	store := openTestRocks(t, path)
-	_, err := Open(store, chunk.ID(0), hotSecret, testLedgers{})
+	_, err := Open(store, chunk.ID(0), hotSecret)
 	require.NoError(t, err)
-	_, err = Open(store, chunk.ID(0), [stores.SecretLen]byte{8}, testLedgers{})
+	_, err = Open(store, chunk.ID(0), [stores.SecretLen]byte{8})
 	require.ErrorContains(t, err, "not blinded with this secret")
-	_, err = Open(store, chunk.ID(0), hotSecret, testLedgers{})
+	_, err = Open(store, chunk.ID(0), hotSecret)
 	require.NoError(t, err)
-}
-
-func TestHotStore_OpenRefusesAMissingLedger(t *testing.T) {
-	first := chunk.ID(0).FirstLedger()
-	raw, _ := buildLedgerRaw(t, first, 0)
-	_, err := Open(openTestRocks(t, t.TempDir()), chunk.ID(0), hotSecret, testLedgers{first: raw, first + 2: raw})
-	require.ErrorIs(t, err, stores.ErrNotFound)
 }
 
 // Lookups racing the writer and its seals find every hash committed before

@@ -352,7 +352,7 @@ func TestTxReader_MadeUpHashSharingAHotPrefixIsAMiss(t *testing.T) {
 	// A made-up hash sharing a real one's first 16 bytes must miss.
 	hotSeq := chunk.ID(10).FirstLedger()
 	fl := buildLedgers(t, []uint32{hotSeq}, 3)
-	hot, err := Open(openTestRocks(t, t.TempDir()), chunk.ID(10), hotSecret, testLedgers{})
+	hot, err := Open(openTestRocks(t, t.TempDir()), chunk.ID(10), hotSecret)
 	require.NoError(t, err)
 	require.NoError(t, commit(t, hot, hotSeq, slices.Collect(maps.Keys(fl.byHash))))
 	reader, err := NewTxReader([]HashIndex{hot}, nil, fl.src, network.TestNetworkPassphrase)
@@ -413,7 +413,7 @@ func TestTxReader_ExactSourceUnavailableLedgerErrors(t *testing.T) {
 func TestTxReader_HotAndColdFederation(t *testing.T) {
 	hotSeq := chunk.ID(10).FirstLedger()
 	flHot := buildLedgers(t, []uint32{hotSeq}, 1)
-	hotStore, err := Open(openTestRocks(t, t.TempDir()), chunk.ID(10), hotSecret, testLedgers{})
+	hotStore, err := Open(openTestRocks(t, t.TempDir()), chunk.ID(10), hotSecret)
 	require.NoError(t, err)
 	require.NoError(t, commit(t, hotStore, hotSeq, slices.Collect(maps.Keys(flHot.byHash))))
 
