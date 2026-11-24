@@ -2,6 +2,8 @@ module github.com/stellar/stellar-rpc
 
 go 1.26.0
 
+toolchain go1.26.11
+
 require (
 	github.com/Masterminds/squirrel v1.5.4
 	github.com/RoaringBitmap/roaring/v2 v2.26.0

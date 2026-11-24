@@ -1,10 +1,6 @@
 name: 'Setup the Go environment'
 description: 'Installs go, libzstd, librocksdb, and restores/saves the build/module cache'
 inputs:
-  go-version:
-    description: 'Go toolchain version to install'
-    required: false
-    default: '1.26'
   go-arch:
     description: 'Target Go architecture (used for native lib cache keys when cross-compiling)'
     required: false
@@ -111,9 +107,11 @@ runs:
         echo "CGO_LDFLAGS=-L$HOME/.zstd/lib -L$HOME/.rocksdb/lib" >> "$GITHUB_ENV"
 
     - name: Set up Go
+      id: setup-go
       uses: actions/setup-go@v6
       with:
-        go-version: ${{ inputs.go-version }}
+        # Every build uses the Go version in go.mod's toolchain line.
+        go-version-file: go.mod
         # unfortunately we cannot use the provided caching because it uses the
         # same cache for all workflows/jobs, leading to undesired cache clashes,
         # causing uncached test runs etc ...
@@ -142,7 +140,7 @@ runs:
     # KEY_PREFIX must uniquely identify the specific instance of a job executing.
     - shell: bash
       run: |
-        echo 'KEY_PREFIX=${{ github.workflow }}-${{ github.job }}-${{ runner.os }}-${{ inputs.go-version }}-matrix(${{ join(matrix.*,'|') }})' >> $GITHUB_OUTPUT
+        echo 'KEY_PREFIX=${{ github.workflow }}-${{ github.job }}-${{ runner.os }}-${{ steps.setup-go.outputs.go-version }}-matrix(${{ join(matrix.*,'|') }})' >> $GITHUB_OUTPUT
         echo "GOCACHE=$(go env GOCACHE)" >> $GITHUB_OUTPUT
         echo "GOMODCACHE=$(go env GOMODCACHE)" >> $GITHUB_OUTPUT
         echo SUDO='sudo' >> $GITHUB_OUTPUT
