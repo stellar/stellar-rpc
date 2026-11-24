@@ -1,0 +1,39 @@
+name: govulncheck
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    # Pinned to the Build matrix image so the cgo libs build the same and share its cache.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # Loading the packages runs cgo, which needs the RocksDB and zstd headers
+      # this installs. It does not need the Rust libraries.
+      - uses: ./.github/actions/setup-go
+        with:
+          internal-go-modules-client-id: ${{ secrets.INTERNAL_GO_MODULES_GH_APP_CLIENT_ID }}
+          internal-go-modules-private-key: ${{ secrets.INTERNAL_GO_MODULES_GH_APP_PRIVATE_KEY }}
+      - uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
+        env:
+          # The setup above exported GOTOOLCHAIN=local, and with it setup-go
+          # reads the go line of go.mod instead of the toolchain line.
+          GOTOOLCHAIN: auto
+        with:
+          # Empty, because the default (stable) takes precedence over go-version-file.
+          go-version-input: ''
+          go-version-file: go.mod
+          # The setup above restored the module cache.
+          cache: false
+          repo-checkout: false
+          go-package: ./...
