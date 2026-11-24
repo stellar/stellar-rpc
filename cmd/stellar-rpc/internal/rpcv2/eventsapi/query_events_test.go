@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/creachadair/jrpc2"
@@ -364,6 +365,29 @@ func TestQueryEvents_WithoutAViewIsAnError(t *testing.T) {
 	require.ErrorAs(t, err, &jerr)
 	assert.Equal(t, jrpc2.InternalError, jerr.Code,
 		"a missing view is a server fault, not a client error")
+}
+
+// queryEvents serves a request at the API's filter cap and rejects one over it.
+// A cap above the cursor codec's would fail the request at the cap as
+// cursor_malformed.
+func TestQueryEvents_FilterCap(t *testing.T) {
+	ctx, first := seedView(t)
+	filters := slices.Repeat([]protocol.QueryEventsFilter{{EventType: protocol.EventTypeContract}},
+		int(protocol.QueryEventsDefaultMaxFilters)+1)
+
+	_, err := queryEvents(ctx, testLimits(), nil, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		MinLedger: first,
+		Filters:   filters[:protocol.QueryEventsDefaultMaxFilters],
+	})
+	require.NoError(t, err, "a request at the cap is served")
+
+	_, err = queryEvents(ctx, testLimits(), nil, rpcv2test.SilentLogger(), &protocol.QueryEventsRequest{
+		MinLedger: first,
+		Filters:   filters,
+	})
+	require.Error(t, err)
+	requireErrorData(t, err, protocol.ErrorReasonInvalidParams, nil)
+	assert.Contains(t, err.Error(), fmt.Sprintf("1 to %d filters", protocol.QueryEventsDefaultMaxFilters))
 }
 
 func TestQueryEvents_LimitOverTheOperatorCapIsRejected(t *testing.T) {

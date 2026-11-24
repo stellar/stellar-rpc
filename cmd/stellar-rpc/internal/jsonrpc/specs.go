@@ -35,6 +35,10 @@ type HandlerDeps struct {
 	// #774 wires its event store) and the shared table only mounts it.
 	GetEventsHandler jrpc2.Handler
 
+	// VersionInfo is what getVersionInfo reports about the deployment. The
+	// zero value reports nothing.
+	VersionInfo methods.VersionInfoReport
+
 	// DataStoreLedgerReader is getLedgers' bulk fallback for ledgers below
 	// local retention. nil means no fallback: the handler serves everything
 	// from LedgerReader.
@@ -129,7 +133,7 @@ func BuildHandlerSpecs(deps HandlerDeps) []HandlerSpec {
 		spec(protocol.GetNetworkMethodName,
 			methods.NewGetNetworkHandler(deps.NetworkPassphrase, deps.FriendbotURL, deps.LedgerReader)),
 		spec(protocol.GetVersionInfoMethodName,
-			methods.NewGetVersionInfoHandler(deps.Logger, deps.LedgerReader, deps.Daemon)),
+			methods.NewGetVersionInfoHandler(deps.Logger, deps.LedgerReader, deps.Daemon, deps.VersionInfo)),
 		spec(protocol.GetLatestLedgerMethodName,
 			methods.NewGetLatestLedgerHandler(deps.LedgerReader)),
 		spec(protocol.GetLedgersMethodName,

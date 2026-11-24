@@ -98,7 +98,7 @@ func TestEventScopeBounds(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.NoError(t, tc.req.Valid(protocol.QueryEventsDefaultMaxFilters))
+			require.NoError(t, tc.req.Valid(protocol.QueryEventsDefaultMaxFilters, protocol.QueryEventsMaxLimit))
 
 			got, err := eventScope(&tc.req, testOldest, latest)
 			require.NoError(t, err)
@@ -113,7 +113,7 @@ func TestEventScopeBounds(t *testing.T) {
 // range instead. It serves once the chain reaches minLedger.
 func TestEventScopeDescendingMinAboveLatest(t *testing.T) {
 	req := protocol.QueryEventsRequest{MinLedger: 5001, Order: protocol.OrderDescending}
-	require.NoError(t, req.Valid(protocol.QueryEventsDefaultMaxFilters))
+	require.NoError(t, req.Valid(protocol.QueryEventsDefaultMaxFilters, protocol.QueryEventsMaxLimit))
 
 	_, err := eventScope(&req, testOldest, 5000)
 	var outOfRange *query.RangeError
@@ -132,7 +132,7 @@ func TestEventScopeBelowGenesisMaxIsNotRaised(t *testing.T) {
 	req := protocol.QueryEventsRequest{
 		MinLedger: 1, MaxLedger: 1, Order: protocol.OrderDescending,
 	}
-	require.NoError(t, req.Valid(protocol.QueryEventsDefaultMaxFilters))
+	require.NoError(t, req.Valid(protocol.QueryEventsDefaultMaxFilters, protocol.QueryEventsMaxLimit))
 
 	scope, err := eventScope(&req, testOldest, 5000)
 	require.NoError(t, err)
@@ -144,7 +144,7 @@ func TestEventScopeBelowGenesisMaxIsNotRaised(t *testing.T) {
 // A node whose tip is below genesis can serve nothing yet.
 func TestEventScopeDescendingOnANodeBelowGenesis(t *testing.T) {
 	req := protocol.QueryEventsRequest{Order: protocol.OrderDescending}
-	require.NoError(t, req.Valid(protocol.QueryEventsDefaultMaxFilters))
+	require.NoError(t, req.Valid(protocol.QueryEventsDefaultMaxFilters, protocol.QueryEventsMaxLimit))
 
 	_, err := eventScope(&req, testOldest, 1)
 	var outOfRange *query.RangeError
@@ -157,7 +157,7 @@ func TestEventScopeDescendingExplicitMaxAboveLatest(t *testing.T) {
 	req := protocol.QueryEventsRequest{
 		MinLedger: 5001, MaxLedger: 6000, Order: protocol.OrderDescending,
 	}
-	require.NoError(t, req.Valid(protocol.QueryEventsDefaultMaxFilters))
+	require.NoError(t, req.Valid(protocol.QueryEventsDefaultMaxFilters, protocol.QueryEventsMaxLimit))
 
 	scope, err := eventScope(&req, testOldest, 5000)
 	require.NoError(t, err)
@@ -176,7 +176,7 @@ func TestEventScopeFilters(t *testing.T) {
 			{ContractID: testContractStrkey(t, 0xAB), Topic1: requestTopic(t, mint)},
 		},
 	}
-	require.NoError(t, req.Valid(protocol.QueryEventsDefaultMaxFilters))
+	require.NoError(t, req.Valid(protocol.QueryEventsDefaultMaxFilters, protocol.QueryEventsMaxLimit))
 
 	scope, err := eventScope(&req, testOldest, 9000)
 	require.NoError(t, err)
