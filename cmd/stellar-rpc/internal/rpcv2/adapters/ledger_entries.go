@@ -50,7 +50,7 @@ const (
 // after the ledger but not in the stored range at or before it is unknowable
 // unless the node holds history from genesis, where it did not exist yet.
 //
-//nolint:cyclop,funlen // one pass over the keys' cases
+//nolint:cyclop // one pass over the keys' cases
 func (g *historicalEntryGetter) GetLedgerEntries(
 	ctx context.Context, keys []xdr.LedgerKeyView,
 ) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
@@ -63,97 +63,24 @@ func (g *historicalEntryGetter) GetLedgerEntries(
 			ledgerentries.ErrUnavailable, g.ledger, view.OldestLedger())
 	}
 
-	// all is the data keys, then the TTL keys of the soroban ones.
-	all := make([][]byte, len(keys))
-	ttlOf := make([]int, len(keys)) // index in all of key i's TTL key, -1 for none
-	temporary := make([]bool, len(keys))
-	for i, k := range keys {
-		all[i] = []byte(k)
-		ttlOf[i] = -1
+	all, ttlOf, temporary, err := expandKeys(keys)
+	if err != nil {
+		return nil, 0, err
 	}
-	for i, k := range keys {
-		var key xdr.LedgerKey
-		if err := key.UnmarshalBinary(k); err != nil {
-			return nil, 0, err
-		}
-		switch key.Type {
-		case xdr.LedgerEntryTypeContractData, xdr.LedgerEntryTypeContractCode:
-			ttlOf[i] = len(all)
-			all = append(all, ttlKey(k))
-			temporary[i] = key.Type == xdr.LedgerEntryTypeContractData &&
-				key.ContractData.Durability == xdr.ContractDataDurabilityTemporary
-		default:
-		}
-	}
-
 	last, err := view.LastEntryChanges(ctx, g.passphrase, all, g.ledger)
 	if err != nil {
 		return nil, 0, err
 	}
-	var unresolved [][]byte
-	var unresolvedAt []int
-	for i, l := range last {
-		if !l.Found {
-			unresolved = append(unresolved, all[i])
-			unresolvedAt = append(unresolvedAt, i)
-		}
-	}
-	changedAfter := make([]bool, len(all))
-	if len(unresolved) > 0 {
-		after, err := view.EntriesChangedAfter(ctx, unresolved, g.ledger)
-		if err != nil {
-			return nil, 0, err
-		}
-		for j, i := range unresolvedAt {
-			changedAfter[i] = after[j]
-		}
+	changedAfter, err := g.changedAfter(ctx, view, all, last)
+	if err != nil {
+		return nil, 0, err
 	}
 	fullHistory := view.OldestLedger() == chunk.FirstLedgerSeq
+	settle := func(i int) keyState { return settleKey(last[i], changedAfter[i], fullHistory) }
 
-	settle := func(i int) keyState {
-		l := last[i]
-		switch {
-		case !l.Found && !changedAfter[i]:
-			return stateCurrent
-		case !l.Found && fullHistory:
-			return stateAbsent
-		case !l.Found:
-			return stateUnknown
-		case l.Evicted && l.Entry != nil:
-			return stateArchived
-		case l.Entry == nil && !l.Evicted:
-			return stateAbsent
-		case l.Entry == nil:
-			// Evicted with its value below the floor (or temporary and gone).
-			if fullHistory {
-				return stateAbsent
-			}
-			return stateUnknown
-		default:
-			return statePresent
-		}
-	}
-
-	// Keys that read the current state, data keys or their TTLs, share one
-	// stellar-core read keyed by the data key (core reports the TTL with it).
-	var coreKeys []xdr.LedgerKeyView
-	needsCore := map[int]bool{}
-	for i := range keys {
-		ds := settle(i)
-		if ds == stateCurrent || (ttlOf[i] >= 0 && ds == statePresent && settle(ttlOf[i]) == stateCurrent) {
-			needsCore[i] = true
-			coreKeys = append(coreKeys, keys[i])
-		}
-	}
-	current := map[string]ledgerentries.LedgerKeyAndEntry{}
-	if len(coreKeys) > 0 {
-		entries, _, err := g.latest.GetLedgerEntries(ctx, coreKeys)
-		if err != nil {
-			return nil, 0, err
-		}
-		for _, e := range entries {
-			current[string(e.Key)] = e
-		}
+	current, err := g.readCurrent(ctx, keys, ttlOf, settle)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	var out []ledgerentries.LedgerKeyAndEntry
@@ -186,6 +113,114 @@ func (g *historicalEntryGetter) GetLedgerEntries(
 		out = append(out, res)
 	}
 	return out, g.ledger, nil
+}
+
+// readCurrent reads from stellar-core the keys that read the current state,
+// data keys or their TTLs, in one read keyed by the data key (core reports the
+// TTL with it). It returns the entries by key.
+func (g *historicalEntryGetter) readCurrent(
+	ctx context.Context, keys []xdr.LedgerKeyView, ttlOf []int, settle func(int) keyState,
+) (map[string]ledgerentries.LedgerKeyAndEntry, error) {
+	var coreKeys []xdr.LedgerKeyView
+	for i := range keys {
+		ds := settle(i)
+		if ds == stateCurrent || (ttlOf[i] >= 0 && ds == statePresent && settle(ttlOf[i]) == stateCurrent) {
+			coreKeys = append(coreKeys, keys[i])
+		}
+	}
+	current := map[string]ledgerentries.LedgerKeyAndEntry{}
+	if len(coreKeys) == 0 {
+		return current, nil
+	}
+	entries, _, err := g.latest.GetLedgerEntries(ctx, coreKeys)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		current[string(e.Key)] = e
+	}
+	return current, nil
+}
+
+// expandKeys returns all, the data keys then the TTL keys of the soroban ones;
+// ttlOf, the index in all of each key's TTL key, -1 for none; and temporary,
+// whether each key is temporary contract data.
+func expandKeys(keys []xdr.LedgerKeyView) ([][]byte, []int, []bool, error) {
+	all := make([][]byte, 0, 2*len(keys))
+	ttlOf := make([]int, len(keys))
+	temporary := make([]bool, len(keys))
+	for i, k := range keys {
+		all = append(all, []byte(k))
+		ttlOf[i] = -1
+	}
+	for i, k := range keys {
+		var key xdr.LedgerKey
+		if err := key.UnmarshalBinary(k); err != nil {
+			return nil, nil, nil, err
+		}
+		switch key.Type {
+		case xdr.LedgerEntryTypeContractData, xdr.LedgerEntryTypeContractCode:
+			ttlOf[i] = len(all)
+			all = append(all, ttlKey(k))
+			temporary[i] = key.Type == xdr.LedgerEntryTypeContractData &&
+				key.ContractData.Durability == xdr.ContractDataDurabilityTemporary
+		default:
+		}
+	}
+	return all, ttlOf, temporary, nil
+}
+
+// changedAfter reports, for each key the index walk did not find, whether a
+// ledger after g.ledger changed it.
+func (g *historicalEntryGetter) changedAfter(
+	ctx context.Context, view *query.ReadView, all [][]byte, last []query.LastEntryChange,
+) ([]bool, error) {
+	var unresolved [][]byte
+	var unresolvedAt []int
+	for i, l := range last {
+		if !l.Found {
+			unresolved = append(unresolved, all[i])
+			unresolvedAt = append(unresolvedAt, i)
+		}
+	}
+	changedAfter := make([]bool, len(all))
+	if len(unresolved) == 0 {
+		return changedAfter, nil
+	}
+	after, err := view.EntriesChangedAfter(ctx, unresolved, g.ledger)
+	if err != nil {
+		return nil, err
+	}
+	for j, i := range unresolvedAt {
+		changedAfter[i] = after[j]
+	}
+	return changedAfter, nil
+}
+
+// settleKey is a key's state at the ledger from its last change at or before
+// it, whether a later ledger changed it, and whether the node holds history
+// from genesis.
+func settleKey(l query.LastEntryChange, changedAfter, fullHistory bool) keyState {
+	switch {
+	case !l.Found && !changedAfter:
+		return stateCurrent
+	case !l.Found && fullHistory:
+		return stateAbsent
+	case !l.Found:
+		return stateUnknown
+	case l.Evicted && l.Entry != nil:
+		return stateArchived
+	case l.Entry == nil && !l.Evicted:
+		return stateAbsent
+	case l.Entry == nil:
+		// Evicted with its value below the floor (or temporary and gone).
+		if fullHistory {
+			return stateAbsent
+		}
+		return stateUnknown
+	default:
+		return statePresent
+	}
 }
 
 // liveUntil returns a soroban entry's live-until ledger at g.ledger. ok is

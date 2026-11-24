@@ -143,7 +143,8 @@ func freezeChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID, fixtures map[ui
 	secret := cat.Secret()
 	sec := entrychange.ColdIndexSecret(secret[:], c)
 	layout := cat.Layout()
-	require.NoError(t, ingest.WriteColdChunk(context.Background(), rpcv2test.SilentLogger(), c, iter.Seq2[[]byte, error](raw),
+	require.NoError(t, ingest.WriteColdChunk(context.Background(), rpcv2test.SilentLogger(), c,
+		iter.Seq2[[]byte, error](raw),
 		ingest.ColdDirs{LedgerPack: layout.LedgerPackPath(c), EntryChanges: layout.EntryChangesBucketDir(c)},
 		nil, ingest.Config{Ledgers: true, EntryChanges: true, EntryChangesSecret: sec[:]}))
 	require.NoError(t, cat.FlipChunkFrozen(c, geometry.KindLedgers, geometry.KindEntryChanges))
@@ -152,7 +153,9 @@ func freezeChunk(t *testing.T, cat *catalog.Catalog, c chunk.ID, fixtures map[ui
 // coreAt is a stand-in for stellar-core's current state.
 type coreAt map[string]ledgerentries.LedgerKeyAndEntry
 
-func (c coreAt) GetLedgerEntries(_ context.Context, keys []xdr.LedgerKeyView) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
+func (c coreAt) GetLedgerEntries(
+	_ context.Context, keys []xdr.LedgerKeyView,
+) ([]ledgerentries.LedgerKeyAndEntry, uint32, error) {
 	var out []ledgerentries.LedgerKeyAndEntry
 	for _, k := range keys {
 		if e, ok := c[string(k)]; ok {

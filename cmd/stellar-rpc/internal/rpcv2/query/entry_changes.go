@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/RoaringBitmap/roaring/v2"
+
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"

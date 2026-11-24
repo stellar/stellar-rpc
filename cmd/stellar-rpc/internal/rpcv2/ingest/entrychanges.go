@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -52,7 +53,7 @@ func (e *entryChangesCold) write(seq uint32, lcmView xdr.LedgerCloseMetaView) er
 
 func (e *entryChangesCold) finalize(ctx context.Context) error {
 	if e.failed {
-		return fmt.Errorf("entry changes cold writer: finalize after failed write")
+		return errors.New("entry changes cold writer: finalize after failed write")
 	}
 	if err := e.writer.Finish(ctx); err != nil {
 		return fmt.Errorf("entry changes index: %w", err)

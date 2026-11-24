@@ -27,6 +27,7 @@ const getLedgerEntriesMaxKeys = 200
 // GetLedgerEntriesRequest is protocol.GetLedgerEntriesRequest with an optional ledger.
 type GetLedgerEntriesRequest struct {
 	protocol.GetLedgerEntriesRequest
+
 	// Ledger, when set, reads the entries as they were after this ledger closed.
 	// Zero reads them at the latest ledger.
 	Ledger uint32 `json:"ledger,omitempty"`

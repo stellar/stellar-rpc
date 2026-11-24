@@ -405,8 +405,6 @@ func (c *ColdReader) LookupKeys(
 
 // lookupIndexKeys is LookupKeys over one opened index pair, shared by
 // ColdReader and ColdIndexReader. label names the index in errors.
-//
-//nolint:cyclop // resolve, read and assemble in one pass
 func lookupIndexKeys(
 	ctx context.Context, label string, index *stores.PackReader, mphf *mphf, layout indexLayout,
 	keys []TermKey, window IDRange,

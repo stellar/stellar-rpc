@@ -60,7 +60,8 @@ func NewLayout(root string) Layout {
 // config dependency; the config package's NewLayoutFromPaths adapts a Paths
 // to this so prepared roots and data location can never disagree.
 func NewLayoutFromRoots(
-	catalogRoot, hotRoot, ledgersRoot, eventsRoot, eventsIndexRoot, entryChangesRoot, txhashRawRoot, txhashIndexRoot string,
+	catalogRoot, hotRoot, ledgersRoot, eventsRoot, eventsIndexRoot, entryChangesRoot,
+	txhashRawRoot, txhashIndexRoot string,
 ) Layout {
 	return Layout{
 		catalogRoot:      catalogRoot,

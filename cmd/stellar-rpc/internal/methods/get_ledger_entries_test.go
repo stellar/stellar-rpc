@@ -207,6 +207,7 @@ func TestGetLedgerEntriesAtLedger(t *testing.T) {
 // ledgerAtGetter is a getter that reports reading at ledger.
 type ledgerAtGetter struct {
 	mapLedgerEntryGetter
+
 	ledger uint32
 }
 
