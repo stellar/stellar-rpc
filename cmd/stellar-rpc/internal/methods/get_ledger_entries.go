@@ -3,6 +3,7 @@ package methods
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -23,26 +24,61 @@ var ErrLedgerTTLEntriesCannotBeQueriedDirectly = "ledger ttl entries cannot be q
 
 const getLedgerEntriesMaxKeys = 200
 
+// GetLedgerEntriesRequest is protocol.GetLedgerEntriesRequest with an optional ledger.
+type GetLedgerEntriesRequest struct {
+	protocol.GetLedgerEntriesRequest
+
+	// Ledger, when set, reads the entries as they were after this ledger closed.
+	// Zero reads them at the latest ledger.
+	Ledger uint32 `json:"ledger,omitempty"`
+}
+
 // NewGetLedgerEntriesHandler returns a JSON RPC handler which retrieves ledger entries from Stellar Core.
+//
+// historicalGetterAt, when set, serves requests with a ledger: it is given the
+// latest-ledger getter and returns the getter for a ledger. Only rpcv2 sets it;
+// without it a request with a ledger fails with invalid params.
 func NewGetLedgerEntriesHandler(
 	logger *log.Entry,
 	coreClient host.FastCoreClient,
 	latestLedgerReader store.LedgerReader,
 	maxResponseBytes uint,
+	historicalGetterAt func(latest ledgerentries.LedgerEntryGetter) func(ledger uint32) ledgerentries.LedgerEntryGetter,
 ) jrpc2.Handler {
-	getter := ledgerentries.NewLedgerEntryGetter(coreClient, latestLedgerReader)
-	return newGetLedgerEntriesHandlerFromGetter(logger, getter, ByteLimit(maxResponseBytes))
+	latestGetter := ledgerentries.NewLedgerEntryGetter(coreClient, latestLedgerReader)
+	var getterAt func(ledger uint32) ledgerentries.LedgerEntryGetter
+	if historicalGetterAt != nil {
+		getterAt = historicalGetterAt(latestGetter)
+	}
+	getLatestLedger := func(ctx context.Context) (uint32, error) {
+		return latestLedgerReader.GetLatestLedgerSequence(ctx)
+	}
+	return newGetLedgerEntriesHandlerFromGetter(logger, latestGetter, getterAt, getLatestLedger,
+		ByteLimit(maxResponseBytes))
 }
 
+// newGetLedgerEntriesHandlerFromGetter reads entries with latestGetter, or
+// with getterAt(ledger) for a request with a ledger. A nil getterAt rejects
+// requests with a ledger.
 func newGetLedgerEntriesHandlerFromGetter(
-	logger *log.Entry, getter ledgerentries.LedgerEntryGetter, maxResponseBytes int,
+	logger *log.Entry,
+	latestGetter ledgerentries.LedgerEntryGetter,
+	getterAt func(ledger uint32) ledgerentries.LedgerEntryGetter,
+	getLatestLedger func(ctx context.Context) (uint32, error),
+	maxResponseBytes int,
 ) jrpc2.Handler {
-	return NewHandler(func(ctx context.Context, request protocol.GetLedgerEntriesRequest,
+	return NewHandler(func(ctx context.Context, request GetLedgerEntriesRequest,
 	) (protocol.GetLedgerEntriesResponse, error) {
 		if err := protocol.IsValidFormat(request.Format); err != nil {
 			return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
 				Code:    jrpc2.InvalidParams,
 				Message: err.Error(),
+			}
+		}
+		if request.Ledger != 0 && getterAt == nil {
+			return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
+				Code:    jrpc2.InvalidParams,
+				Message: "ledger is only supported by rpcv2",
 			}
 		}
 
@@ -74,7 +110,39 @@ func newGetLedgerEntriesHandlerFromGetter(
 			ledgerKeys = append(ledgerKeys, ledgerKey)
 		}
 
-		ledgerKeysAndEntries, latestLedger, err := getter.GetLedgerEntries(ctx, ledgerKeys)
+		var latestLedger uint32
+		if request.Ledger != 0 {
+			var err error
+			latestLedger, err = getLatestLedger(ctx)
+			if err != nil {
+				return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
+					Code:    jrpc2.InternalError,
+					Message: fmt.Sprintf("could not get latest ledger: %v", err),
+				}
+			}
+			// A read pinned past the latest ledger would wait for it until the request times out.
+			if request.Ledger > latestLedger {
+				return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
+					Code:    jrpc2.InvalidParams,
+					Message: fmt.Sprintf("ledger (%d) is after the latest ledger (%d)", request.Ledger, latestLedger),
+				}
+			}
+		}
+
+		getter := latestGetter
+		if request.Ledger != 0 {
+			getter = getterAt(request.Ledger)
+		}
+		ledgerKeysAndEntries, readLedger, err := getter.GetLedgerEntries(ctx, ledgerKeys)
+		if request.Ledger == 0 {
+			latestLedger = readLedger
+		}
+		if errors.Is(err, ledgerentries.ErrUnavailable) {
+			return protocol.GetLedgerEntriesResponse{}, &jrpc2.Error{
+				Code:    jrpc2.InvalidParams,
+				Message: err.Error(),
+			}
+		}
 		if err != nil {
 			logger.WithError(err).WithField("request", request).
 				Info("could not obtain ledger entries")

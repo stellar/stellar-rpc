@@ -53,7 +53,7 @@ func resolve(cfg ExecConfig, rangeStart, rangeEnd chunk.ID) (Plan, error) {
 	needs := map[chunk.ID]catalog.ArtifactSet{}
 
 	for c := rangeStart; c <= rangeEnd; c++ {
-		for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents} {
+		for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges} {
 			state, err := cat.State(c, kind)
 			if err != nil {
 				return Plan{}, err

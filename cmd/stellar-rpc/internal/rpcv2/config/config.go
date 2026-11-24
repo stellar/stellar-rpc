@@ -246,13 +246,14 @@ type StorageConfig struct {
 	// (Moved here from [service] in #882 — it governs storage placement.)
 	DefaultDataDir string `toml:"default_data_dir"`
 
-	Catalog     string `toml:"catalog"`      // catalog RocksDB dir
-	Ledgers     string `toml:"ledgers"`      // immutable ledger packs root
-	Events      string `toml:"events"`       // immutable events packs root (the pack only; see events_index)
-	EventsIndex string `toml:"events_index"` // immutable events index root
-	TxhashRaw   string `toml:"txhash_raw"`   // transient txhash .bin root
-	TxhashIndex string `toml:"txhash_index"` // frozen txhash .idx root
-	Hot         string `toml:"hot"`          // per-chunk hot RocksDB root
+	Catalog      string `toml:"catalog"`       // catalog RocksDB dir
+	Ledgers      string `toml:"ledgers"`       // immutable ledger packs root
+	Events       string `toml:"events"`        // immutable events packs root (the pack only; see events_index)
+	EventsIndex  string `toml:"events_index"`  // immutable events index root
+	EntryChanges string `toml:"entry_changes"` // immutable ledger entry change index root
+	TxhashRaw    string `toml:"txhash_raw"`    // transient txhash .bin root
+	TxhashIndex  string `toml:"txhash_index"`  // frozen txhash .idx root
+	Hot          string `toml:"hot"`           // per-chunk hot RocksDB root
 }
 
 // BackfillConfig is [backfill] plus the nested [backfill.datastore] and [backfill.bsb].
@@ -765,14 +766,15 @@ func fillDuration(p **time.Duration, v time.Duration) {
 // the {default_data_dir}/... layout lives, so locking and store-opening agree
 // on every root.
 type Paths struct {
-	DataDir     string // the data root
-	Catalog     string // catalog RocksDB dir
-	Ledgers     string // immutable ledger packs root
-	Events      string // immutable events packs root
-	EventsIndex string // immutable events index root
-	TxhashRaw   string // transient txhash .bin root
-	TxhashIndex string // frozen txhash .idx root
-	HotStorage  string // per-chunk hot RocksDB root
+	DataDir      string // the data root
+	Catalog      string // catalog RocksDB dir
+	Ledgers      string // immutable ledger packs root
+	Events       string // immutable events packs root
+	EventsIndex  string // immutable events index root
+	EntryChanges string // immutable ledger entry change index root
+	TxhashRaw    string // transient txhash .bin root
+	TxhashIndex  string // frozen txhash .idx root
+	HotStorage   string // per-chunk hot RocksDB root
 }
 
 // ResolvePaths fills every storage path, defaulting under default_data_dir.
@@ -791,14 +793,15 @@ func (cfg Config) ResolvePaths() Paths {
 		return defPath
 	}
 	return Paths{
-		DataDir:     dataDir,
-		Catalog:     pick(cfg.Storage.Catalog, def.CatalogPath()),
-		Ledgers:     pick(cfg.Storage.Ledgers, def.LedgersRoot()),
-		Events:      pick(cfg.Storage.Events, def.EventsRoot()),
-		EventsIndex: pick(cfg.Storage.EventsIndex, def.EventsIndexRoot()),
-		TxhashRaw:   pick(cfg.Storage.TxhashRaw, def.TxHashRawRoot()),
-		TxhashIndex: pick(cfg.Storage.TxhashIndex, def.TxHashIndexRoot()),
-		HotStorage:  pick(cfg.Storage.Hot, def.HotRoot()),
+		DataDir:      dataDir,
+		Catalog:      pick(cfg.Storage.Catalog, def.CatalogPath()),
+		Ledgers:      pick(cfg.Storage.Ledgers, def.LedgersRoot()),
+		Events:       pick(cfg.Storage.Events, def.EventsRoot()),
+		EventsIndex:  pick(cfg.Storage.EventsIndex, def.EventsIndexRoot()),
+		EntryChanges: pick(cfg.Storage.EntryChanges, def.EntryChangesRoot()),
+		TxhashRaw:    pick(cfg.Storage.TxhashRaw, def.TxHashRawRoot()),
+		TxhashIndex:  pick(cfg.Storage.TxhashIndex, def.TxHashIndexRoot()),
+		HotStorage:   pick(cfg.Storage.Hot, def.HotRoot()),
 	}
 }
 
@@ -812,6 +815,7 @@ func (p Paths) Roots() []string {
 		p.Ledgers,
 		p.Events,
 		p.EventsIndex,
+		p.EntryChanges,
 		p.TxhashRaw,
 		p.TxhashIndex,
 		p.HotStorage,
@@ -843,5 +847,5 @@ func (p Paths) ValidateRoots() error {
 // plain strings to keep geometry free of any config dependency.
 func NewLayoutFromPaths(p Paths) geometry.Layout {
 	return geometry.NewLayoutFromRoots(
-		p.Catalog, p.HotStorage, p.Ledgers, p.Events, p.EventsIndex, p.TxhashRaw, p.TxhashIndex)
+		p.Catalog, p.HotStorage, p.Ledgers, p.Events, p.EventsIndex, p.EntryChanges, p.TxhashRaw, p.TxhashIndex)
 }

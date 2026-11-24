@@ -15,6 +15,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/jsonrpc"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/config"
@@ -121,6 +122,10 @@ func buildHandlerSpecs(cfg config.Config, p handlerParams) []jsonrpc.HandlerSpec
 			MaxTransactionsLimit:     deref(m.GetTransactions.MaxItemsPerResponse),
 			DefaultTransactionsLimit: deref(m.GetTransactions.DefaultItemsPerResponse),
 			MaxResponseBytes:         deref(cfg.Service.MaxResponseBytes),
+
+			LedgerEntryGetterAt: func(latest ledgerentries.LedgerEntryGetter) func(uint32) ledgerentries.LedgerEntryGetter {
+				return adapters.NewLedgerEntryGetterAt(p.networkPassphrase, latest)
+			},
 		})
 	specs = append(specs, jsonrpc.HandlerSpec{
 		MethodName: protocol.QueryEventsMethodName,

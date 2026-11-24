@@ -16,6 +16,8 @@ type Config struct {
 	Ledgers bool
 	Txhash  bool
 	Events  bool
+	// EntryChanges builds the ledger entry change index.
+	EntryChanges bool
 
 	// TxhashSecret is the resolved per-index secret that blinds the txhash .bin
 	// keys — the caller derives it (txhash.ColdIndexSecret) so ingest keys match
@@ -26,12 +28,17 @@ type Config struct {
 	// index's routing — the caller derives it (event.ColdIndexSecret) so the
 	// build is deterministic. Required when Events is set — no unkeyed fallback.
 	EventsSecret []byte
+
+	// EntryChangesSecret is the per-chunk secret that keys the entry change
+	// index's routing (entrychange.ColdIndexSecret). Required when
+	// EntryChanges is set.
+	EntryChangesSecret []byte
 }
 
 // validate rejects a Config with no enabled data types, or a txhash/events
 // config missing its cold-index secret.
 func (c Config) validate() error {
-	if !c.Ledgers && !c.Txhash && !c.Events {
+	if !c.Ledgers && !c.Txhash && !c.Events && !c.EntryChanges {
 		return errors.New("ingest: Config enables no data types (set at least one of Ledgers/Txhash/Events)")
 	}
 	if c.Txhash && len(c.TxhashSecret) != stores.SecretLen {
@@ -45,6 +52,9 @@ func (c Config) validate() error {
 	// An all-zero secret is the right length but disables blinding: an attacker
 	// can reproduce every blinded key and route them into one block. Reject it
 	// so a caller that forgot to derive a secret fails loudly, not silently.
+	if c.EntryChanges && (len(c.EntryChangesSecret) != stores.SecretLen || isZeroSecret(c.EntryChangesSecret)) {
+		return errors.New("ingest: EntryChanges enabled but EntryChangesSecret is missing or all zero")
+	}
 	if c.Txhash && isZeroSecret(c.TxhashSecret) {
 		return errors.New("ingest: TxhashSecret is all zero (blinding disabled — derive a per-index secret)")
 	}

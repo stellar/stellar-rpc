@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/entrychange"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/txhash"
@@ -20,6 +21,7 @@ import (
 //	├── events/
 //	│   ├── data/{bucket:05d}/{chunk:08d}-events.pack
 //	│   └── index/{bucket:05d}/{chunk:08d}-index.pack (+ -index.hash)
+//	├── entrychanges/{bucket:05d}/{chunk:08d}-entrychanges.pack (+ .hash)
 //	└── txhash/
 //	    ├── raw/{bucket:05d}/{chunk:08d}.bin
 //	    └── index/{idx:08d}/{lo:08d}-{hi:08d}.idx
@@ -27,26 +29,28 @@ import (
 // Each root is independently settable (NewLayoutFromRoots) for the [storage]
 // path overrides. Bucket ids never appear in meta-store keys.
 type Layout struct {
-	catalogRoot     string // meta-store RocksDB dir (a leaf, not a tree root)
-	hotRoot         string
-	ledgersRoot     string
-	eventsRoot      string
-	eventsIndexRoot string
-	txhashRawRoot   string
-	txhashIndexRoot string
+	catalogRoot      string // meta-store RocksDB dir (a leaf, not a tree root)
+	hotRoot          string
+	ledgersRoot      string
+	eventsRoot       string
+	eventsIndexRoot  string
+	entryChangesRoot string
+	txhashRawRoot    string
+	txhashIndexRoot  string
 }
 
 // NewLayout is the no-override deployment: NewLayoutFromRoots of the per-tree
 // roots a Config resolves with nothing overridden.
 func NewLayout(root string) Layout {
 	return Layout{
-		catalogRoot:     filepath.Join(root, "catalog", "rocksdb"),
-		hotRoot:         filepath.Join(root, "hot"),
-		ledgersRoot:     filepath.Join(root, "ledgers"),
-		eventsRoot:      filepath.Join(root, "events", "data"),
-		eventsIndexRoot: filepath.Join(root, "events", "index"),
-		txhashRawRoot:   filepath.Join(root, "txhash", "raw"),
-		txhashIndexRoot: filepath.Join(root, "txhash", "index"),
+		catalogRoot:      filepath.Join(root, "catalog", "rocksdb"),
+		hotRoot:          filepath.Join(root, "hot"),
+		ledgersRoot:      filepath.Join(root, "ledgers"),
+		eventsRoot:       filepath.Join(root, "events", "data"),
+		eventsIndexRoot:  filepath.Join(root, "events", "index"),
+		entryChangesRoot: filepath.Join(root, "entrychanges"),
+		txhashRawRoot:    filepath.Join(root, "txhash", "raw"),
+		txhashIndexRoot:  filepath.Join(root, "txhash", "index"),
 	}
 }
 
@@ -56,16 +60,18 @@ func NewLayout(root string) Layout {
 // config dependency; the config package's NewLayoutFromPaths adapts a Paths
 // to this so prepared roots and data location can never disagree.
 func NewLayoutFromRoots(
-	catalogRoot, hotRoot, ledgersRoot, eventsRoot, eventsIndexRoot, txhashRawRoot, txhashIndexRoot string,
+	catalogRoot, hotRoot, ledgersRoot, eventsRoot, eventsIndexRoot, entryChangesRoot,
+	txhashRawRoot, txhashIndexRoot string,
 ) Layout {
 	return Layout{
-		catalogRoot:     catalogRoot,
-		hotRoot:         hotRoot,
-		ledgersRoot:     ledgersRoot,
-		eventsRoot:      eventsRoot,
-		eventsIndexRoot: eventsIndexRoot,
-		txhashRawRoot:   txhashRawRoot,
-		txhashIndexRoot: txhashIndexRoot,
+		catalogRoot:      catalogRoot,
+		hotRoot:          hotRoot,
+		ledgersRoot:      ledgersRoot,
+		eventsRoot:       eventsRoot,
+		eventsIndexRoot:  eventsIndexRoot,
+		entryChangesRoot: entryChangesRoot,
+		txhashRawRoot:    txhashRawRoot,
+		txhashIndexRoot:  txhashIndexRoot,
 	}
 }
 
@@ -130,6 +136,20 @@ func (l Layout) EventsPaths(c chunk.ID) []string {
 	}
 }
 
+// EntryChangesBucketDir is the directory a chunk's entry change index lives in.
+func (l Layout) EntryChangesBucketDir(c chunk.ID) string {
+	return filepath.Join(l.entryChangesRoot, c.BucketID())
+}
+
+// EntryChangesPaths are a chunk's two entry change index files.
+func (l Layout) EntryChangesPaths(c chunk.ID) []string {
+	d := l.EntryChangesBucketDir(c)
+	return []string{filepath.Join(d, entrychange.PackName(c)), filepath.Join(d, entrychange.HashName(c))}
+}
+
+// EntryChangesRoot is the root the entry change index lives under.
+func (l Layout) EntryChangesRoot() string { return l.entryChangesRoot }
+
 // TxHashBinPath is a chunk's raw txhash run. Leaf owned by txhash.ColdBinName.
 func (l Layout) TxHashBinPath(c chunk.ID) string {
 	return filepath.Join(l.txhashRawRoot, c.BucketID(), txhash.ColdBinName(c))
@@ -175,6 +195,8 @@ func (l Layout) ArtifactPaths(c chunk.ID, kind Kind) []string {
 		return l.EventsPaths(c)
 	case KindTxHash:
 		return []string{l.TxHashBinPath(c)}
+	case KindEntryChanges:
+		return l.EntryChangesPaths(c)
 	default:
 		return nil
 	}

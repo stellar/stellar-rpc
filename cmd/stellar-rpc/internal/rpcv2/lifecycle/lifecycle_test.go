@@ -87,7 +87,7 @@ func TestRunLifecycleTick_DoesNotReEmitLastCommitted(t *testing.T) {
 	// A cheap tick with no full ingest: chunk 0 is already frozen + index-covered with
 	// a leftover "ready" hot DB, so the plan stage is a no-op and the discard scan
 	// retires chunk 0. A live chunk 1 keeps chunk 0 below the partition.
-	freezeKinds(t, cat, 0, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+	freezeKinds(t, cat, 0, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges, geometry.KindTxHash)
 	freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(0), 0, 0)
 	makeReadyHotDirNoData(t, cat, 0)
 	live := openLiveHotDB(t, cat, 1)
@@ -108,7 +108,7 @@ func TestRunLifecycleTick_LiveHotChunksCountsAfterDestroy(t *testing.T) {
 	cfg.Metrics = rec
 
 	// Chunk 0: discard-eligible with a leftover "ready" hot DB. Chunk 1: live.
-	freezeKinds(t, cat, 0, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+	freezeKinds(t, cat, 0, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges, geometry.KindTxHash)
 	freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(0), 0, 0)
 	makeReadyHotDirNoData(t, cat, 0)
 	live := openLiveHotDB(t, cat, 1)
@@ -133,7 +133,7 @@ func TestRunLifecycleTick_LiveHotChunksKeepsBusyHandle(t *testing.T) {
 	cfg.Registry = reg
 
 	const c chunk.ID = 0
-	freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+	freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges, geometry.KindTxHash)
 	freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(c), c, c)
 	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
 	require.NoError(t, err)
@@ -202,7 +202,7 @@ func TestRunLifecycleTick_BoundaryFreezesRebuildsDiscards(t *testing.T) {
 	require.NoError(t, runLifecycle(context.Background(), cfg, cat, 0), "a healthy tick never fails")
 
 	// Chunk 0's cold artifacts are all frozen.
-	for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents} {
+	for _, kind := range []geometry.Kind{geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges} {
 		state, err := cat.State(0, kind)
 		require.NoError(t, err)
 		assert.Equal(t, geometry.StateFrozen, state, "chunk 0 %s frozen", kind)
@@ -245,7 +245,7 @@ func TestRunLifecycleTick_DiscardGatedOnIndexCoverage(t *testing.T) {
 	// Pre-freeze chunk 0's ledgers+events+txhash directly (no hot dependence), and
 	// leave it with a "ready" hot DB on disk. The window is NOT finalized (cpi=2,
 	// only chunk 0 present), so no terminal coverage exists.
-	freezeKinds(t, cat, 0, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+	freezeKinds(t, cat, 0, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges, geometry.KindTxHash)
 	makeReadyHotDirNoData(t, cat, 0)
 	// A live chunk 1 above it so chunk 0 is below the partition boundary.
 	require.NoError(t, cat.PutHotTransient(1))
@@ -289,7 +289,7 @@ func TestRunLifecycleTick_PastFloorPrune(t *testing.T) {
 	// floor = chunk.LastCompleteChunkAt(through)-retention+1 = 5-2+1 = chunk 4's first
 	// ledger. So chunks 0..3 are wholly past the floor and must be swept.
 	for c := chunk.ID(0); c <= 5; c++ {
-		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+		freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges, geometry.KindTxHash)
 		writeArtifact(t, cat.Layout().LedgerPackPath(c))
 		freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(c), c, c) // each one-chunk window terminal
 	}
@@ -414,7 +414,7 @@ func TestDeferredDeletion_BusyHandleRetriedAcrossRuns(t *testing.T) {
 	// Chunk 0: discard-eligible (all kinds frozen, terminal coverage) with a
 	// REAL hot DB, one committed ledger, published in the registry.
 	const c chunk.ID = 0
-	freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindTxHash)
+	freezeKinds(t, cat, c, geometry.KindLedgers, geometry.KindEvents, geometry.KindEntryChanges, geometry.KindTxHash)
 	freezeCoverage(t, cat, cat.TxHashIndexLayout().TxHashIndexID(c), c, c)
 	db, err := hotchunk.Open(cat.Layout().HotChunkPath(c), c, silentLogger())
 	require.NoError(t, err)

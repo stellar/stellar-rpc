@@ -31,10 +31,11 @@ import (
 // post-failure finalize could publish an inconsistent artifact; eventsCold
 // latches the failure and refuses.
 type coldChunk struct {
-	ledgers *ledgerCold
-	txhash  *txhashCold
-	events  *eventsCold
-	sink    MetricSink
+	ledgers      *ledgerCold
+	txhash       *txhashCold
+	events       *eventsCold
+	entryChanges *entryChangesCold
+	sink         MetricSink
 }
 
 // openColdChunk opens one cold writer per enabled type at its resolved path —
@@ -86,6 +87,21 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 		}
 		cc.events = w
 	}
+	if cfg.EntryChanges {
+		if dirs.EntryChanges == "" {
+			return fail(errors.New("ingest: entry changes enabled but its ColdDirs path is empty"))
+		}
+		if len(cfg.EntryChangesSecret) != stores.SecretLen {
+			return fail(errors.New("ingest: entry changes cold writer requires a per-chunk secret"))
+		}
+		var secret [stores.SecretLen]byte
+		copy(secret[:], cfg.EntryChangesSecret)
+		w, err := newEntryChangesCold(dirs.EntryChanges, chunkID, secret)
+		if err != nil {
+			return fail(fmt.Errorf("open entry changes cold writer: %w", err))
+		}
+		cc.entryChanges = w
+	}
 	return cc, nil
 }
 
@@ -108,6 +124,11 @@ func openColdChunk(dirs ColdDirs, chunkID chunk.ID, sink MetricSink, cfg Config)
 func (c *coldChunk) ingest(seq uint32, lcmView xdr.LedgerCloseMetaView) error {
 	if c.ledgers != nil {
 		if err := c.ledgers.write(seq, []byte(lcmView)); err != nil {
+			return err
+		}
+	}
+	if c.entryChanges != nil {
+		if err := c.entryChanges.write(seq, lcmView); err != nil {
 			return err
 		}
 	}
@@ -162,6 +183,11 @@ func (c *coldChunk) finalize(ctx context.Context) error {
 	}
 	if c.events != nil {
 		if err := c.events.finalize(ctx); err != nil {
+			return fmt.Errorf("finalize: %w", err)
+		}
+	}
+	if c.entryChanges != nil {
+		if err := c.entryChanges.finalize(ctx); err != nil {
 			return fmt.Errorf("finalize: %w", err)
 		}
 	}

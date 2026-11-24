@@ -9,6 +9,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/host"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/ledgerentries"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/methods"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcdatastore"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
@@ -59,6 +60,11 @@ type HandlerDeps struct {
 	// MaxResponseBytes caps the XDR or JSON in one getLedgerEntries, getLedgers
 	// or getTransactions response. Zero means no limit.
 	MaxResponseBytes uint
+
+	// LedgerEntryGetterAt serves getLedgerEntries requests that name a ledger,
+	// given the latest-ledger getter. nil reads stellar-core at the ledger,
+	// which holds only its most recent ledgers.
+	LedgerEntryGetterAt func(latest ledgerentries.LedgerEntryGetter) func(ledger uint32) ledgerentries.LedgerEntryGetter
 }
 
 // MethodLimits is one method's serving limits: the request backlog cap and the
@@ -135,7 +141,7 @@ func BuildHandlerSpecs(deps HandlerDeps) []HandlerSpec {
 				deps.MaxResponseBytes, deps.DataStoreLedgerReader, deps.Logger)),
 		spec(protocol.GetLedgerEntriesMethodName,
 			methods.NewGetLedgerEntriesHandler(deps.Logger, deps.Daemon.FastCoreClient(), deps.LedgerReader,
-				deps.MaxResponseBytes)),
+				deps.MaxResponseBytes, deps.LedgerEntryGetterAt)),
 		spec(protocol.GetTransactionMethodName,
 			methods.NewGetTransactionHandler(deps.Logger, deps.TransactionReader, deps.LedgerReader)),
 		spec(protocol.GetTransactionsMethodName,

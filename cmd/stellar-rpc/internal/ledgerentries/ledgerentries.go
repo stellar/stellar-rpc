@@ -21,6 +21,11 @@ type LedgerKeyAndEntry struct {
 	LiveUntilLedgerSeq *uint32 // optional live-until ledger seq, when applicable.
 }
 
+// ErrUnavailable is returned by a getter that cannot answer for the requested
+// ledger from the history it holds. getLedgerEntries reports it as invalid
+// params.
+var ErrUnavailable = errors.New("ledger entries unavailable")
+
 type LedgerEntryGetter interface {
 	GetLedgerEntries(ctx context.Context, keys []xdr.LedgerKeyView) ([]LedgerKeyAndEntry, uint32, error)
 }
