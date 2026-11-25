@@ -16,9 +16,7 @@ import (
 //
 // NOT safe for concurrent access. The caller guarantees serial
 // access (build then hand off, or a single goroutine throughout).
-// For the concurrent-reader-vs-single-writer case (live HotStore
-// ingest) use ConcurrentBitmaps.
-type Bitmaps map[TermKey]*roaring.Bitmap
+type Bitmaps map[TermKey]*roaring.Bitmap // keyed by each term's key under the chunk's secret
 
 // NewBitmaps returns an empty Bitmaps. Equivalent to make(Bitmaps).
 func NewBitmaps() Bitmaps {

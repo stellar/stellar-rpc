@@ -45,7 +45,7 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // A zero-term bitmaps (an eventless chunk, e.g. a pre-Soroban
 // backfill range) produces a real (empty) index.hash over zero terms
 // plus a zero-record index.pack. The cold reader resolves every
-// LookupKeys entry against it to a nil-bitmap miss through the
+// LookupTerms entry against it to a nil-bitmap miss through the
 // ordinary path, so neither readers nor orchestrators need a
 // pack-without-index special case.
 //
@@ -62,8 +62,8 @@ func ColdIndexSecret(catalogSecret []byte, chunkID chunk.ID) [stores.SecretLen]b
 // catastrophically.
 //
 // Both cold backfill and the live-chunk freeze build a Bitmaps single-threaded by
-// re-deriving terms from raw LCMs (per-event TermsForBytes + Bitmaps.AddTo) and
-// hand it directly here.
+// re-deriving terms from raw LCMs (per-event Terms.AppendEvent, keyed with the
+// chunk's secret, + Bitmaps.AddTo) and hand it directly here.
 //
 // index.hash is the MPHF serialized via buildMPHF.
 //

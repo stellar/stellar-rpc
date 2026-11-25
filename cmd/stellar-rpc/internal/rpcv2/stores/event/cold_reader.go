@@ -17,7 +17,7 @@ package event
 // same chunk's files concurrently — the pack handle is safe for
 // concurrent reads and the MPHF is read-only once open.
 //
-// Concurrency contract: read methods (LookupKeys,
+// Concurrency contract: read methods (LookupTerms,
 // FetchEvents, All) are safe to call concurrently with each other
 // on the same ColdReader. They are NOT safe to call concurrently
 // with Close — the caller is responsible for draining all in-flight
@@ -29,7 +29,7 @@ package event
 //
 // Close semantics by method:
 //
-//   - LookupKeys, FetchEvents, All, EventCount, Offsets:
+//   - LookupTerms, FetchEvents, All, EventCount, Offsets:
 //     return / yield stores.ErrStoreClosed after Close.
 //   - ChunkID: is the constructor-supplied chunk ID; never reads
 //     from disk and is unaffected by Close. Callers can use it for
@@ -67,7 +67,7 @@ import (
 // (TotalItems + AppData + offsets decode + chunkID cross-check) is
 // decoded on first metadata access via a sync.OnceValues-cached
 // loader. The MPHF kicks off in a background goroutine at Open and
-// is awaited on the first LookupKeys call via a second
+// is awaited on the first LookupTerms call via a second
 // sync.OnceValues. This makes opening N chunks for a query
 // non-blocking — each reader returns immediately and the three I/O
 // units fan out concurrently across all opened readers.
@@ -122,7 +122,7 @@ type ColdReaderOptions struct {
 // in a background goroutine (holding its fd once open), the
 // events.pack metadata decode is sync.OnceValues-deferred, and the
 // MPHF loader runs in a background goroutine awaited via
-// sync.OnceValues on first LookupKeys. Validation errors that depend
+// sync.OnceValues on first LookupTerms. Validation errors that depend
 // on file contents (chunkID cross-check, format, AppData layout,
 // MPHF parse) surface from the first method that needs the data, not
 // from Open itself.
@@ -250,7 +250,7 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 // the MPHF background goroutine before tearing down so an
 // in-flight load doesn't write to a half-closed handle.
 //
-// Must not be called concurrently with LookupKeys, FetchEvents, or
+// Must not be called concurrently with LookupTerms, FetchEvents, or
 // All on the same ColdReader. See the type-level concurrency
 // contract for the rationale.
 func (c *ColdReader) Close() error {
@@ -365,9 +365,9 @@ func decodeSlabEntry(entry []byte, rd entryRead) (*roaring.Bitmap, error) {
 	return bm, nil
 }
 
-// LookupKeys returns bitmaps for each key, aligned positionally with
-// the input slice (result[i] corresponds to keys[i]), and where they are
-// exact. See Reader.LookupKeys for the semantics.
+// LookupTerms returns bitmaps for each term, aligned positionally with
+// the input slice (result[i] corresponds to terms[i]), and where they are
+// exact. See Reader.LookupTerms for the semantics.
 //
 // A split term is read only in the slabs the window reaches. Every split
 // term shares the chunk's slabs, so the lookup covers their span, up to the
@@ -376,8 +376,8 @@ func decodeSlabEntry(entry []byte, rd entryRead) (*roaring.Bitmap, error) {
 // id space. Every term but a present split one is marked whole.
 //
 //nolint:cyclop // resolve, read and assemble in one pass
-func (c *ColdReader) LookupKeys(
-	ctx context.Context, keys []TermKey, window IDRange,
+func (c *ColdReader) LookupTerms(
+	ctx context.Context, terms []Term, window IDRange,
 ) ([]*roaring.Bitmap, Coverage, error) {
 	if c.closed.Load() {
 		return nil, Coverage{}, stores.ErrStoreClosed
@@ -388,7 +388,7 @@ func (c *ColdReader) LookupKeys(
 	if err := window.check(); err != nil {
 		return nil, Coverage{}, err
 	}
-	if len(keys) == 0 {
+	if len(terms) == 0 {
 		return nil, Coverage{IDRange: IDRange{End: math.MaxUint32}}, nil
 	}
 
@@ -403,17 +403,17 @@ func (c *ColdReader) LookupKeys(
 
 	lo, hi, splitCovered := layout.slabsIn(window)
 
-	results := make([]*roaring.Bitmap, len(keys))
-	whole := make([]bool, len(keys))
-	reads := make([]entryRead, 0, len(keys))
+	results := make([]*roaring.Bitmap, len(terms))
+	whole := make([]bool, len(terms))
+	reads := make([]entryRead, 0, len(terms))
 	covered := IDRange{End: math.MaxUint32}
-	for i, hit := range mphf.LookupBatch(keys) {
+	for i, hit := range mphf.LookupBatch(keysUnder(mphf.secret, terms)) {
 		whole[i] = true
 		if hit.err != nil {
 			if errors.Is(hit.err, ErrKeyNotFound) {
 				continue // result[i] stays nil
 			}
-			return nil, Coverage{}, fmt.Errorf("events: LookupKeys MPHF for chunk %s: %w", c.chunkID, hit.err)
+			return nil, Coverage{}, fmt.Errorf("events: LookupTerms MPHF for chunk %s: %w", c.chunkID, hit.err)
 		}
 		pos, rowFP, split := layout.locate(hit.slot)
 		if !split {
@@ -433,7 +433,7 @@ func (c *ColdReader) LookupKeys(
 	}
 
 	if err := readIndexEntries(ctx, c.index, reads); err != nil {
-		return nil, Coverage{}, fmt.Errorf("events: LookupKeys read for chunk %s: %w", c.chunkID, err)
+		return nil, Coverage{}, fmt.Errorf("events: LookupTerms read for chunk %s: %w", c.chunkID, err)
 	}
 	// reads is in position order, so each Or appends a split term's next
 	// slab; with copy-on-write on both sides it takes over the slab's

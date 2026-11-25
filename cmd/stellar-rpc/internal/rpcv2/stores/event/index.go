@@ -6,12 +6,32 @@ import (
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
-	"github.com/stellar/streamhash"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 )
 
-// TermKey is a 16-byte hash identifying a unique (field, value) pair
-// in the bitmap index.
+// Term is an indexed (field, value) pair as bytes: the field byte, then the value.
+type Term string
+
+// TermKey is a term keyed with its chunk's secret (Term.Key).
 type TermKey [16]byte
+
+func NewTerm(field Field, value []byte) Term {
+	return Term(append([]byte{byte(field)}, value...))
+}
+
+func (t Term) Key(secret [stores.SecretLen]byte) TermKey {
+	var scratch [128]byte
+	return TermKey(stores.BlindKey(secret, append(scratch[:0], t...)))
+}
+
+func keysUnder(secret [stores.SecretLen]byte, terms []Term) []TermKey {
+	keys := make([]TermKey, len(terms))
+	for i, t := range terms {
+		keys[i] = t.Key(secret)
+	}
+	return keys
+}
 
 // Field identifies which indexed field a term belongs to.
 type Field byte
@@ -27,7 +47,7 @@ const (
 )
 
 // TermSchemaVersion names the term-derivation scheme: the hash function and
-// byte encoding behind ComputeTermKey plus each field's value encoding. Bump
+// byte encoding behind Term.Key plus each field's value encoding. Bump
 // it whenever any of those change. Adding a whole field sets a new bit in
 // IndexedFieldMask instead and is a storage-format change in its own right;
 // see the design doc's "Format versioning and upgrades" section. Both values
@@ -62,48 +82,20 @@ var indexedFieldMask = func() uint64 {
 // term-key golden tests iterate the same registry.
 func IndexedFieldMask() uint64 { return indexedFieldMask }
 
-// ComputeTermKey computes a 16-byte term key by hashing the field byte
-// followed by the value bytes: xxh3_128(field || value), encoded as
-// two little-endian uint64s.
+// EventTypeTerm returns the term for eventType. Every event carries one,
+// so a query for a rare type resolves through the index instead of
+// scanning a chunk to find the few events that have it.
 //
-// Routed through streamhash.PreHashInPlace so the hash function and
-// byte encoding stay aligned with the MPHF builder downstream
-// (mphf.go). Including the field byte in the hash input ensures the
-// same value in different fields produces different keys.
-func ComputeTermKey(value []byte, field Field) TermKey {
-	// Prepend field byte to value for hashing.
-	// Stack-allocated buffer avoids heap allocation for typical ScVal sizes.
-	var scratch [128]byte
-	n := len(value) + 1
-	var buf []byte
-	if n <= len(scratch) {
-		buf = scratch[:n]
-	} else {
-		buf = make([]byte, n)
-	}
-	buf[0] = byte(field)
-	copy(buf[1:], value)
-
-	var key TermKey
-	streamhash.PreHashInPlace(key[:], buf)
-	return key
+//nolint:revive // named after FieldEventType
+func EventTypeTerm(eventType xdr.ContractEventType) Term {
+	value := eventTypeValue(eventType)
+	return NewTerm(FieldEventType, value[:])
 }
 
-// EventTypeTermKey returns the term key for eventType. Every event
-// carries one, so a query for a rare type resolves through the index
-// instead of scanning a chunk to find the few events that have it.
-//
-// The name stutters as event.EventTypeTermKey. It stays that way because
-// every TermKey constructor here is named after the Field it hashes
-// (FieldEventType here, FieldTopicCount -> TopicCountTermKey), and
-// trimming to TypeTermKey drops the domain term: the value is an
-// xdr.ContractEventType, called eventType on the wire.
-//
-//nolint:revive // named after FieldEventType; see the note above
-func EventTypeTermKey(eventType xdr.ContractEventType) TermKey {
+func eventTypeValue(eventType xdr.ContractEventType) [4]byte {
 	var value [4]byte
 	binary.BigEndian.PutUint32(value[:], uint32(eventType)) //nolint:gosec // enum keeps its own XDR width
-	return ComputeTermKey(value[:], FieldEventType)
+	return value
 }
 
 // topicCountOverflowBucket holds every event carrying more topics than
@@ -123,45 +115,70 @@ const (
 	_ uint = 4 - protocol.MaxTopicCount
 )
 
-// TopicCountTermKey returns the term key for the bucket holding events
-// with n topics. Every event carries one, which is what makes topic
-// arity answerable from the index: it is an absence property, and value
-// terms can only say what an event has.
-func TopicCountTermKey(n int) TermKey {
-	// n is a slice length here and a validated filter field on the query
-	// side, so it is never negative.
-	bucket := min(n, topicCountOverflowBucket)
-	return ComputeTermKey([]byte{byte(bucket)}, FieldTopicCount) //nolint:gosec // 0..overflow bucket
+// TopicCountTerm returns the term for the bucket holding events with n
+// topics. Every event carries one, which is what makes topic arity
+// answerable from the index: it is an absence property, and value terms
+// can only say what an event has.
+func TopicCountTerm(n int) Term {
+	return NewTerm(FieldTopicCount, []byte{topicCountBucket(n)})
 }
 
-// TopicCountTermKeysAtLeast returns the buckets whose union holds every
+// topicCountBucket is n's bucket; n is a slice length or a validated count, never negative.
+func topicCountBucket(n int) byte {
+	return byte(min(n, topicCountOverflowBucket)) //nolint:gosec // 0..overflow bucket
+}
+
+// TopicCountTermsAtLeast returns the buckets whose union holds every
 // event with n topics or more. The overflow bucket closes the union, so
 // an event carrying more topics than a filter can name is still in it.
-func TopicCountTermKeysAtLeast(n int) []TermKey {
-	low := min(n, topicCountOverflowBucket)
-	keys := make([]TermKey, 0, topicCountOverflowBucket-low+1)
+func TopicCountTermsAtLeast(n int) []Term {
+	low := int(topicCountBucket(n))
+	terms := make([]Term, 0, topicCountOverflowBucket-low+1)
 	for bucket := low; bucket <= topicCountOverflowBucket; bucket++ {
-		keys = append(keys, TopicCountTermKey(bucket))
+		terms = append(terms, TopicCountTerm(bucket))
 	}
-	return keys
+	return terms
 }
 
-// maxTermsPerEvent is what TermsForBytes emits for an event carrying
-// the most topics a filter can name: type, topic count, contract ID,
-// and one term per topic position.
+// maxTermsPerEvent is what AppendEvent adds for an event carrying the
+// most topics a filter can name: type, topic count, contract ID, and one
+// term per topic position.
 const maxTermsPerEvent = 3 + protocol.MaxTopicCount
 
-// TermsForBytes returns the term keys for a marshaled ContractEvent,
-// navigating the raw XDR via xdr.ContractEventView instead of a full
-// UnmarshalBinary: its type, its topic count, its contract ID when it
-// has one, and its topics 0..MaxTopicCount-1.
-func TermsForBytes(eventBytes []byte) ([]TermKey, error) {
+// Terms holds terms back to back, so deriving them allocates nothing per term.
+type Terms struct {
+	buf  []byte
+	ends []uint32 // term i is buf[ends[i-1]:ends[i]]
+}
+
+func (t *Terms) Reset() { t.buf, t.ends = t.buf[:0], t.ends[:0] }
+
+func (t *Terms) Len() int { return len(t.ends) }
+
+func (t *Terms) Key(i int, secret [stores.SecretLen]byte) TermKey {
+	return TermKey(stores.BlindKey(secret, t.bytes(i)))
+}
+
+func TermsForBytes(eventBytes []byte) ([]Term, error) {
+	var t Terms
+	if err := t.AppendEvent(eventBytes); err != nil {
+		return nil, err
+	}
+	terms := make([]Term, t.Len())
+	for i := range terms {
+		terms[i] = Term(t.bytes(i))
+	}
+	return terms, nil
+}
+
+// AppendEvent appends a marshaled event's terms from its XDR view: type,
+// contract ID if any, topic count, then topics 0..MaxTopicCount-1.
+func (t *Terms) AppendEvent(eventBytes []byte) error {
 	ev := xdr.ContractEventView(eventBytes)
-	keys := make([]TermKey, 0, maxTermsPerEvent)
 
 	typeView, err := ev.Type()
 	if err != nil {
-		return nil, fmt.Errorf("events: view Type: %w", err)
+		return fmt.Errorf("events: view Type: %w", err)
 	}
 	// A type outside the enum is a hard indexing error, the same call the
 	// unsupported body version below makes: the alternative is indexing
@@ -169,64 +186,76 @@ func TermsForBytes(eventBytes []byte) ([]TermKey, error) {
 	// such events" rather than as a protocol the binary cannot serve.
 	eventType, err := typeView.Value()
 	if err != nil {
-		return nil, fmt.Errorf("events: view Type value: %w", err)
+		return fmt.Errorf("events: view Type value: %w", err)
 	}
-	keys = append(keys, EventTypeTermKey(eventType))
+	typeValue := eventTypeValue(eventType)
+	t.add(FieldEventType, typeValue[:])
 
 	cidOpt, err := ev.ContractId()
 	if err != nil {
-		return nil, fmt.Errorf("events: view ContractId: %w", err)
+		return fmt.Errorf("events: view ContractId: %w", err)
 	}
 	cidView, present, err := cidOpt.Unwrap()
 	if err != nil {
-		return nil, fmt.Errorf("events: view ContractId unwrap: %w", err)
+		return fmt.Errorf("events: view ContractId unwrap: %w", err)
 	}
 	if present {
 		cid, err := cidView.Value()
 		if err != nil {
-			return nil, fmt.Errorf("events: view ContractId value: %w", err)
+			return fmt.Errorf("events: view ContractId value: %w", err)
 		}
-		keys = append(keys, ComputeTermKey(cid[:], FieldContractID))
+		t.add(FieldContractID, cid[:])
 	}
 
 	body, err := ev.Body()
 	if err != nil {
-		return nil, fmt.Errorf("events: view ContractEvent.Body: %w", err)
+		return fmt.Errorf("events: view ContractEvent.Body: %w", err)
 	}
 	bodyVVal, err := body.V()
 	if err != nil {
-		return nil, fmt.Errorf("events: view Body.V: %w", err)
+		return fmt.Errorf("events: view Body.V: %w", err)
 	}
 	// Only Body discriminant V=0 carries topics. A future body version
 	// is a hard error matching the SQLite backend (sqlitedb/event.go) — a
 	// silently contractID-only index would make topic queries miss
 	// real events with no signal.
 	if bodyVVal != 0 {
-		return nil, fmt.Errorf("events: unsupported ContractEvent body version %d", bodyVVal)
+		return fmt.Errorf("events: unsupported ContractEvent body version %d", bodyVVal)
 	}
 	v0, err := body.V0()
 	if err != nil {
-		return nil, fmt.Errorf("events: view Body.V0: %w", err)
+		return fmt.Errorf("events: view Body.V0: %w", err)
 	}
 	topics, err := v0.Topics()
 	if err != nil {
-		return nil, fmt.Errorf("events: view Body.V0.Topics: %w", err)
+		return fmt.Errorf("events: view Body.V0.Topics: %w", err)
 	}
 	topicViews, err := topics.All()
 	if err != nil {
-		return nil, fmt.Errorf("events: view Body.V0.Topics.All: %w", err)
+		return fmt.Errorf("events: view Body.V0.Topics.All: %w", err)
 	}
-	keys = append(keys, TopicCountTermKey(len(topicViews)))
+	t.add(FieldTopicCount, []byte{topicCountBucket(len(topicViews))})
 	for i, topic := range topicViews {
 		if i >= protocol.MaxTopicCount {
 			break
 		}
-		// All returns each element trimmed to its exact size, so the
-		// ScValView bytes are already the topic's raw XDR — hash them
-		// directly rather than calling Raw() (which re-walks size).
-		keys = append(keys, ComputeTermKey([]byte(topic), topicField(i)))
+		// All yields each topic as its exact XDR, so Raw() would only re-walk it.
+		t.add(topicField(i), []byte(topic))
 	}
-	return keys, nil
+	return nil
+}
+
+func (t *Terms) bytes(i int) []byte {
+	var start uint32
+	if i > 0 {
+		start = t.ends[i-1]
+	}
+	return t.buf[start:t.ends[i]]
+}
+
+func (t *Terms) add(field Field, value []byte) {
+	t.buf = append(append(t.buf, byte(field)), value...)
+	t.ends = append(t.ends, uint32(len(t.buf))) //nolint:gosec // a ledger's terms fit in uint32
 }
 
 // topicField maps a topic position (0..MaxTopicCount-1) to its

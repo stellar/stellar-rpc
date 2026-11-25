@@ -7,11 +7,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
 )
 
-// BenchmarkEventIndex_10M measures heap at full chunk scale.
+// BenchmarkEventIndex_10M builds the hot index at full chunk scale and
+// measures the heap it holds once built.
 // Distribution modeled on real production chunk data:
 //
 //	chunk       events       terms     total_adds   mean_card   max_card
@@ -20,12 +25,25 @@ import (
 //	005908     9,255,090   2,289,828     37,397,684       16.3    6,440,193
 func BenchmarkEventIndex_10M(b *testing.B) {
 	for b.Loop() {
+		store, err := rocksdb.New(rocksdb.Config{
+			Path:           b.TempDir(),
+			ColumnFamilies: CFNames(),
+			Logger:         silentLogger(),
+			Tuning:         rocksdb.Tuning{BlockCacheMB: 64},
+			PerCFOptions:   CFOptions(),
+		})
+		require.NoError(b, err)
+		idx := newHotIndex(store, 0, testIndexSecret)
+
 		start := time.Now()
-		idx := buildIndex10M()
+		buildIndex10M(b, idx)
+		require.NoError(b, idx.settle())
 		buildSec := time.Since(start).Seconds()
 
 		b.ReportMetric(buildSec, "build_sec")
-		b.ReportMetric(float64(len(idx.terms)), "terms")
+		sealed, err := sealedHotSlabs(store)
+		require.NoError(b, err)
+		b.ReportMetric(float64(sealed), "sealed_slabs")
 
 		runtime.GC()
 		var mem runtime.MemStats
@@ -33,19 +51,15 @@ func BenchmarkEventIndex_10M(b *testing.B) {
 		b.ReportMetric(float64(mem.HeapInuse)/(1024*1024), "heap_MB")
 
 		runtime.KeepAlive(idx)
+		require.NoError(b, store.Close())
 	}
 }
 
 // buildIndex10M simulates a full chunk based on real production data:
 // ~9M events, ~2M unique terms, ~35M adds for the contract-ID and topic
 // terms, plus the 2 adds per event the type and topic-count families
-// contribute.
-//
-// Adds are grouped by term within a ledger, the way HotStore.applyLedger
-// batches them. Feeding a chunk-wide term one event at a time instead
-// pays ConcurrentBitmaps.AddTo's COW clone per event and costs several
-// times the build time, which no production path does.
-func buildIndex10M() *ConcurrentBitmaps {
+// contribute. It feeds the index one ledger at a time, as ingestion does.
+func buildIndex10M(b *testing.B, idx *hotIndex) {
 	const (
 		totalEvents     = 9_000_000
 		numContracts    = 10_000
@@ -53,17 +67,16 @@ func buildIndex10M() *ConcurrentBitmaps {
 		eventsPerLedger = 900
 	)
 
-	idx := NewConcurrentBitmapsFromBitmaps(NewBitmaps())
 	rng := rand.New(rand.NewSource(42))
 
-	contractKeys := make([]TermKey, numContracts)
-	for i := range contractKeys {
-		contractKeys[i] = ComputeTermKey(fmt.Appendf(nil, "contract-%d", i), FieldContractID)
+	contractTerms := make([]Term, numContracts)
+	for i := range contractTerms {
+		contractTerms[i] = NewTerm(FieldContractID, fmt.Appendf(nil, "contract-%d", i))
 	}
 
-	topicKeys := make([]TermKey, numTopicVals)
-	for i := range topicKeys {
-		topicKeys[i] = ComputeTermKey(fmt.Appendf(nil, "topic-%d", i), Field(1+i%4))
+	topicTerms := make([]Term, numTopicVals)
+	for i := range topicTerms {
+		topicTerms[i] = NewTerm(Field(1+i%4), fmt.Appendf(nil, "topic-%d", i))
 	}
 
 	zipf := rand.NewZipf(rng, 1.01, 1.0, uint64(numTopicVals-1))
@@ -74,37 +87,28 @@ func buildIndex10M() *ConcurrentBitmaps {
 	// including the empty-topic and overflow ones, since how that family
 	// partitions decides whether it is cheap or not.
 	const systemEventEvery = 100_000
-	contractType := EventTypeTermKey(xdr.ContractEventTypeContract)
-	systemType := EventTypeTermKey(xdr.ContractEventTypeSystem)
+	contractType := EventTypeTerm(xdr.ContractEventTypeContract)
+	systemType := EventTypeTerm(xdr.ContractEventTypeSystem)
+	topicCounts := TopicCountTermsAtLeast(0)
 
-	perKeyIDs := make(map[TermKey][]uint32, 64)
-	flush := func() {
-		for key, ids := range perKeyIDs {
-			idx.AddTo(key, ids...)
-			delete(perKeyIDs, key)
-		}
-	}
-	add := func(key TermKey, eventID uint32) {
-		perKeyIDs[key] = append(perKeyIDs[key], eventID)
-	}
-
+	ledger := make([][]Term, 0, eventsPerLedger)
 	for eventID := range uint32(totalEvents) {
-		add(contractKeys[eventID%uint32(numContracts)], eventID)
+		terms := make([]Term, 0, maxTermsPerEvent)
+		terms = append(terms, contractTerms[eventID%uint32(numContracts)])
 		numTopics := rng.Intn(protocol.MaxTopicCount + 2)
-		for range numTopics {
-			add(topicKeys[zipf.Uint64()], eventID)
+		for range min(numTopics, protocol.MaxTopicCount) {
+			terms = append(terms, topicTerms[zipf.Uint64()])
 		}
 		if eventID%systemEventEvery == 0 {
-			add(systemType, eventID)
+			terms = append(terms, systemType)
 		} else {
-			add(contractType, eventID)
+			terms = append(terms, contractType)
 		}
-		add(TopicCountTermKey(numTopics), eventID)
-		if (eventID+1)%eventsPerLedger == 0 {
-			flush()
+		terms = append(terms, topicCounts[numTopics])
+		ledger = append(ledger, terms)
+		if len(ledger) == eventsPerLedger {
+			require.NoError(b, idx.add(eventID+1-eventsPerLedger, keyedTerms(idx.secret, ledger)))
+			ledger = ledger[:0]
 		}
 	}
-	flush()
-
-	return idx
 }

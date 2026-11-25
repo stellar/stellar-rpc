@@ -19,17 +19,19 @@ import (
 // eventsCold models the backfill path: shared-walk output → payloads →
 // term-index accumulate + cold append, then chunk-end Finish + WriteColdIndex.
 // No HotStore is involved — it maintains an in-memory event.Bitmaps mirror via
-// NewBitmaps + per-event TermsForBytes, and an event.LedgerOffsets to assign
-// chunk-relative event IDs.
+// NewBitmaps + per-event terms keyed with the chunk's secret, and an
+// event.LedgerOffsets to assign chunk-relative event IDs.
 type eventsCold struct {
 	chunkID chunk.ID
 	writer  *event.ColdWriter
 	mirror  event.Bitmaps
 	offsets *event.LedgerOffsets
 	dirs    event.ColdDirs
-	// secret is the chunk's deterministic routing secret (event.ColdIndexSecret),
-	// handed to WriteColdIndex at finalize.
+	// secret is the chunk's deterministic secret (event.ColdIndexSecret): every
+	// term goes into the mirror under its key under it, and WriteColdIndex
+	// records it at finalize.
 	secret  [stores.SecretLen]byte
+	terms   event.Terms // one event's terms, reused
 	metrics coldMetrics
 	// failed latches any write error. A failed write can leave the mirror
 	// and the pack ahead of offsets (offsets is the per-ledger commit point,
@@ -148,10 +150,10 @@ func (e *eventsCold) ingestSeq(seq uint32, closedAt int64, txParts []sdkingest.L
 		return 0, fmt.Errorf("chunk %s would overflow uint32 event-id space at ledger %d", e.chunkID, seq)
 	}
 
-	// Per payload: derive term keys from the raw ContractEvent XDR and AddTo the
+	// Per payload: derive terms from the raw ContractEvent XDR and AddTo the
 	// in-memory mirror under the chunk-relative event ID (term_index stage), then
 	// append the payload to events.pack (write stage). Both reads of the borrowed
-	// ContractEventBytes are synchronous (TermsForBytes does not retain them;
+	// ContractEventBytes are synchronous (AppendEvent copies the terms out;
 	// Append marshals into a scratch buffer copied synchronously), so the borrow
 	// is safe. On any error here offsets is not advanced below — but the mirror and
 	// pack may already be ahead of offsets, which is why write latches `failed`
@@ -165,13 +167,13 @@ func (e *eventsCold) ingestSeq(seq uint32, closedAt int64, txParts []sdkingest.L
 	var termDur, writeDur time.Duration
 	for i := range payloads {
 		tstart := time.Now()
-		keys, terr := event.TermsForBytes(payloads[i].ContractEventBytes)
-		if terr != nil {
-			return 0, fmt.Errorf("TermsForBytes seq %d eventIdx %d: %w", seq, i, terr)
+		e.terms.Reset()
+		if terr := e.terms.AppendEvent(payloads[i].ContractEventBytes); terr != nil {
+			return 0, fmt.Errorf("derive terms seq %d eventIdx %d: %w", seq, i, terr)
 		}
 		eventID := startID + uint32(i)
-		for _, k := range keys {
-			e.mirror.AddTo(k, eventID)
+		for j := range e.terms.Len() {
+			e.mirror.AddTo(e.terms.Key(j, e.secret), eventID)
 		}
 		termDur += time.Since(tstart)
 		wstart := time.Now()

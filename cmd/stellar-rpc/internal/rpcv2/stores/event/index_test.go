@@ -12,9 +12,13 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
+func testKey(field Field, value string) TermKey {
+	return NewTerm(field, []byte(value)).Key(testIndexSecret)
+}
+
 func TestBitmaps_AddToAndLookupViaKey(t *testing.T) {
 	s := NewBitmaps()
-	key := ComputeTermKey([]byte("contract-abc"), FieldContractID)
+	key := testKey(FieldContractID, "contract-abc")
 
 	s.AddTo(key, 0)
 
@@ -25,9 +29,9 @@ func TestBitmaps_AddToAndLookupViaKey(t *testing.T) {
 
 func TestBitmaps_MultipleFields(t *testing.T) {
 	s := NewBitmaps()
-	k0 := ComputeTermKey([]byte("same-value"), FieldTopic0)
-	k1 := ComputeTermKey([]byte("same-value"), FieldTopic1)
-	k2 := ComputeTermKey([]byte("same-value"), FieldTopic2)
+	k0 := testKey(FieldTopic0, "same-value")
+	k1 := testKey(FieldTopic1, "same-value")
+	k2 := testKey(FieldTopic2, "same-value")
 
 	s.AddTo(k0, 0)
 	s.AddTo(k1, 1)
@@ -48,7 +52,7 @@ func TestBitmaps_MultipleFields(t *testing.T) {
 
 func TestBitmaps_BatchAddToViaKey(t *testing.T) {
 	s := NewBitmaps()
-	key := ComputeTermKey([]byte("transfer"), FieldTopic0)
+	key := testKey(FieldTopic0, "transfer")
 
 	s.AddTo(key, 0, 1, 2, 3, 4)
 
@@ -61,8 +65,8 @@ func TestBitmaps_BatchAddToViaKey(t *testing.T) {
 
 func TestBitmaps_RangeYieldsAllTerms(t *testing.T) {
 	s := NewBitmaps()
-	s.AddTo(ComputeTermKey([]byte("a"), FieldTopic0), 0)
-	s.AddTo(ComputeTermKey([]byte("b"), FieldTopic1), 1, 2)
+	s.AddTo(testKey(FieldTopic0, "a"), 0)
+	s.AddTo(testKey(FieldTopic1, "b"), 1, 2)
 
 	var count int
 	for _, bm := range s {
@@ -72,11 +76,14 @@ func TestBitmaps_RangeYieldsAllTerms(t *testing.T) {
 	assert.Equal(t, 2, count)
 }
 
-func TestComputeTermKey_Deterministic(t *testing.T) {
-	value := []byte("test-value")
-	key1 := ComputeTermKey(value, FieldContractID)
-	key2 := ComputeTermKey(value, FieldContractID)
-	assert.Equal(t, key1, key2)
+func TestTermKey_DependsOnTheSecret(t *testing.T) {
+	term := NewTerm(FieldContractID, []byte("test-value"))
+	key := term.Key(testIndexSecret)
+	assert.Equal(t, key, term.Key(testIndexSecret))
+
+	other := testIndexSecret
+	other[0] ^= 1
+	assert.NotEqual(t, key, term.Key(other))
 }
 
 // TestTopicField_MapsAllPositionsAndPanicsOnOutOfRange locks two
@@ -96,58 +103,53 @@ func TestTopicField_MapsAllPositionsAndPanicsOnOutOfRange(t *testing.T) {
 	assert.Panics(t, func() { topicField(-1) })
 }
 
-func TestComputeTermKey_DifferentFieldsDifferentKeys(t *testing.T) {
-	value := []byte("same-value")
+func TestTermKey_DifferentFieldsDifferentKeys(t *testing.T) {
 	fields := []Field{FieldContractID, FieldTopic0, FieldTopic1, FieldTopic2, FieldTopic3}
 
 	keys := make(map[TermKey]Field)
 	for _, f := range fields {
-		key := ComputeTermKey(value, f)
+		key := testKey(f, "same-value")
 		existing, collision := keys[key]
 		require.False(t, collision, "field %d collides with field %d", f, existing)
 		keys[key] = f
 	}
 }
 
-func TestComputeTermKey_DifferentValuesDifferentKeys(t *testing.T) {
-	key1 := ComputeTermKey([]byte("value-a"), FieldTopic0)
-	key2 := ComputeTermKey([]byte("value-b"), FieldTopic0)
-	assert.NotEqual(t, key1, key2)
+func TestTermKey_DifferentValuesDifferentKeys(t *testing.T) {
+	assert.NotEqual(t, testKey(FieldTopic0, "value-a"), testKey(FieldTopic0, "value-b"))
 }
 
-func TestComputeTermKey_EmptyValue(t *testing.T) {
-	key1 := ComputeTermKey([]byte{}, FieldTopic0)
-	key2 := ComputeTermKey([]byte{}, FieldTopic1)
+func TestTermKey_EmptyValue(t *testing.T) {
+	key1 := testKey(FieldTopic0, "")
+	key2 := testKey(FieldTopic1, "")
 	assert.NotEqual(t, key1, key2)
-	assert.Equal(t, key1, ComputeTermKey([]byte{}, FieldTopic0))
+	assert.Equal(t, key1, testKey(FieldTopic0, ""))
 }
 
-func TestComputeTermKey_LargeValue(t *testing.T) {
+func TestTermKey_LargeValue(t *testing.T) {
 	value := make([]byte, 256)
 	for i := range value {
 		value[i] = byte(i)
 	}
-	key1 := ComputeTermKey(value, FieldTopic0)
-	key2 := ComputeTermKey(value, FieldTopic0)
-	assert.Equal(t, key1, key2)
+	key := NewTerm(FieldTopic0, value).Key(testIndexSecret)
+	assert.Equal(t, key, NewTerm(FieldTopic0, value).Key(testIndexSecret))
 }
 
-func TestComputeTermKey_VeryLargeValue(t *testing.T) {
+// TestTermKey_VeryLargeValue pins that a byte far past the first 16 still changes the key.
+func TestTermKey_VeryLargeValue(t *testing.T) {
 	value := make([]byte, 2048)
 	for i := range value {
 		value[i] = byte(i)
 	}
-	key1 := ComputeTermKey(value, FieldTopic0)
-	key2 := ComputeTermKey(value, FieldTopic0)
-	assert.Equal(t, key1, key2)
+	key1 := NewTerm(FieldTopic0, value).Key(testIndexSecret)
+	assert.Equal(t, key1, NewTerm(FieldTopic0, value).Key(testIndexSecret))
 
 	value[1000] ^= 0xff
-	key3 := ComputeTermKey(value, FieldTopic0)
-	assert.NotEqual(t, key1, key3)
+	assert.NotEqual(t, key1, NewTerm(FieldTopic0, value).Key(testIndexSecret))
 }
 
-func TestComputeTermKey_Is16Bytes(t *testing.T) {
-	assert.Len(t, ComputeTermKey([]byte("anything"), FieldContractID), 16)
+func TestTermKey_Is16Bytes(t *testing.T) {
+	assert.Len(t, testKey(FieldContractID, "anything"), 16)
 }
 
 // marshaledEvent returns ev's raw ContractEvent XDR — the form a Payload
@@ -190,17 +192,17 @@ func TestTermsForBytes_ContractIDAndTopicTerms(t *testing.T) {
 	cid[0], cid[1] = 0xab, 0xcd
 	ev := symTopicEvent(&cid, "transfer")
 
-	keys, err := TermsForBytes(marshaledEvent(t, ev))
+	terms, err := TermsForBytes(marshaledEvent(t, ev))
 	require.NoError(t, err)
 
 	topicBytes, err := ev.Body.V0.Topics[0].MarshalBinary()
 	require.NoError(t, err)
-	assert.Equal(t, []TermKey{
-		EventTypeTermKey(xdr.ContractEventTypeContract),
-		ComputeTermKey(cid[:], FieldContractID),
-		TopicCountTermKey(1),
-		ComputeTermKey(topicBytes, FieldTopic0),
-	}, keys)
+	assert.Equal(t, []Term{
+		EventTypeTerm(xdr.ContractEventTypeContract),
+		NewTerm(FieldContractID, cid[:]),
+		TopicCountTerm(1),
+		NewTerm(FieldTopic0, topicBytes),
+	}, terms)
 }
 
 // TestTermsForBytes_NoContractIDOnlyTopicTerms exercises the nil-contract-ID
@@ -208,34 +210,34 @@ func TestTermsForBytes_ContractIDAndTopicTerms(t *testing.T) {
 func TestTermsForBytes_NoContractIDOnlyTopicTerms(t *testing.T) {
 	ev := symTopicEvent(nil, "only-topic")
 
-	keys, err := TermsForBytes(marshaledEvent(t, ev))
+	terms, err := TermsForBytes(marshaledEvent(t, ev))
 	require.NoError(t, err)
 
 	topicBytes, err := ev.Body.V0.Topics[0].MarshalBinary()
 	require.NoError(t, err)
-	assert.Equal(t, []TermKey{
-		EventTypeTermKey(xdr.ContractEventTypeContract),
-		TopicCountTermKey(1),
-		ComputeTermKey(topicBytes, FieldTopic0),
-	}, keys)
+	assert.Equal(t, []Term{
+		EventTypeTerm(xdr.ContractEventTypeContract),
+		TopicCountTerm(1),
+		NewTerm(FieldTopic0, topicBytes),
+	}, terms)
 }
 
 // TestTermsForBytes_SameTopicValueDistinctFields asserts that the SAME value
-// in different topic positions produces DISTINCT term keys — the field byte
+// in different topic positions produces DISTINCT terms: the field byte
 // must separate them, or a topic1 filter would match topic0 occurrences.
 func TestTermsForBytes_SameTopicValueDistinctFields(t *testing.T) {
 	ev := symTopicEvent(nil, "same", "same")
 
-	keys, err := TermsForBytes(marshaledEvent(t, ev))
+	terms, err := TermsForBytes(marshaledEvent(t, ev))
 	require.NoError(t, err)
-	require.Len(t, keys, 4) // type, topic count, topic0, topic1
-	assert.NotEqual(t, keys[2], keys[3],
-		"same value in different topic positions must produce different term keys")
+	require.Len(t, terms, 4) // type, topic count, topic0, topic1
+	assert.NotEqual(t, terms[2].Key(testIndexSecret), terms[3].Key(testIndexSecret),
+		"same value in different topic positions must produce different keys")
 
 	topicBytes, err := ev.Body.V0.Topics[0].MarshalBinary()
 	require.NoError(t, err)
-	assert.Equal(t, ComputeTermKey(topicBytes, FieldTopic0), keys[2])
-	assert.Equal(t, ComputeTermKey(topicBytes, FieldTopic1), keys[3])
+	assert.Equal(t, NewTerm(FieldTopic0, topicBytes), terms[2])
+	assert.Equal(t, NewTerm(FieldTopic1, topicBytes), terms[3])
 }
 
 // TestTermsForBytes_TopicCountClippedToMax asserts topics past
@@ -248,9 +250,9 @@ func TestTermsForBytes_TopicCountClippedToMax(t *testing.T) {
 	cid[0] = 0xfe
 	ev := symTopicEvent(&cid, "t", "t", "t", "t", "t", "t")
 
-	keys, err := TermsForBytes(marshaledEvent(t, ev))
+	terms, err := TermsForBytes(marshaledEvent(t, ev))
 	require.NoError(t, err)
-	assert.Len(t, keys, 3+protocol.MaxTopicCount,
+	assert.Len(t, terms, maxTermsPerEvent,
 		"type + contract-ID + topic-count terms, then MaxTopicCount topic terms (extras dropped)")
 }
 
@@ -262,14 +264,14 @@ func TestTermsForBytes_EventTypeTerm(t *testing.T) {
 	systemEv := symTopicEvent(nil, "transfer")
 	systemEv.Type = xdr.ContractEventTypeSystem
 
-	contractKeys, err := TermsForBytes(marshaledEvent(t, contractEv))
+	contractTerms, err := TermsForBytes(marshaledEvent(t, contractEv))
 	require.NoError(t, err)
-	systemKeys, err := TermsForBytes(marshaledEvent(t, systemEv))
+	systemTerms, err := TermsForBytes(marshaledEvent(t, systemEv))
 	require.NoError(t, err)
 
-	assert.Equal(t, EventTypeTermKey(xdr.ContractEventTypeContract), contractKeys[0])
-	assert.Equal(t, EventTypeTermKey(xdr.ContractEventTypeSystem), systemKeys[0])
-	assert.NotEqual(t, contractKeys[0], systemKeys[0])
+	assert.Equal(t, EventTypeTerm(xdr.ContractEventTypeContract), contractTerms[0])
+	assert.Equal(t, EventTypeTerm(xdr.ContractEventTypeSystem), systemTerms[0])
+	assert.NotEqual(t, contractTerms[0], systemTerms[0])
 }
 
 // TestTermsForBytes_TopicCountTermBuckets covers the bucket every event
@@ -278,47 +280,47 @@ func TestTermsForBytes_EventTypeTerm(t *testing.T) {
 // from n upwards cannot miss an event that carries more topics than a filter
 // can name.
 func TestTermsForBytes_TopicCountTermBuckets(t *testing.T) {
-	topicCountTerm := func(t *testing.T, topicCount int) TermKey {
+	topicCountTerm := func(t *testing.T, topicCount int) Term {
 		t.Helper()
 		topics := make([]string, topicCount)
 		for i := range topics {
 			topics[i] = fmt.Sprintf("t%d", i)
 		}
-		keys, err := TermsForBytes(marshaledEvent(t, symTopicEvent(nil, topics...)))
+		terms, err := TermsForBytes(marshaledEvent(t, symTopicEvent(nil, topics...)))
 		require.NoError(t, err)
-		return keys[1] // no contract ID, so the count term follows the type term
+		return terms[1] // no contract ID, so the count term follows the type term
 	}
 
 	for n := range protocol.MaxTopicCount + 1 {
-		assert.Equal(t, TopicCountTermKey(n), topicCountTerm(t, n),
+		assert.Equal(t, TopicCountTerm(n), topicCountTerm(t, n),
 			"an event with %d topics belongs in its own bucket", n)
 	}
 
 	overflow := topicCountTerm(t, protocol.MaxTopicCount+1)
 	assert.Equal(t, overflow, topicCountTerm(t, protocol.MaxTopicCount+2))
-	assert.NotEqual(t, TopicCountTermKey(protocol.MaxTopicCount), overflow,
+	assert.NotEqual(t, TopicCountTerm(protocol.MaxTopicCount), overflow,
 		"the overflow bucket must be distinct, so an exact top count is not a superset")
 
-	distinct := map[TermKey]struct{}{}
+	distinct := map[Term]struct{}{}
 	for n := range protocol.MaxTopicCount + 2 {
-		distinct[TopicCountTermKey(n)] = struct{}{}
+		distinct[TopicCountTerm(n)] = struct{}{}
 	}
 	assert.Len(t, distinct, protocol.MaxTopicCount+2,
 		"every bucket up to and including the overflow one must be its own term")
 }
 
-// TestTopicCountTermKeysAtLeast pins the union an "at least n" filter reads:
+// TestTopicCountTermsAtLeast pins the union an "at least n" filter reads:
 // the buckets from n up to and including the overflow one.
-func TestTopicCountTermKeysAtLeast(t *testing.T) {
-	assert.Equal(t, []TermKey{
-		TopicCountTermKey(protocol.MaxTopicCount),
-		TopicCountTermKey(protocol.MaxTopicCount + 1),
-	}, TopicCountTermKeysAtLeast(protocol.MaxTopicCount))
+func TestTopicCountTermsAtLeast(t *testing.T) {
+	assert.Equal(t, []Term{
+		TopicCountTerm(protocol.MaxTopicCount),
+		TopicCountTerm(protocol.MaxTopicCount + 1),
+	}, TopicCountTermsAtLeast(protocol.MaxTopicCount))
 
-	assert.Len(t, TopicCountTermKeysAtLeast(0), protocol.MaxTopicCount+2)
+	assert.Len(t, TopicCountTermsAtLeast(0), protocol.MaxTopicCount+2)
 	assert.Equal(t,
-		[]TermKey{TopicCountTermKey(protocol.MaxTopicCount + 1)},
-		TopicCountTermKeysAtLeast(99),
+		[]Term{TopicCountTerm(protocol.MaxTopicCount + 1)},
+		TopicCountTermsAtLeast(99),
 		"a count no filter can name needs only the overflow bucket")
 }
 

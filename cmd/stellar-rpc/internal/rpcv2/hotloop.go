@@ -49,7 +49,7 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 
 	if state == geometry.HotReady {
 		// OpenReadyWrite is the single ready-open enforcement site.
-		return hotchunk.OpenReadyWrite(state, dir, chunkID, logger)
+		return hotchunk.OpenReadyWrite(state, dir, chunkID, cat.Secret(), logger)
 	}
 
 	// The create bracket: BeginHotCreate wipes + marks transient; FinishHotCreate
@@ -57,7 +57,7 @@ func openHotDBForChunk(cat *catalog.Catalog, chunkID chunk.ID, logger *supportlo
 	if beginErr := cat.BeginHotCreate(chunkID); beginErr != nil {
 		return nil, beginErr
 	}
-	db, openErr := hotchunk.Open(dir, chunkID, logger)
+	db, openErr := hotchunk.Open(dir, chunkID, cat.Secret(), logger)
 	if openErr != nil {
 		return nil, fmt.Errorf("create hot DB chunk %s: %w", chunkID, openErr)
 	}
