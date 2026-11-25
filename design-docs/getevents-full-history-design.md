@@ -189,8 +189,10 @@ The pack and the index are **separate storage roots**. They are read
 completely differently — the pack is streamed sequentially and holds
 almost all of the bytes, while `index.pack` is probed at random — so a
 deployment can put the index on storage with the IOPS to serve those
-probes without moving the pack's terabytes with it. The two roots
-default to siblings:
+probes without moving the pack's terabytes with it. The index root also
+takes the build's scratch: the runs an index build spills
+(`{chunk}-index.runs/`) are written there and merged once at finalize.
+The two roots default to siblings:
 
 ```
 events/
@@ -208,6 +210,7 @@ events/
     │   ├── 00000000-index.pack
     │   ├── 00000001-index.hash
     │   ├── 00000001-index.pack
+    │   ├── 00000002-index.runs/   (while chunk 2's index is being built)
     │   ...
     ├── 00001/
     │   ...
@@ -237,7 +240,7 @@ Since an MPHF maps any input to a valid slot, even keys not in the build set, a 
 
 A 4-byte fingerprint can still collide, so query results are post-filtered after event fetch to verify all terms match (see Section 11.2, step 5).
 
-**Records.** `index.pack` closes a record before an entry would take it past two of the largest slab entries, 16,416 bytes, so a dense split term's slabs pair up; there is no entry limit. A record adds 3.3 to 3.5 bytes of index (measured), so Open's first read, max(64 KiB, 4 × file size / 16,416 bytes) rounded up to 4 KiB, covers the tail in one read when records are mostly full, as in real chunks. Two dense slab entries never share a record, so a pack made mostly of them can take a second read.
+**Records.** `index.pack` closes a record before an entry would take it past two of the largest slab entries, 16,480 bytes, so a dense split term's slabs pair up; there is no entry limit. A record adds 3.3 to 3.5 bytes of index (measured), so Open's first read, max(64 KiB, 4 × file size / 16,480 bytes) rounded up to 4 KiB, covers the tail in one read when records are mostly full, as in real chunks. Two dense slab entries never share a record, so a pack made mostly of them can take a second read.
 
 **Split terms.** Popular terms are large: on pubnet chunk 6410 the fifteen most popular are 250 KiB to 1.08 MiB each, so reading them whole costs about 9 MB of index for a page that needs one to four slabs of them. A term whose serialized bitmap is over 64 KiB is therefore stored as C entries, one per slab of the chunk, where a slab is 65,536 event IDs (one roaring container) and C is the number of slabs the chunk's IDs span. Slab entry x holds the term's IDs in slab x, with no fingerprint, and is zero-length where the term has none. Whether a term splits depends on its bitmap alone, so the freeze and the backfill write identical bytes. Splitting costs about 6 bytes per slab entry, 56 KB on pubnet chunk 6465.
 
@@ -248,15 +251,16 @@ offset  size  field
 0       1     stamp version (0x01)
 1       2     term schema version
 3       8     indexed-field bitmask
-11      4     slab count C
-15      8×D   one row per split term, ascending by slot: slot u32 ‖ fingerprint[4]
+11      16    secret the terms are keyed with
+27      4     slab count C
+31      8×D   one row per split term, ascending by slot: slot u32 ‖ fingerprint[4]
 ```
 
-At open, the entry count must equal the MPHF's key count plus D × (C − 1), and the rows must be strictly ascending, each slot below the key count, since the lookup binary-searches them.
+At open, the secret must be the one `index.hash` stores. The entry count must equal the MPHF's key count plus D × (C − 1), and the rows must be strictly ascending, each slot below the key count, since the lookup binary-searches them.
 
 **Term Lookup:**
 
-1. Key the term with the chunk secret `index.hash` stores, and query the MPHF with the key to obtain the slot s.
+1. Key the term with the chunk secret `index.hash` stores, and query the MPHF with the key to obtain the slot s. A reader refuses an `index.hash` that records another chunk.
 2. Binary-search the rows for r, the number of split slots below s. The term's entry, or its slab-0 entry, is at position s + r × (C − 1).
 3. If s is not split, read that entry. If its fingerprint matches streamhash's fingerprint of the key (`streamhash.Fingerprint`), deserialize the bitmap; otherwise the term is not present.
 4. If s is split, compare the fingerprint with the row's; on a mismatch the term is not present and nothing is read. Otherwise read each slab x the query window reaches, at the position plus x. A zero-length slab entry is not decoded, and a non-empty one must hold only IDs of slab x, which catches a wrong slab.
@@ -273,7 +277,7 @@ The resulting bitmap contains the event IDs matching the term, over the range th
 
 3. Compress into zstd blocks and write cold events.pack with offset index and ledger offset array embedded.
 
-4. Build MPHF from term keys, serialize bitmaps with fingerprint prefixes into index.pack, and write index.hash.
+4. Build the index the way backfill does (§13): spill one slab at a time, then merge the runs into index.hash and index.pack.
 
 5. Mark segment as frozen in DB; queries now served from cold files.
 
@@ -394,16 +398,16 @@ When populating cold segments from historical ledger data, the system writes col
 For each segment (10,000 ledgers):
 1. For each ledger:
    a. Append events to events.pack (record compression is handled internally by the packfile library).
-   b. Update in-memory bitmaps.
+   b. Add the event's terms to the in-memory slab; when the next slab starts, write the slab's terms as one sorted run under `{chunk}-index.runs/` beside the index files, in the background while the next slab fills.
    c. Update in-memory ledger offset array.
 
 2. At segment completion (10,000 ledgers):
    a. Finalize events.pack (flush remaining data, embed offset index and ledger offset array).
-   b. Build MPHF and serialize bitmaps into index.pack, write index.hash.
+   b. Merge the runs once, into a terms file beside them holding each term's index.pack entries; the merge counts the distinct terms. Build the MPHF over the file's terms in key order (index.hash), then write each term's entries at its slot into index.pack, a term over 64 KiB as one entry per slab; then remove the runs directory.
    c. Mark segment as available in DB.
 ```
 
-The in-memory bitmaps and ledger offset array must be retained for the entire segment since they are needed to generate `index.hash`, `index.pack`, and the packfile metadata in step 2.
+Only the ledger offset array is retained for the whole segment (the packfile metadata needs it). The index build holds at most two slabs of postings in memory, the one filling and the one being written; everything else waits on disk in the runs until step 2 merges them. The merge keeps about 12 KB of read buffers per run: about 50 MB for a sac-9000 chunk's 4,120 runs, about 350 MB at 29,600.
 
 If a backfill worker fails mid-segment, the incomplete segment is discarded and restarted. Segments are independent so backfill can be parallelized across multiple workers. The cold segments produced are identical in format to those produced by freeze.
 

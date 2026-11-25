@@ -1,7 +1,7 @@
 package event
 
 // cold_reader.go is the read side of a frozen Chunk. It opens the
-// three cold artifacts produced by ColdWriter + WriteColdIndex
+// three cold artifacts produced by ColdWriter + ColdIndexBuilder
 // (events.pack, index.pack, index.hash), decodes the embedded
 // LedgerOffsets app-data block, and serves the Reader
 // interface against them.
@@ -162,7 +162,7 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 	go func() {
 		// openMPHF already wraps its errors with the path; pass them
 		// through so the path isn't printed twice.
-		m, err := openMPHF(indexHashPath)
+		m, err := openMPHF(indexHashPath, chunkID)
 		ch <- mphfResult{idx: m, err: err}
 	}()
 	c.waitMPHF = sync.OnceValues(func() (*mphf, error) {
@@ -195,7 +195,7 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 			return indexLayout{}, fmt.Errorf("%w: %s: built without a record checksum (stale build)",
 				stores.ErrCorrupt, indexPackPath)
 		}
-		layout, err := loadIndexLayout(indexPackPath, c.index)
+		layout, err := loadIndexLayout(indexPackPath, c.index, idx.secret)
 		if err != nil {
 			return indexLayout{}, err
 		}
@@ -214,10 +214,7 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 			}
 			return layout, nil
 		}
-		// Non-empty index: bind the pair to this chunk before serving from
-		// it — index.pack/index.hash carry no chunk ID of their own, so a
-		// mispaired index would silently return an incomplete subset of
-		// matches. Two cheap checks beyond the shared format, checksum, and
+		// Non-empty index: two cheap checks beyond the shared format, checksum, and
 		// stamp gates above: the layout addresses exactly index.pack's
 		// entries from index.hash's keys (halves of one build), and
 		// non-empty index ⇒ non-empty events.pack (converse of the
@@ -407,7 +404,7 @@ func (c *ColdReader) LookupTerms(
 	whole := make([]bool, len(terms))
 	reads := make([]entryRead, 0, len(terms))
 	covered := IDRange{End: math.MaxUint32}
-	for i, hit := range mphf.LookupBatch(keysUnder(mphf.secret, terms)) {
+	for i, hit := range mphf.Lookup(keysUnder(mphf.secret, terms)) {
 		whole[i] = true
 		if hit.err != nil {
 			if errors.Is(hit.err, ErrKeyNotFound) {

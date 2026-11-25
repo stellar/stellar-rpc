@@ -168,6 +168,7 @@ require (
 )
 
 // TODO: drop this replace once a roaring release includes
-// RoaringBitmap/roaring#566 and RoaringBitmap/roaring#572. It pins the
-// head of #572, which sits on #566 and on roaring's master.
-replace github.com/RoaringBitmap/roaring/v2 => github.com/tamirms/roaring/v2 v2.0.0-20261019091757-d5dd08cc80e5
+// RoaringBitmap/roaring#566, RoaringBitmap/roaring#572 and
+// RoaringBitmap/roaring#599. It pins #599's change on the head of #572,
+// which sits on #566 and on roaring's master.
+replace github.com/RoaringBitmap/roaring/v2 => github.com/tamirms/roaring/v2 v2.0.0-20261116094626-ddbf13e4e7b1
