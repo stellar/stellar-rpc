@@ -135,7 +135,7 @@ func TestProcessChunk_ProducesAllArtifactsAndFreezes(t *testing.T) {
 	require.Empty(t, entries, "zero-tx chunk yields an empty sorted .bin")
 
 	// The pack is a valid cold ledger pack covering the whole chunk.
-	cr, err := ledger.OpenColdReader(layout.LedgerPackPath(chunkID))
+	cr, err := ledger.OpenColdReader(layout.LedgerPackPath(chunkID), nil)
 	require.NoError(t, err)
 	defer func() { _ = cr.Close() }()
 	last, err := cr.LastSeq()
@@ -224,7 +224,7 @@ func TestProcessChunk_RematerializesAfterFreezingCrash(t *testing.T) {
 		require.Equal(t, geometry.StateFrozen, state)
 	}
 	// The partial garbage was overwritten with a real pack.
-	cr, err := ledger.OpenColdReader(layout.LedgerPackPath(chunkID))
+	cr, err := ledger.OpenColdReader(layout.LedgerPackPath(chunkID), nil)
 	require.NoError(t, err)
 	defer func() { _ = cr.Close() }()
 	last, err := cr.LastSeq()
@@ -317,7 +317,7 @@ func TestBackfillSource_PrefersFrozenPackWhenLFSNotRequested(t *testing.T) {
 	defer func() { require.NoError(t, closeSrc()) }()
 	// It is a pack stream (re-derivation without download); the bulk backend was
 	// not consulted.
-	require.IsType(t, ledger.NewPackStream(""), src)
+	require.IsType(t, ledger.NewPackStream("", nil), src)
 	require.Equal(t, int32(0), bulk.rawCalls.Load())
 }
 

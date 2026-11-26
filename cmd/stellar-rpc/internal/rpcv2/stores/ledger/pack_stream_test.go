@@ -29,7 +29,7 @@ func TestNewPackStream_RoundTrip(t *testing.T) {
 	const n = 5
 	path, raws := writeFixturePack(t, firstSeq, n)
 
-	got := collectStream(t, NewPackStream(path), ledgerbackend.BoundedRange(firstSeq, firstSeq+n-1))
+	got := collectStream(t, NewPackStream(path, nil), ledgerbackend.BoundedRange(firstSeq, firstSeq+n-1))
 	require.Equal(t, raws, got)
 }
 
@@ -40,7 +40,7 @@ func TestNewPackStream_UnboundedStreamsToLastSeq(t *testing.T) {
 	const n = 4
 	path, raws := writeFixturePack(t, firstSeq, n)
 
-	got := collectStream(t, NewPackStream(path), ledgerbackend.UnboundedRange(firstSeq))
+	got := collectStream(t, NewPackStream(path, nil), ledgerbackend.UnboundedRange(firstSeq))
 	require.Equal(t, raws, got)
 }
 
@@ -56,7 +56,7 @@ func TestNewPackStream_ObservesCtxCancellation(t *testing.T) {
 	defer cancel()
 	yielded := 0
 	var gotErr error
-	for _, serr := range NewPackStream(path).RawLedgers(ctx, ledgerbackend.BoundedRange(firstSeq, firstSeq+2)) {
+	for _, serr := range NewPackStream(path, nil).RawLedgers(ctx, ledgerbackend.BoundedRange(firstSeq, firstSeq+2)) {
 		if serr != nil {
 			gotErr = serr
 			break
@@ -77,7 +77,7 @@ func TestNewPackStream_OpenErrorSurfacesOnFirstYield(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist.pack")
 
 	var gotErr error
-	for _, serr := range NewPackStream(missing).RawLedgers(context.Background(), ledgerbackend.BoundedRange(1, 3)) {
+	for _, serr := range NewPackStream(missing, nil).RawLedgers(context.Background(), ledgerbackend.BoundedRange(1, 3)) {
 		gotErr = serr
 		break
 	}

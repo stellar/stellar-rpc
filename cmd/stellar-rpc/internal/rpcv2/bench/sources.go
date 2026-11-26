@@ -173,7 +173,7 @@ func (p packBackend) RawLedgers(
 				return
 			}
 			sub := ledgerbackend.BoundedRange(max(rng.From(), c.FirstLedger()), min(rng.To(), c.LastLedger()))
-			for raw, err := range ledger.NewPackStream(path).RawLedgers(ctx, sub) {
+			for raw, err := range ledger.NewPackStream(path, nil).RawLedgers(ctx, sub) {
 				if !yield(raw, err) {
 					return
 				}

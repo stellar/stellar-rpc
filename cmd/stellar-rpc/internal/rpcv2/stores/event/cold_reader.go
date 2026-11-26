@@ -53,6 +53,8 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2"
 
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/packfile"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
@@ -115,6 +117,7 @@ type ColdReaderOptions struct {
 	// set this explicitly to a value > 1. Negative values are
 	// rejected by the packfile reader at first use.
 	Concurrency int
+	Logger      *supportlog.Entry
 }
 
 // OpenColdReader prepares a ColdReader for chunkID over dirs.
@@ -145,10 +148,12 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 		events: stores.OpenPack(eventsPath, packfile.ReaderOptions{
 			RecordDecoder: eventsPackDecoder,
 			Concurrency:   opts.Concurrency,
+			Logger:        opts.Logger,
 		}),
 		index: stores.OpenPack(indexPackPath, packfile.ReaderOptions{
 			Concurrency: opts.Concurrency,
 			FirstRead:   indexPackFirstRead,
+			Logger:      opts.Logger,
 		}),
 	}
 
@@ -160,6 +165,12 @@ func OpenColdReader(chunkID chunk.ID, dirs ColdDirs, opts ColdReaderOptions) (*C
 	}
 	ch := make(chan mphfResult, 1)
 	go func() {
+		// A panic in the load fails the lookups that wait on it, not the process.
+		defer func() {
+			if p := recover(); p != nil {
+				ch <- mphfResult{err: packfile.NewPanicError(opts.Logger, "events: load index.hash", p)}
+			}
+		}()
 		// openMPHF already wraps its errors with the path; pass them
 		// through so the path isn't printed twice.
 		m, err := openMPHF(indexHashPath, chunkID)

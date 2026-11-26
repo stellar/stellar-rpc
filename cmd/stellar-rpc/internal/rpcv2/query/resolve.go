@@ -132,7 +132,7 @@ func (a *ReadView) resolveLedgers(c chunk.ID) (LedgerReader, func() error, error
 	}
 	switch t {
 	case tierCold:
-		cr, err := ledger.OpenColdReader(a.catalog.Layout().LedgerPackPath(c))
+		cr, err := ledger.OpenColdReader(a.catalog.Layout().LedgerPackPath(c), a.catalog.Logger())
 		if err != nil {
 			return nil, nil, err
 		}
@@ -162,7 +162,7 @@ func (a *ReadView) Events(c chunk.ID) (event.Reader, error) {
 	switch t {
 	case tierCold:
 		cr, err := event.OpenColdReader(c, a.catalog.Layout().EventsColdDirs(c),
-			event.ColdReaderOptions{Concurrency: coldEventReadConcurrency})
+			event.ColdReaderOptions{Concurrency: coldEventReadConcurrency, Logger: a.catalog.Logger()})
 		if err != nil {
 			return nil, err
 		}

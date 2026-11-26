@@ -508,7 +508,7 @@ func TestLedgerColdWriter_Readback(t *testing.T) {
 	require.NoError(t, ing.write(seq, raw))
 	require.NoError(t, ing.finalize(context.Background()))
 
-	cr, err := ledger.OpenColdReader(packPath(coldDir, chunkID))
+	cr, err := ledger.OpenColdReader(packPath(coldDir, chunkID), nil)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
 	got, err := readLedgerRaw(cr, seq)
@@ -714,7 +714,7 @@ func TestColdChunk_Success(t *testing.T) {
 	// Ledger cold readback: tx hashes use random keypairs, so bytes can't be
 	// regenerated for comparison — assert the boundary ledger reads back and
 	// decodes to the right sequence.
-	lcr, err := ledger.OpenColdReader(packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID))
+	lcr, err := ledger.OpenColdReader(packPath(filepath.Join(coldDir, dataTypeLedgers), chunkID), nil)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, lcr.Close()) }()
 	gotFirst, err := readLedgerRaw(lcr, first)
@@ -894,7 +894,7 @@ func TestWriteColdChunk_RoundTrip(t *testing.T) {
 	))
 
 	path := packPath(filepath.Join(coldDir, "ledgers"), chunkID)
-	cr, err := ledger.OpenColdReader(path)
+	cr, err := ledger.OpenColdReader(path, nil)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cr.Close()) }()
 

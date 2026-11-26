@@ -55,7 +55,7 @@ func TestColdWriter_AppendRejectsGapAndKeepsCounter(t *testing.T) {
 	require.NoError(t, w.AppendLedger(101, []byte("b")))
 	require.NoError(t, w.Commit())
 
-	c, err := OpenColdReader(path)
+	c, err := OpenColdReader(path, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -136,7 +136,7 @@ func TestNewColdWriter_TruncatesPreexistingFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Less(t, final.Size(), preSize, "fresh pack must be smaller than the 64 KiB junk seed")
 
-	c, err := OpenColdReader(path)
+	c, err := OpenColdReader(path, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
