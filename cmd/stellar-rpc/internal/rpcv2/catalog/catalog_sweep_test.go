@@ -3,6 +3,7 @@ package catalog
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -55,7 +56,8 @@ func TestSweepChunkArtifacts(t *testing.T) {
 // beside the "freezing" key; the sweep removes it with the key.
 func TestSweepChunkArtifactsRemovesScratch(t *testing.T) {
 	cat, _ := testCatalog(t)
-	runs := cat.layout.ScratchPaths(4, geometry.KindEvents)[0]
+	_, scratch := cat.layout.ChunkPaths(4, geometry.KindEvents)
+	runs := scratch[0]
 	require.NoError(t, os.MkdirAll(runs, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(runs, "runs"), []byte("run"), 0o600))
 	require.NoError(t, cat.MarkChunkFreezing(4, geometry.KindEvents))
@@ -89,6 +91,7 @@ func TestSweepIndexKey(t *testing.T) {
 	cov, err := cat.MarkTxHashIndexFreezing(5, 5100, 5349)
 	require.NoError(t, err)
 	idxPath := cat.layout.TxHashIndexFilePath(cov)
+	require.True(t, strings.HasPrefix(idxPath, cat.layout.HotRoot()), "a window still filling lives with the hot tier")
 	writeArtifact(t, idxPath)
 	require.NoError(t, cat.CommitTxHashIndex(cov))
 

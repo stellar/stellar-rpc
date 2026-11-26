@@ -139,14 +139,18 @@ func processChunk(ctx context.Context, chunkID chunk.ID, artifacts catalog.Artif
 		return fmt.Errorf("cold ingest chunk %s %s: %w", chunkID, artifacts, rerr)
 	}
 
-	// one-write:barrier — fsync each file and its dirents before the keys flip.
-	// BarrierNewFile always fsyncs the grandparent, so a bucket dir this freeze
-	// created is made durable too.
+	// one-write:barrier — fsync each file and its dirents, and the removal of the
+	// build's scratch, before the keys flip. BarrierNewFile always fsyncs the
+	// grandparent, so a bucket dir this freeze created is made durable too.
 	for _, kind := range kinds {
-		for _, path := range layout.ArtifactPaths(chunkID, kind) {
+		files, scratch := layout.ChunkPaths(chunkID, kind)
+		for _, path := range files {
 			if berr := durable.BarrierNewFile(path); berr != nil {
 				return fmt.Errorf("fsync barrier %s: %w", path, berr)
 			}
+		}
+		if berr := durable.FsyncParentDirs(scratch); berr != nil {
+			return fmt.Errorf("fsync barrier %s scratch: %w", kind, berr)
 		}
 	}
 

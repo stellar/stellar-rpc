@@ -517,6 +517,7 @@ func TestE2E_DaemonLifecycle_FirstStartIngestFreezeLookupRestartPrune(t *testing
 	_, covOK, err := pruneCat.FrozenTxHashIndex(w0)
 	require.NoError(t, err)
 	assert.False(t, covOK, "chunk 0's window coverage is pruned ⇒ a chunk-0 hash read is not-found")
+	rpcv2test.RequireDiskMatchesCatalog(t, pruneCat)
 }
 
 // e2eReadCatalog opens a SEPARATE catalog handle on the daemon's data dir, with
@@ -528,7 +529,7 @@ func e2eReadCatalog(t *testing.T, dataDir string) (*catalog.Catalog, func()) {
 	paths := config.Config{Storage: config.StorageConfig{DefaultDataDir: dataDir}}.WithDefaults().ResolvePaths()
 	windows, err := geometry.NewTxHashIndexLayout(1) // matches chunksPerTxhashIndex = 1
 	require.NoError(t, err)
-	cat, err := catalog.Open(paths.Catalog, config.NewLayoutFromPaths(paths), windows, silentLogger())
+	cat, err := catalog.Open(paths.Catalog, config.NewLayoutFromPaths(paths).WithTxHashIndex(windows), silentLogger())
 	require.NoError(t, err)
 	return cat, func() { _ = cat.Close() }
 }

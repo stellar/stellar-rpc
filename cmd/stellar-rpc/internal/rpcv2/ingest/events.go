@@ -39,7 +39,7 @@ type eventsCold struct {
 
 // newEventsCold opens a per-chunk events cold writer over dirs —
 // the caller's geometry.Layout.EventsColdDirs(chunkID), so the write path is
-// Layout's single derivation of both roots. The writer opts into the batch tuning
+// Layout's single derivation of the roots. The writer opts into the batch tuning
 // (coldEncoderConcurrency/coldBytesPerSync): WriteColdChunk, the sole
 // production caller, is always a batch freeze/backfill.
 func newEventsCold(
@@ -62,7 +62,7 @@ func newEventsCold(
 	return &eventsCold{
 		chunkID: chunkID,
 		writer:  w,
-		index:   event.NewColdIndexBuilder(chunkID, dirs.Index, secret),
+		index:   event.NewColdIndexBuilder(chunkID, dirs, secret),
 		offsets: event.NewLedgerOffsets(chunkID.FirstLedger()),
 		metrics: newColdMetrics(sink, dataTypeEvents),
 	}, nil

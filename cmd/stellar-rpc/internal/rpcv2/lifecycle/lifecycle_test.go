@@ -232,6 +232,7 @@ func TestRunLifecycleTick_BoundaryFreezesRebuildsDiscards(t *testing.T) {
 	// Quiescence: re-running the tick produces no work. The fixture pins the
 	// frontier: chunk 0 durable, live chunk 1 empty ⇒ through = chunk 0's last ledger.
 	assertQuiescent(t, cfg, cat, chunk.ID(0).LastLedger())
+	rpcv2test.RequireDiskMatchesCatalog(t, cat)
 }
 
 // TestRunLifecycleTick_DiscardGatedOnIndexCoverage: a complete chunk whose cold
